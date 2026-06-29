@@ -186,6 +186,47 @@ Read more in our [documentation](https://mini-swe-agent.com/latest/):
 * [FAQ](https://mini-swe-agent.com/latest/faq/)
 * [Contribute!](https://mini-swe-agent.com/latest/contributing/)
 
+## CodePilot Lite 第二步 — 结构化工具层
+
+CodePilot Lite 第二步实现了一个独立的结构化工具层，提供四个核心工具：`list_files`、`read_file`、`search_code` 和 `run_shell`。
+当前阶段**不接入 LLM**，工具只通过 CLI 以结构化 JSON 暴露能力。
+
+### 工具概览
+
+| 工具 | 风险等级 | 默认权限 | 说明 |
+|------|----------|----------|------|
+| `list_files` | read_only | allow | 列出仓库目录树 |
+| `read_file` | read_only | allow | 读取文件片段并保留行号 |
+| `search_code` | read_only | allow | 在源码中搜索关键词 |
+| `run_shell` | shell_execution | ask | 在仓库根目录执行 shell 命令（高风险 fallback） |
+
+每个工具都返回统一的 `ToolResult`，包含 `success`、`output`、`output_summary`、`error` 和 `metadata` 字段。
+`metadata` 中始终携带 `risk`、`duration_ms`、工具特有参数以及 `truncated` 截断标记。
+
+### 使用示例
+
+```bash
+# 查看所有工具
+codepilot tools
+
+# 列表目录
+codepilot tool list_files '{"repo":".","path":".","max_depth":2}'
+
+# 读取文件片段
+codepilot tool read_file '{"repo":".","path":"src/codepilot/tools/base.py","start_line":1,"end_line":80}'
+
+# 搜索代码
+codepilot tool search_code '{"repo":".","query":"ToolResult","path":"src/codepilot"}'
+
+# 执行 shell 命令
+codepilot tool run_shell '{"repo":".","command":"python --version"}'
+```
+
+`tool` 子命令接收一个 JSON 字符串作为参数，输出为带缩进的 `ToolResult` JSON（indent=2），适合人工调试。
+其中 `run_shell` 是唯一高风险工具，默认标记为 `ask` 权限，30 秒超时。  
+`search_code` 在结果截断时会在 output 末尾追加 `... truncated after N results` 提示。  
+`list_files` 严格按 `max_depth` 控��返回层级深度，不会越界。
+
 ## Attribution
 
 If you found this work helpful, please consider citing the [SWE-agent paper](https://arxiv.org/abs/2405.15793) in your work:

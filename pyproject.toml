@@ -91,6 +91,7 @@ mini = "minisweagent.run.mini:app"
 mini-swe-agent = "minisweagent.run.mini:app"
 mini-extra = "minisweagent.run.utilities.mini_extra:main"
 mini-e= "minisweagent.run.utilities.mini_extra:main"
+codepilot = "codepilot.cli:app"
 
 [tool.setuptools]
 include-package-data = true
@@ -100,7 +101,7 @@ version = {attr = "minisweagent.__version__"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["minisweagent*"]
+include = ["minisweagent*", "codepilot*"]
 
 [tool.setuptools.package-data]
 minisweagent = ["config/**/*"]
