@@ -225,7 +225,45 @@ codepilot tool run_shell '{"repo":".","command":"python --version"}'
 `tool` 子命令接收一个 JSON 字符串作为参数，输出为带缩进的 `ToolResult` JSON（indent=2），适合人工调试。
 其中 `run_shell` 是唯一高风险工具，默认标记为 `ask` 权限，30 秒超时。  
 `search_code` 在结果截断时会在 output 末尾追加 `... truncated after N results` 提示。  
-`list_files` 严格按 `max_depth` 控��返回层级深度，不会越界。
+`list_files` 严格按 `max_depth` 控制返回层级深度，不会越界。
+
+### TraceLogger 使用说明
+
+第三步新增了结构化 trace 记录能力。默认 trace 文件会写到 `runs/<run_id>/trace.jsonl`，每一行都是一条 JSON 事件。
+
+```bash
+# 仅执行工具调用，不写 trace
+codepilot tool list_files '{"repo":".","path":".","max_depth":2}'
+
+# 写入 trace，默认输出到 runs/<run_id>/trace.jsonl
+codepilot tool list_files '{"repo":".","path":".","max_depth":2}' --trace
+
+# 指定 trace 根目录和 run_id
+codepilot tool list_files '{"repo":".","path":".","max_depth":2}' --trace --runs-dir runs --run-id run-test
+```
+
+`--trace` 开启后，命令标准输出仍然会先打印 `ToolResult` JSON，随后再打印 `Trace written to: <path>`。
+`--run-id` 可以复用同一个运行目录，`TraceLogger` 会在已有 `trace.jsonl` 的最大 `step` 后继续追加。
+`runs/` 目录默认会被忽略，避免把运行时 trace 文件提交到仓库。
+
+### ToolRouter 使用说明
+
+第四步新增了 `ToolRouter`，它会接收一个结构化 `ToolAction`，先写入 `run_start` / `run_end` 事件，再按顺序把动作路由到 traced tool call。
+
+```bash
+# 路由一个结构化动作
+codepilot route '{"tool_name":"list_files","arguments":{"repo":".","path":".","max_depth":2}}'
+
+# 指定 trace 目录、复用 run_id，并控制 output 预览长度
+codepilot route '{"tool_name":"read_file","arguments":{"repo":".","path":"src/codepilot/tools/base.py","start_line":1,"end_line":40},"reason":"检查基础类型"}' \
+  --runs-dir runs \
+  --run-id run-test \
+  --output-preview-chars 500
+```
+
+`route` 命令接收一个 JSON 字符串，必须包含 `tool_name`，可选包含 `arguments`、`reason` 和 `metadata`。
+执行成功后会输出 `ToolRouteResult` 的格式化 JSON，并在最后打印 `Trace written to: <path>`。
+如果工具执行失败，CLI 仍然返回 0，失败信息会保留在 `result.error` 和 `success=false` 中。
 
 ## Attribution
 

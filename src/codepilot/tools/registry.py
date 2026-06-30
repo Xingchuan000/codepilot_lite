@@ -4,12 +4,15 @@
 """
 
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from codepilot.tools.base import DefaultPermission, ToolResult, ToolRisk, ToolSideEffect, ToolSpec
 from codepilot.tools.file_tools import list_files, read_file
 from codepilot.tools.search_tools import search_code
 from codepilot.tools.shell_tools import run_shell
+from codepilot.trace.events import TraceEvent
+from codepilot.trace.logger import TraceLogger
 
 ToolFn = Callable[..., ToolResult]
 
@@ -79,6 +82,60 @@ TOOL_FUNCTIONS: dict[str, ToolFn] = {
     "run_shell": run_shell,
 }
 
+SENSITIVE_INPUT_KEY_PARTS = (
+    "api_key",
+    "authorization",
+    "password",
+    "secret",
+    "token",
+)
+
+
+def _preview_output(output: str, max_chars: int = 1000) -> tuple[str, bool]:
+    """生成 trace 使用的输出预览，避免写入过长内容。"""
+
+    if len(output) <= max_chars:
+        return output, False
+    suffix = "... truncated"
+    return f"{output[: max(0, max_chars - len(suffix))]}{suffix}", True
+
+
+def _is_sensitive_input_key(key: str) -> bool:
+    """判断输入字段名是否明显包含敏感信息。"""
+
+    lowered = key.lower()
+    return any(part in lowered for part in SENSITIVE_INPUT_KEY_PARTS)
+
+
+def _redact_trace_input(value: Any) -> Any:
+    """把输入整理成适合 trace 记录的结构。"""
+
+    if isinstance(value, dict):
+        redacted: dict[str, Any] = {}
+        for key, item in value.items():
+            if _is_sensitive_input_key(str(key)):
+                redacted[str(key)] = "[REDACTED]"
+            else:
+                redacted[str(key)] = _redact_trace_input(item)
+        return redacted
+
+    if isinstance(value, list):
+        return [_redact_trace_input(item) for item in value]
+
+    if isinstance(value, tuple):
+        return [_redact_trace_input(item) for item in value]
+
+    if isinstance(value, set):
+        return sorted(_redact_trace_input(item) for item in value)
+
+    if isinstance(value, Path):
+        return str(value)
+
+    if isinstance(value, str | int | float | bool) or value is None:
+        return value
+
+    return repr(value)
+
 
 def get_tool_spec(name: str) -> ToolSpec:
     """按名字获取工具说明。"""
@@ -104,3 +161,38 @@ def call_tool(name: str, **kwargs: Any) -> ToolResult:
         return ToolResult(success=False, error=f"Invalid arguments for tool {name}: {exc}")
     except Exception as exc:
         return ToolResult(success=False, error=f"Tool {name} failed: {exc}")
+
+
+def call_tool_traced(
+    name: str,
+    trace_logger: TraceLogger,
+    output_preview_chars: int = 1000,
+    **kwargs: Any,
+) -> ToolResult:
+    """调用工具并把结果写入 trace。"""
+
+    spec = TOOL_SPECS.get(name)
+    result = call_tool(name, **kwargs)
+
+    output_preview, preview_truncated = _preview_output(result.output, output_preview_chars)
+    metadata = dict(result.metadata)
+    metadata["output_chars"] = len(result.output)
+    metadata["output_preview_truncated"] = preview_truncated
+
+    event = TraceEvent(
+        run_id=trace_logger.run_id,
+        step=trace_logger.next_step,
+        event_type="tool_call",
+        tool_name=name,
+        risk=spec.risk.value if spec else None,
+        side_effect=spec.side_effect.value if spec else None,
+        default_permission=spec.default_permission.value if spec else None,
+        input=_redact_trace_input(kwargs),
+        success=result.success,
+        output_summary=result.output_summary,
+        output_preview=output_preview,
+        error=result.error,
+        metadata=metadata,
+    )
+    trace_logger.record(event)
+    return result
