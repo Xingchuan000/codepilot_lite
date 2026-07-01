@@ -56,6 +56,30 @@ class TraceLogger:
             file.write(event.model_dump_json() + "\n")
         return event
 
+    def record_policy_decision(
+        self,
+        tool_name: str,
+        decision: str,
+        reason: str,
+        rule: str | None = None,
+        mode: str | None = None,
+        metadata: dict | None = None,
+    ) -> TraceEvent:
+        """记录一次策略判断，方便后续追踪为什么允许或拒绝动作。"""
+
+        event = TraceEvent(
+            run_id=self.run_id,
+            step=self.next_step,
+            event_type="policy_decision",
+            tool_name=tool_name,
+            policy_decision=decision,
+            policy_reason=reason,
+            policy_rule=rule,
+            policy_mode=mode,
+            metadata=metadata or {},
+        )
+        return self.record(event)
+
     def record_run_start(self, task: str | None = None, metadata: dict | None = None) -> TraceEvent:
         """记录 run 开始事件。"""
 

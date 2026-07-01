@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.tools.base import DefaultPermission, ToolResult, ToolRisk, ToolSideEffect, ToolSpec
+from codepilot.tools.edit_tools import apply_patch, replace_range
 from codepilot.tools.file_tools import list_files, read_file
 from codepilot.tools.search_tools import search_code
 from codepilot.tools.shell_tools import run_shell
@@ -73,6 +74,35 @@ TOOL_SPECS: dict[str, ToolSpec] = {
             "max_output_chars": "输出最大字符数，超出则截断。",
         },
     ),
+    "apply_patch": ToolSpec(
+        name="apply_patch",
+        description="Apply a unified diff patch inside the repository.",
+        risk=ToolRisk.LOCAL_WRITE,
+        side_effect=ToolSideEffect.LOCAL_WRITE,
+        default_permission=DefaultPermission.ASK,
+        parameters={
+            "repo": "仓库根路径（字符串或 Path）。",
+            "patch": "unified diff patch 内容。",
+            "dry_run": "是否只检查 patch，不真实写入。",
+            "max_preview_chars": "返回预览最大字符数。",
+        },
+    ),
+    "replace_range": ToolSpec(
+        name="replace_range",
+        description="Replace a line range in a file inside the repository.",
+        risk=ToolRisk.LOCAL_WRITE,
+        side_effect=ToolSideEffect.LOCAL_WRITE,
+        default_permission=DefaultPermission.ASK,
+        parameters={
+            "repo": "仓库根路径（字符串或 Path）。",
+            "path": "相对于 repo 的目标文件路径。",
+            "start_line": "起始行，1-based，包含。",
+            "end_line": "结束行，1-based，包含。",
+            "replacement": "替换内容。",
+            "dry_run": "是否只生成 diff preview，不真实写入。",
+            "max_preview_chars": "返回预览最大字符数。",
+        },
+    ),
 }
 
 TOOL_FUNCTIONS: dict[str, ToolFn] = {
@@ -80,6 +110,8 @@ TOOL_FUNCTIONS: dict[str, ToolFn] = {
     "read_file": read_file,
     "search_code": search_code,
     "run_shell": run_shell,
+    "apply_patch": apply_patch,
+    "replace_range": replace_range,
 }
 
 SENSITIVE_INPUT_KEY_PARTS = (
@@ -89,6 +121,7 @@ SENSITIVE_INPUT_KEY_PARTS = (
     "secret",
     "token",
 )
+MAX_TRACE_INPUT_STRING_CHARS = 4000
 
 
 def _preview_output(output: str, max_chars: int = 1000) -> tuple[str, bool]:
@@ -128,10 +161,16 @@ def _redact_trace_input(value: Any) -> Any:
     if isinstance(value, set):
         return sorted(_redact_trace_input(item) for item in value)
 
+    if isinstance(value, str):
+        if len(value) <= MAX_TRACE_INPUT_STRING_CHARS:
+            return value
+        suffix = "... truncated"
+        return f"{value[: max(0, MAX_TRACE_INPUT_STRING_CHARS - len(suffix))]}{suffix}"
+
     if isinstance(value, Path):
         return str(value)
 
-    if isinstance(value, str | int | float | bool) or value is None:
+    if isinstance(value, int | float | bool) or value is None:
         return value
 
     return repr(value)
@@ -141,6 +180,12 @@ def get_tool_spec(name: str) -> ToolSpec:
     """按名字获取工具说明。"""
 
     return TOOL_SPECS[name]
+
+
+def find_tool_spec(name: str) -> ToolSpec | None:
+    """按名字获取工具说明；未知工具返回 None，不抛错。"""
+
+    return TOOL_SPECS.get(name)
 
 
 def list_tool_specs() -> list[ToolSpec]:

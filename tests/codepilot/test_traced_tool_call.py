@@ -1,4 +1,5 @@
 import json
+import subprocess
 from pathlib import Path
 
 from codepilot.tools.registry import call_tool, call_tool_traced
@@ -84,3 +85,37 @@ def test_call_tool_traced_marks_truncated_preview(tmp_path: Path) -> None:
     data = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
 
     assert data["metadata"]["output_preview_truncated"] is True
+
+
+def test_call_tool_traced_truncates_long_string_input(tmp_path: Path) -> None:
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    call_tool_traced("unknown", trace_logger=logger, patch="x" * 5000)
+
+    data = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert data["input"]["patch"].endswith("... truncated")
+    assert len(data["input"]["patch"]) == 4000
+
+
+def test_call_tool_traced_apply_patch_dry_run_records_local_write_metadata(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("old\n", encoding="utf-8")
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    call_tool_traced(
+        "apply_patch",
+        trace_logger=logger,
+        repo=tmp_path,
+        patch="diff --git a/src/a.py b/src/a.py\n--- a/src/a.py\n+++ b/src/a.py\n@@ -1 +1 @@\n-old\n+new\n",
+        dry_run=True,
+    )
+
+    data = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert data["tool_name"] == "apply_patch"
+    assert data["risk"] == "local_write"
+    assert data["side_effect"] == "local_write"
+    assert data["default_permission"] == "ask"
+    assert data["metadata"]["touched_paths"] == ["src/a.py"]

@@ -265,6 +265,57 @@ codepilot route '{"tool_name":"read_file","arguments":{"repo":".","path":"src/co
 执行成功后会输出 `ToolRouteResult` 的格式化 JSON，并在最后打印 `Trace written to: <path>`。
 如果工具执行失败，CLI 仍然返回 0，失败信息会保留在 `result.error` 和 `success=false` 中。
 
+### 第五步 PolicyChecker 使用说明
+
+`route` 命令在第五步默认开启 `PolicyChecker`，它会在真正调用工具前先写入一条 `policy_decision` trace 事件。
+
+```bash
+# 默认启用 policy
+codepilot route '{"tool_name":"list_files","arguments":{"repo":".","path":"src/codepilot","max_depth":2}}'
+
+# 允许需要确认的动作继续执行
+codepilot route '{"tool_name":"run_shell","arguments":{"repo":".","command":"echo hi"}}' --approve
+
+# 关闭 policy，保持第四步的原始路由行为
+codepilot route '{"tool_name":"run_shell","arguments":{"repo":".","command":"echo hi"}}' --no-policy
+
+# 切换 policy 模式
+codepilot route '{"tool_name":"run_shell","arguments":{"repo":".","command":"python -m pytest tests/codepilot -q"}}' --policy-mode build
+codepilot route '{"tool_name":"run_shell","arguments":{"repo":".","command":"python -m pytest tests/codepilot -q"}}' --policy-mode read_only
+```
+
+默认策略规则如下：
+
+- `list_files`、`read_file`、`search_code` 默认允许
+- `run_shell` 默认需要审批，但 `pytest`、`python -m pytest`、`ruff`、`mypy`、`npm test`、`npm run test`、`npm run lint` 这类安全前缀在 `build` 和 `danger` 模式下会直接放行
+- `.env`、`secrets`、`.ssh` 及其子路径会被拒绝
+- `rm -rf`、`git push`、`git reset --hard`、`npm publish`、`curl `、`wget `、`ssh `、`scp `、`chmod 777` 会被拒绝
+
+`route` 输出的 `ToolRouteResult.metadata` 会包含 `policy_decision`、`policy_reason`、`policy_rule`、`policy_mode`、`requires_approval`、`approved` 和 `executed`，便于直接查看这次路由为什么被允许、拒绝或要求审批。
+
+### 第六步 Edit Tools v1 使用说明
+
+第六步新增了两个编辑工具：`replace_range` 和 `apply_patch`。
+这一步只负责“安全地改文件”，不包含测试运行、git diff、commit、push、LLM loop 或其它兜底逻辑。
+
+```bash
+# 直接调用只读工具仍然允许
+codepilot tool read_file '{"repo":".","path":"src/codepilot/tools/base.py","start_line":1,"end_line":40}'
+
+# 直接调用编辑工具默认会被拦截
+codepilot tool replace_range '{"repo":".","path":"src/demo.py","start_line":2,"end_line":2,"replacement":"    return \"new\"\n"}'
+
+# 仅用于本地调试时显式放行副作用直调
+codepilot tool replace_range '{"repo":".","path":"src/demo.py","start_line":2,"end_line":2,"replacement":"    return \"new\"\n"}' --unsafe-direct
+
+# 通过 route 走 PolicyChecker，编辑工具会先进入 ask 再决定是否执行
+codepilot route '{"tool_name":"apply_patch","arguments":{"repo":".","patch":"diff --git a/src/demo.py b/src/demo.py\n--- a/src/demo.py\n+++ b/src/demo.py\n@@ -1 +1 @@\n-old\n+new\n"}}' --approve
+```
+
+`replace_range` 会返回一份统一 diff 预览，`apply_patch` 会先执行 `git apply --check`，通过后再决定是否真实应用。
+两者默认权限都是 `ask`，并且会被 `PolicyChecker` 按路径规则检查；像 `.env`、`secrets`、`.ssh` 这类敏感路径会直接拒绝。
+如果你只是想在命令行里调试编辑工具本身，可以使用 `--unsafe-direct`，否则有副作用的工具不会走直调入口。
+
 ## Attribution
 
 If you found this work helpful, please consider citing the [SWE-agent paper](https://arxiv.org/abs/2405.15793) in your work:

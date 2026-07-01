@@ -40,3 +40,13 @@ def test_tool_router_route_many_records_run_events_and_keeps_going(tmp_path: Pat
     assert [json.loads(line)["event_type"] for line in lines] == ["run_start", "tool_call", "tool_call", "run_end"]
     assert json.loads(lines[0])["metadata"]["source"] == "tool_router"
     assert json.loads(lines[-1])["success"] is False
+
+
+def test_tool_router_without_policy_keeps_original_trace_shape(tmp_path: Path) -> None:
+    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    routed = router.route(ToolAction(tool_name="run_shell", arguments={"repo": tmp_path, "command": "echo hi"}))
+
+    assert routed.success is True
+    lines = (tmp_path / "runs" / "run-test" / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["event_type"] for line in lines] == ["tool_call"]

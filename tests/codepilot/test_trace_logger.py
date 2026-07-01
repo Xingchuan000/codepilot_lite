@@ -70,3 +70,34 @@ def test_trace_logger_record_run_start_and_end(tmp_path) -> None:
     assert end_event["success"] is True
     assert end_event["output_summary"] == "done"
     assert end_event["metadata"]["checked"] is True
+
+
+def test_trace_logger_record_policy_decision(tmp_path) -> None:
+    logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
+
+    logger.record_policy_decision(
+        tool_name="run_shell",
+        decision="deny",
+        reason="blocked",
+        rule="command.deny_substrings.rm -rf",
+        mode="build",
+        metadata={"checked": True},
+    )
+    logger.record_policy_decision(
+        tool_name="read_file",
+        decision="allow",
+        reason="ok",
+        mode="read_only",
+    )
+
+    lines = logger.trace_path.read_text(encoding="utf-8").splitlines()
+    first = json.loads(lines[0])
+    second = json.loads(lines[1])
+
+    assert first["step"] == 1
+    assert first["event_type"] == "policy_decision"
+    assert first["policy_decision"] == "deny"
+    assert first["metadata"]["checked"] is True
+    assert second["step"] == 2
+    assert second["event_type"] == "policy_decision"
+    assert second["policy_decision"] == "allow"
