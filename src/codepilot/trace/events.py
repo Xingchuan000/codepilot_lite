@@ -8,9 +8,13 @@ from pydantic import BaseModel, Field
 
 TraceEventType = Literal[
     "run_start",
+    "llm_call",
+    "agent_action",
     "policy_decision",
     "tool_call",
     "tool_result",
+    "agent_observation",
+    "agent_finish",
     "run_end",
 ]
 

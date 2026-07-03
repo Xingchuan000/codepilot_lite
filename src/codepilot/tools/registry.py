@@ -10,8 +10,10 @@ from typing import Any
 from codepilot.tools.base import DefaultPermission, ToolResult, ToolRisk, ToolSideEffect, ToolSpec
 from codepilot.tools.edit_tools import apply_patch, replace_range
 from codepilot.tools.file_tools import list_files, read_file
+from codepilot.tools.git_tools import git_diff, git_status
 from codepilot.tools.search_tools import search_code
 from codepilot.tools.shell_tools import run_shell
+from codepilot.tools.test_tools import run_tests
 from codepilot.trace.events import TraceEvent
 from codepilot.trace.logger import TraceLogger
 
@@ -74,6 +76,46 @@ TOOL_SPECS: dict[str, ToolSpec] = {
             "max_output_chars": "输出最大字符数，超出则截断。",
         },
     ),
+    "run_tests": ToolSpec(
+        name="run_tests",
+        description="Run a test command inside the repository and return a summarized result.",
+        risk=ToolRisk.LOCAL_EXECUTION,
+        side_effect=ToolSideEffect.LOCAL_EXEC,
+        default_permission=DefaultPermission.ASK,
+        parameters={
+            "repo": "仓库根路径（字符串或 Path）。",
+            "command": "测试命令，默认 pytest。",
+            "timeout": "命令超时秒数，默认 60。",
+            "max_output_chars": "原始输出最大读取字符数。",
+            "max_summary_chars": "摘要输出最大字符数。",
+        },
+    ),
+    "git_status": ToolSpec(
+        name="git_status",
+        description="Show changed files in the repository using git status --short.",
+        risk=ToolRisk.READ_ONLY,
+        side_effect=ToolSideEffect.NONE,
+        default_permission=DefaultPermission.ALLOW,
+        parameters={
+            "repo": "仓库根路径（字符串或 Path）。",
+            "max_entries": "最多返回的变更条目数。",
+        },
+    ),
+    "git_diff": ToolSpec(
+        name="git_diff",
+        description="Show git diff summary or a content diff for a specific safe path.",
+        risk=ToolRisk.READ_ONLY,
+        side_effect=ToolSideEffect.NONE,
+        default_permission=DefaultPermission.ALLOW,
+        parameters={
+            "repo": "仓库根路径（字符串或 Path）。",
+            "path": "可选，相对于 repo 的目标路径。include_content=True 时必须提供。",
+            "staged": "是否查看 staged diff。",
+            "include_content": "是否返回完整 diff 内容。无 path 时禁止。",
+            "max_lines": "最多返回 diff 行数。",
+            "max_chars": "最多返回 diff 字符数。",
+        },
+    ),
     "apply_patch": ToolSpec(
         name="apply_patch",
         description="Apply a unified diff patch inside the repository.",
@@ -110,6 +152,9 @@ TOOL_FUNCTIONS: dict[str, ToolFn] = {
     "read_file": read_file,
     "search_code": search_code,
     "run_shell": run_shell,
+    "run_tests": run_tests,
+    "git_status": git_status,
+    "git_diff": git_diff,
     "apply_patch": apply_patch,
     "replace_range": replace_range,
 }

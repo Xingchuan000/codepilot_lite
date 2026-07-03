@@ -6,11 +6,24 @@ from uuid import uuid4
 
 from codepilot.trace.events import TraceEvent
 
+MAX_TRACE_PREVIEW_CHARS = 1000
+
 
 def make_run_id(prefix: str = "run") -> str:
     """生成一个短而稳定的 run_id。"""
 
     return f"{prefix}-{uuid4().hex[:12]}"
+
+
+def _preview_text(text: str | None, max_chars: int = MAX_TRACE_PREVIEW_CHARS) -> tuple[str, bool]:
+    """生成适合 trace 的短预览，避免把长文本完整写入。"""
+
+    if not text:
+        return "", False
+    if len(text) <= max_chars:
+        return text, False
+    suffix = "... truncated"
+    return f"{text[: max(0, max_chars - len(suffix))]}{suffix}", True
 
 
 class TraceLogger:
@@ -77,6 +90,104 @@ class TraceLogger:
             policy_rule=rule,
             policy_mode=mode,
             metadata=metadata or {},
+        )
+        return self.record(event)
+
+    def record_llm_call(
+        self,
+        *,
+        model: str | None = None,
+        message_count: int,
+        response_text: str | None = None,
+        usage: dict | None = None,
+        metadata: dict | None = None,
+    ) -> TraceEvent:
+        """记录一次 LLM 调用结果。"""
+
+        output_preview, truncated = _preview_text(response_text)
+        event = TraceEvent(
+            run_id=self.run_id,
+            step=self.next_step,
+            event_type="llm_call",
+            success=True,
+            output_preview=output_preview,
+            metadata={
+                "model": model,
+                "message_count": message_count,
+                "response_chars": len(response_text or ""),
+                "response_preview_truncated": truncated,
+                "usage": usage or {},
+                **(metadata or {}),
+            },
+        )
+        return self.record(event)
+
+    def record_agent_action(
+        self,
+        *,
+        action_type: str | None,
+        tool_name: str | None = None,
+        input: dict | None = None,
+        success: bool,
+        error: str | None = None,
+        metadata: dict | None = None,
+    ) -> TraceEvent:
+        """记录一次模型产出的结构化动作。"""
+
+        event = TraceEvent(
+            run_id=self.run_id,
+            step=self.next_step,
+            event_type="agent_action",
+            tool_name=tool_name,
+            input=input or {},
+            success=success,
+            error=error,
+            metadata={"action_type": action_type, **(metadata or {})},
+        )
+        return self.record(event)
+
+    def record_agent_observation(
+        self,
+        *,
+        tool_name: str | None,
+        observation: str,
+        metadata: dict | None = None,
+    ) -> TraceEvent:
+        """记录返回给模型的 observation。"""
+
+        output_preview, truncated = _preview_text(observation)
+        summary = observation.strip().splitlines()[0] if observation.strip() else ""
+        event = TraceEvent(
+            run_id=self.run_id,
+            step=self.next_step,
+            event_type="agent_observation",
+            tool_name=tool_name,
+            output_summary=summary or None,
+            output_preview=output_preview,
+            metadata={
+                "observation_chars": len(observation),
+                "observation_preview_truncated": truncated,
+                **(metadata or {}),
+            },
+        )
+        return self.record(event)
+
+    def record_agent_finish(
+        self,
+        *,
+        status: str,
+        summary: str,
+        metadata: dict | None = None,
+    ) -> TraceEvent:
+        """记录 agent 主动结束运行。"""
+
+        event = TraceEvent(
+            run_id=self.run_id,
+            step=self.next_step,
+            event_type="agent_finish",
+            success=status == "success",
+            output_summary=summary,
+            metadata={"status": status, **(metadata or {})},
         )
         return self.record(event)
 

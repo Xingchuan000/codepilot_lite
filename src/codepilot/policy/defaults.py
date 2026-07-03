@@ -8,8 +8,8 @@ def default_policy_config() -> PolicyConfig:
 
     return PolicyConfig(
         tools=ToolPolicyConfig(
-            allow=["list_files", "read_file", "search_code"],
-            ask=["run_shell", "apply_patch", "replace_range"],
+            allow=["list_files", "read_file", "search_code", "git_status", "git_diff"],
+            ask=["run_shell", "apply_patch", "replace_range", "run_tests"],
             deny=[],
         ),
         paths=PathPolicyConfig(
@@ -38,6 +38,9 @@ def default_policy_config() -> PolicyConfig:
                 "npm test",
                 "npm run test",
                 "npm run lint",
+                "pnpm test",
+                "pnpm run test",
+                "yarn test",
             ],
             deny_substrings=[
                 "rm -rf",
@@ -48,6 +51,9 @@ def default_policy_config() -> PolicyConfig:
                 "wget ",
                 "ssh ",
                 "scp ",
+                "sudo ",
+                "sh -c",
+                "bash -c",
                 "chmod 777",
             ],
         ),

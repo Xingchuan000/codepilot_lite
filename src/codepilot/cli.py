@@ -1,21 +1,36 @@
-"""CodePilot Lite 命令行入口。
-
-这里只提供手动调试工具的入口，不接 LLM，也不扩展 agent loop。
-"""
+"""CodePilot Lite 命令行入口。"""
 
 import json
+from pathlib import Path
 from typing import Literal
 
 import typer
 from pydantic import ValidationError
 
+from codepilot.agent.loop import MinimalAgentLoop
+from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.swe_agent_adapter import SweAgentModelAdapter
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
 from codepilot.tools.base import ToolSideEffect
 from codepilot.tools.registry import call_tool, call_tool_traced, find_tool_spec, list_tool_specs
 from codepilot.trace.logger import TraceLogger
+from minisweagent.config import get_config_from_spec
+from minisweagent.models import get_model
+from minisweagent.utils.serialize import recursive_merge
 
 app = typer.Typer(add_completion=False, help="CodePilot Lite structured tools CLI.")
+
+
+def build_swe_model_from_config_specs(model_config: list[str], model_name: str | None = None):
+    """复用 mini-SWE-agent 现有配置解析来构造模型对象。"""
+
+    config: dict = {}
+    for spec in model_config:
+        config = recursive_merge(config, get_config_from_spec(spec))
+    if model_name is not None:
+        config = recursive_merge(config, {"model": {"model_name": model_name}})
+    return get_model(config=config.get("model", {}))
 
 
 @app.command()
@@ -107,6 +122,57 @@ def tools() -> None:
 
     for spec in list_tool_specs():
         typer.echo(f"{spec.name}\t{spec.risk.value}\t{spec.default_permission.value}")
+
+
+@app.command("agent-run")
+def agent_run(
+    task: str = typer.Argument(..., help="Coding task for CodePilot MinimalAgentLoop."),
+    repo: str = typer.Option(".", "--repo", help="Repository path."),
+    max_steps: int = typer.Option(12, "--max-steps", help="Maximum LLM loop steps."),
+    policy_mode: Literal["read_only", "build", "danger"] = typer.Option("build", "--policy-mode"),
+    approve: bool = typer.Option(False, "--approve", help="Approve ask tools."),
+    fake_actions: str | None = typer.Option(None, "--fake-actions", help="JSONL fake LLM action responses."),
+    model: str | None = typer.Option(
+        None,
+        "--model",
+        help="Override model name for existing mini-SWE-agent model config.",
+    ),
+    model_config: list[str] = typer.Option(
+        [],
+        "--model-config",
+        help="mini-SWE-agent config spec. Can be path/name/key=value.",
+    ),
+    runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory for trace runs."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Trace run id."),
+) -> None:
+    """运行第八步 MinimalAgentLoop。"""
+
+    repo_path = Path(repo).expanduser().resolve()
+    llm = (
+        FakeLLMClient.from_jsonl(fake_actions)
+        if fake_actions
+        else SweAgentModelAdapter(model=build_swe_model_from_config_specs(model_config, model_name=model))
+    )
+    policy_context = PolicyContext(repo=repo_path, mode=policy_mode, approved=approve, interactive=False)
+    router = ToolRouter.from_runs_dir(
+        runs_dir=runs_dir,
+        run_id=run_id,
+        policy_checker=PolicyChecker.default(),
+        policy_context=policy_context,
+    )
+    result = MinimalAgentLoop(llm=llm, router=router, max_steps=max_steps).run(task=task, repo=repo_path)
+
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Success: {str(result.success).lower()}")
+    typer.echo(f"Steps: {result.steps}")
+    typer.echo("Changed files:")
+    for path in result.changed_files:
+        typer.echo(f"- {path}")
+    typer.echo(f"Tests: {result.last_test_status or 'unknown'}")
+    typer.echo(f"Policy violations: {result.policy_violations}")
+    typer.echo(f"Trace: {result.trace_path}")
+    if not result.success:
+        raise typer.Exit(1)
 
 
 if __name__ == "__main__":

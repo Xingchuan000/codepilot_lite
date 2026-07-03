@@ -9,6 +9,21 @@ from codepilot.cli import app
 runner = CliRunner()
 
 
+def _init_git_repo(tmp_path: Path) -> Path:
+    import subprocess
+
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "demo@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Demo"], cwd=tmp_path, check=True)
+    return tmp_path
+
+
+def _write_pytest_repo(tmp_path: Path) -> Path:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    return tmp_path
+
+
 def test_tool_list_files_returns_json(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("hi\n", encoding="utf-8")
 
@@ -151,6 +166,31 @@ def test_tool_trace_writes_trace_jsonl(tmp_path: Path) -> None:
     assert json.loads(trace_path.read_text(encoding="utf-8").splitlines()[0])["event_type"] == "tool_call"
 
 
+def test_cli_tools_lists_verification_tools() -> None:
+    result = runner.invoke(app, ["tools"])
+
+    assert "run_tests" in result.stdout
+    assert "git_status" in result.stdout
+    assert "git_diff" in result.stdout
+
+
+def test_cli_tool_rejects_direct_run_tests_without_unsafe_direct(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        ["tool", "run_tests", json.dumps({"repo": str(_write_pytest_repo(tmp_path)), "command": "python -m pytest -q"})],
+    )
+
+    assert result.exit_code != 0
+    assert "Direct tool execution is disabled" in result.stderr
+
+
+def test_cli_tool_allows_direct_git_status(tmp_path: Path) -> None:
+    result = runner.invoke(app, ["tool", "git_status", json.dumps({"repo": str(_init_git_repo(tmp_path))})])
+
+    assert result.exit_code == 0
+    assert '"success": true' in result.stdout
+
+
 def test_route_writes_route_result_and_trace(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("hi\n", encoding="utf-8")
 
@@ -254,6 +294,110 @@ def test_route_default_policy_read_only_denies_shell(tmp_path: Path) -> None:
     assert '"policy_decision": "deny"' in result.stdout
     lines = (tmp_path / "runs" / "run-test" / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision"]
+
+
+def test_cli_route_run_tests_executes_safe_command(tmp_path: Path) -> None:
+    repo = _write_pytest_repo(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "route",
+            json.dumps({"tool_name": "run_tests", "arguments": {"repo": str(repo), "command": "python -m pytest -q"}}),
+            "--runs-dir",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "run-test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"success": true' in result.stdout
+    lines = (tmp_path / "runs" / "run-test" / "trace.jsonl").read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision", "tool_call"]
+
+
+def test_cli_route_run_tests_read_only_denied(tmp_path: Path) -> None:
+    repo = _write_pytest_repo(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "route",
+            json.dumps({"tool_name": "run_tests", "arguments": {"repo": str(repo), "command": "pytest -q"}}),
+            "--runs-dir",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "run-test",
+            "--policy-mode",
+            "read_only",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"policy_decision": "deny"' in result.stdout
+
+
+def test_cli_route_git_status_executes(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+
+    result = runner.invoke(
+        app,
+        [
+            "route",
+            json.dumps({"tool_name": "git_status", "arguments": {"repo": str(repo)}}),
+            "--runs-dir",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "run-test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"success": true' in result.stdout
+
+
+def test_cli_route_git_diff_summary_executes(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    (repo / "src").mkdir()
+    (repo / "src" / "demo.py").write_text("old\n", encoding="utf-8")
+    import subprocess
+
+    subprocess.run(["git", "add", "src/demo.py"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+    (repo / "src" / "demo.py").write_text("new\n", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "route",
+            json.dumps({"tool_name": "git_diff", "arguments": {"repo": str(repo)}}),
+            "--runs-dir",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "run-test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"success": true' in result.stdout
+
+
+def test_cli_route_git_diff_env_denied(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app,
+        [
+            "route",
+            json.dumps({"tool_name": "git_diff", "arguments": {"repo": str(tmp_path), "path": ".env", "include_content": True}}),
+            "--runs-dir",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "run-test",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"policy_decision": "deny"' in result.stdout
 
 
 def test_route_no_policy_preserves_original_behavior(tmp_path: Path) -> None:

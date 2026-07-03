@@ -52,3 +52,10 @@ def test_trace_event_supports_policy_decision_fields() -> None:
     assert data["policy_reason"] == "blocked"
     assert data["policy_rule"] == "command.deny_substrings.rm -rf"
     assert data["policy_mode"] == "build"
+
+
+def test_trace_event_accepts_new_agent_and_llm_types() -> None:
+    for event_type in ("llm_call", "agent_action", "agent_observation", "agent_finish"):
+        event = TraceEvent(run_id="run-test", step=1, event_type=event_type)
+
+        assert event.model_dump()["event_type"] == event_type

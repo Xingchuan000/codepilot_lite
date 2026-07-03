@@ -1,7 +1,7 @@
 import json
 
 from codepilot.trace.events import TraceEvent
-from codepilot.trace.logger import TraceLogger, make_run_id
+from codepilot.trace.logger import MAX_TRACE_PREVIEW_CHARS, TraceLogger, _preview_text, make_run_id
 
 
 def test_make_run_id_uses_prefix() -> None:
@@ -101,3 +101,83 @@ def test_trace_logger_record_policy_decision(tmp_path) -> None:
     assert second["step"] == 2
     assert second["event_type"] == "policy_decision"
     assert second["policy_decision"] == "allow"
+
+
+def test_preview_text_truncates_long_text() -> None:
+    preview, truncated = _preview_text("x" * (MAX_TRACE_PREVIEW_CHARS + 10))
+
+    assert truncated is True
+    assert len(preview) == MAX_TRACE_PREVIEW_CHARS
+    assert preview.endswith("... truncated")
+
+
+def test_trace_logger_record_llm_call(tmp_path) -> None:
+    logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
+
+    logger.record_llm_call(
+        model="fake-model",
+        message_count=3,
+        response_text="hello",
+        usage={"total_tokens": 10},
+        metadata={"source": "test"},
+    )
+
+    event = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+    assert event["event_type"] == "llm_call"
+    assert event["success"] is True
+    assert event["output_preview"] == "hello"
+    assert event["metadata"]["model"] == "fake-model"
+    assert event["metadata"]["message_count"] == 3
+    assert event["metadata"]["response_chars"] == 5
+    assert event["metadata"]["response_preview_truncated"] is False
+    assert event["metadata"]["usage"] == {"total_tokens": 10}
+    assert event["metadata"]["source"] == "test"
+
+
+def test_trace_logger_record_agent_action_and_parse_failure(tmp_path) -> None:
+    logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
+
+    logger.record_agent_action(
+        action_type="tool_call",
+        tool_name="read_file",
+        input={"tool_name": "read_file"},
+        success=False,
+        error="bad json",
+        metadata={"parse_success": False},
+    )
+
+    event = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+    assert event["event_type"] == "agent_action"
+    assert event["tool_name"] == "read_file"
+    assert event["success"] is False
+    assert event["error"] == "bad json"
+    assert event["metadata"]["action_type"] == "tool_call"
+    assert event["metadata"]["parse_success"] is False
+
+
+def test_trace_logger_record_agent_observation_truncates_output(tmp_path) -> None:
+    logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
+    observation = "first line\n" + ("x" * (MAX_TRACE_PREVIEW_CHARS + 50))
+
+    logger.record_agent_observation(tool_name="run_tests", observation=observation, metadata={"source": "test"})
+
+    event = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+    assert event["event_type"] == "agent_observation"
+    assert event["tool_name"] == "run_tests"
+    assert event["output_summary"] == "first line"
+    assert event["metadata"]["observation_chars"] == len(observation)
+    assert event["metadata"]["observation_preview_truncated"] is True
+    assert event["metadata"]["source"] == "test"
+
+
+def test_trace_logger_record_agent_finish(tmp_path) -> None:
+    logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
+
+    logger.record_agent_finish(status="partial", summary="done", metadata={"steps": 2})
+
+    event = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+    assert event["event_type"] == "agent_finish"
+    assert event["success"] is False
+    assert event["output_summary"] == "done"
+    assert event["metadata"]["status"] == "partial"
+    assert event["metadata"]["steps"] == 2

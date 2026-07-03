@@ -22,6 +22,7 @@ from minisweagent.models.utils.openai_multimodal import expand_multimodal_conten
 from minisweagent.models.utils.retry import retry
 
 logger = logging.getLogger("litellm_model")
+_DEFAULT_TOOLS = object()
 
 
 class LitellmModelConfig(BaseModel):
@@ -61,13 +62,19 @@ class LitellmModel:
         if self.config.litellm_model_registry and Path(self.config.litellm_model_registry).is_file():
             litellm.utils.register_model(json.loads(Path(self.config.litellm_model_registry).read_text()))
 
-    def _query(self, messages: list[dict[str, str]], **kwargs):
+    def _query(self, messages: list[dict[str, str]], tools: Any = _DEFAULT_TOOLS, **kwargs):
         try:
-            return litellm.completion(
-                model=self.config.model_name,
-                messages=messages,
-                tools=[BASH_TOOL],
+            completion_kwargs = {
+                "model": self.config.model_name,
+                "messages": messages,
                 **(self.config.model_kwargs | kwargs),
+            }
+            if tools is _DEFAULT_TOOLS:
+                completion_kwargs["tools"] = [BASH_TOOL]
+            elif tools is not None:
+                completion_kwargs["tools"] = tools
+            return litellm.completion(
+                **completion_kwargs,
             )
         except litellm.exceptions.AuthenticationError as e:
             e.message += " You can permanently set your API key with `mini-extra config set KEY VALUE`."
@@ -103,6 +110,35 @@ class LitellmModel:
             "timestamp": time.time(),
         }
         return message
+
+    def query_without_default_tools(self, messages: list[dict[str, str]], **kwargs) -> dict:
+        """查询模型但不注入默认 BASH_TOOL，也不解析 tool calls。"""
+
+        for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
+            with attempt:
+                response = self._query(self._prepare_messages_for_api(messages), tools=None, **kwargs)
+        cost_output = self._calculate_cost(response)
+        GLOBAL_MODEL_STATS.add(cost_output["cost"])
+        usage = {}
+        try:
+            if getattr(response, "usage", None) is not None:
+                usage = response.usage.model_dump()
+        except Exception:
+            usage = {}
+        try:
+            raw_response = response.model_dump()
+        except Exception:
+            raw_response = repr(response)
+        return {
+            "role": "assistant",
+            "content": response.choices[0].message.content or "",
+            "extra": {
+                "response": raw_response,
+                "cost": cost_output["cost"],
+                "timestamp": time.time(),
+                "usage": usage,
+            },
+        }
 
     def _calculate_cost(self, response) -> dict[str, float]:
         try:

@@ -13,6 +13,8 @@ from codepilot.tools.base import DefaultPermission, ToolSideEffect, ToolSpec
 from codepilot.tools.patch_utils import extract_paths_from_patch
 from codepilot.tools.registry import find_tool_spec
 
+COMMAND_TOOLS = {"run_shell", "run_tests"}
+
 
 class PolicyChecker:
     """用一组简单、可解释的规则判断工具动作是否可以执行。"""
@@ -84,8 +86,13 @@ class PolicyChecker:
                 metadata=metadata,
             )
 
-        if tool_name == "run_shell":
-            allow_decision = self._allow_safe_shell_prefix(arguments=arguments, context=context, metadata=metadata)
+        if tool_name in COMMAND_TOOLS:
+            allow_decision = self._allow_safe_command_prefix(
+                tool_name=tool_name,
+                arguments=arguments,
+                context=context,
+                metadata=metadata,
+            )
             if allow_decision is not None:
                 return allow_decision
 
@@ -354,7 +361,16 @@ class PolicyChecker:
         context: PolicyContext,
         metadata: dict[str, Any],
     ) -> PolicyDecision | None:
-        if tool_name != "run_shell":
+        if tool_name == "git_diff" and arguments.get("include_content") is True and not arguments.get("path"):
+            return self._decision(
+                "deny",
+                "git_diff include_content=True requires a specific path to avoid leaking repository-wide diffs.",
+                tool_name=tool_name,
+                matched_rule="git_diff.content_without_path.deny",
+                context=context,
+                metadata=dict(metadata),
+            )
+        if tool_name not in COMMAND_TOOLS:
             return None
         raw_command = arguments.get("command")
         if not isinstance(raw_command, str):
@@ -377,9 +393,10 @@ class PolicyChecker:
             )
         return None
 
-    def _allow_safe_shell_prefix(
+    def _allow_safe_command_prefix(
         self,
         *,
+        tool_name: str,
         arguments: dict[str, Any],
         context: PolicyContext,
         metadata: dict[str, Any],
@@ -404,7 +421,7 @@ class PolicyChecker:
         return self._decision(
             "allow",
             f"Command is allowed in {context.mode} mode by safe prefix '{matched}'.",
-            tool_name="run_shell",
+            tool_name=tool_name,
             matched_rule=f"command.allow_prefixes.{matched}",
             context=context,
             metadata=command_metadata,

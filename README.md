@@ -237,7 +237,52 @@ codepilot tool list_files '{"repo":".","path":".","max_depth":2}'
 
 # 写入 trace，默认输出到 runs/<run_id>/trace.jsonl
 codepilot tool list_files '{"repo":".","path":".","max_depth":2}' --trace
+```
 
+## CodePilot Lite 第七步 — Verification Tools v1
+
+第七步在现有结构化工具层上新增了 3 个 verification 工具：
+
+| 工具 | 风险等级 | 默认权限 | 说明 |
+|------|----------|----------|------|
+| `run_tests` | local_execution | ask | 在仓库根目录执行显式给出的测试命令，并返回 pytest 摘要结果 |
+| `git_status` | read_only | allow | 使用 `git status --short` 查看仓库变更 |
+| `git_diff` | read_only | allow | 查看 diff 摘要，或对指定安全路径查看内容 diff |
+
+这一阶段严格按计划实现，边界如下：
+
+- 不自动选择测试命令
+- 不自动 commit / push
+- 不自动 rollback / restore
+- 不新增 LLM、agent loop、prompt、Evidence Report、MCP
+
+### 使用示例
+
+```bash
+# 运行测试命令（直接 tool 调试默认会被拦截，需要显式加 --unsafe-direct）
+codepilot tool run_tests '{"repo":".","command":"python -m pytest tests/codepilot -q"}' --unsafe-direct
+
+# 通过 route 走策略检查执行安全测试命令
+codepilot route '{"tool_name":"run_tests","arguments":{"repo":".","command":"python -m pytest tests/codepilot -q"}}' --approve
+
+# 查看 git 状态
+codepilot tool git_status '{"repo":"."}'
+
+# 查看 diff 摘要
+codepilot tool git_diff '{"repo":"."}'
+
+# 查看指定文件的内容 diff
+codepilot tool git_diff '{"repo":".","path":"src/codepilot/tools/base.py","include_content":true}'
+```
+
+### 结果说明
+
+- `run_tests` 返回统一的 `ToolResult`，`metadata` 中会包含 `status`、`returncode`、`failed_tests`、`timed_out` 等字段。
+- `git_status` 会在 `metadata` 中返回 `changed_files`、`staged_files`、`unstaged_files`、`untracked_files`、`deleted_files`、`renamed_files`。
+- `git_diff` 的摘要模式只返回文件级变化；内容模式要求必须传入 `path`，并会对疑似 secret 内容做 `[REDACTED]` 脱敏。
+- `run_tests` 执行 Python 测试时会设置 `PYTHONDONTWRITEBYTECODE=1`，默认不在仓库里生成 `__pycache__`，避免污染后续 `git_status` 和 agent loop 的 `changed_files` 输出。
+
+```bash
 # 指定 trace 根目录和 run_id
 codepilot tool list_files '{"repo":".","path":".","max_depth":2}' --trace --runs-dir runs --run-id run-test
 ```
@@ -315,6 +360,83 @@ codepilot route '{"tool_name":"apply_patch","arguments":{"repo":".","patch":"dif
 `replace_range` 会返回一份统一 diff 预览，`apply_patch` 会先执行 `git apply --check`，通过后再决定是否真实应用。
 两者默认权限都是 `ask`，并且会被 `PolicyChecker` 按路径规则检查；像 `.env`、`secrets`、`.ssh` 这类敏感路径会直接拒绝。
 如果你只是想在命令行里调试编辑工具本身，可以使用 `--unsafe-direct`，否则有副作用的工具不会走直调入口。
+
+## CodePilot Lite 第八步 — Minimal LLM Loop 使用说明
+
+第八步在现有结构化工具层之上新增了一个最小的 LLM 闭环。模型每轮只能输出一个 JSON `AgentAction`，然后统一经由 `ToolRouter -> PolicyChecker -> call_tool_traced(...)` 执行工具，不会直接绕过路由器调用 `read_file`、`replace_range`、`run_tests` 等工具函数。
+
+### AgentAction 格式
+
+模型每轮只能返回一个 JSON object，类型只允许 `tool_call` 或 `finish`。
+
+```json
+{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}
+```
+
+```json
+{"type":"finish","status":"success","summary":"Fixed the bug and verified tests passed."}
+```
+
+约束如下：
+
+- 不允许输出 Markdown fenced JSON
+- 不允许一次返回多个 action
+- `repo` 参数通常不需要模型填写，loop 会自动注入当前仓库
+- 修改前应先 `read_file` 或 `search_code`
+- 修改后应执行 `run_tests`
+- `finish` 前应执行 `git_status` 或 `git_diff`
+
+### 使用 fake actions 运行最小闭环
+
+可以用 JSONL 文件驱动 `FakeLLMClient`，逐步验证 loop 行为：
+
+```bash
+PYTHONPATH=src python -m codepilot.cli agent-run \
+  "Fix the failing add test" \
+  --repo /tmp/codepilot-agent-demo \
+  --fake-actions tests/codepilot/fixtures/agent_actions_success.jsonl \
+  --approve \
+  --policy-mode build \
+  --run-id demo-agent-loop
+```
+
+CLI 输出会包含：
+
+- `Status: <status>`
+- `Success: <true/false>`
+- `Steps: <n>`
+- `Changed files:`
+- `Tests: <passed/failed/unknown>`
+- `Policy violations: <n>`
+- `Trace: runs/<run_id>/trace.jsonl`
+
+在默认 FakeLLM 演示路径下，如果测试命令是 `python -m pytest ...`，`Changed files` 应只保留真实源码改动，例如 `src/calc.py`，不会再因为测试执行额外带出 `src/__pycache__/` 或 `tests/__pycache__/`。
+
+### 使用 mini-SWE-agent 现有模型配置
+
+如果不传 `--fake-actions`，`agent-run` 会复用 mini-SWE-agent 现有模型配置与模型构造逻辑，不新增第二套 provider、api key 或 base url 配置：
+
+```bash
+PYTHONPATH=src python -m codepilot.cli agent-run \
+  "Inspect the repository and propose a fix" \
+  --repo . \
+  --model-config mini \
+  --model anthropic/claude-sonnet-4-5
+```
+
+`agent-run` 支持的参数只有：
+
+- `--repo`
+- `--max-steps`
+- `--policy-mode`
+- `--approve`
+- `--fake-actions`
+- `--model`
+- `--model-config`
+- `--runs-dir`
+- `--run-id`
+
+不会新增计划外参数，例如 `--llm-api-key`、`--llm-base-url`。
 
 ## Attribution
 

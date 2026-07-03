@@ -119,3 +119,78 @@ def test_call_tool_traced_apply_patch_dry_run_records_local_write_metadata(tmp_p
     assert data["side_effect"] == "local_write"
     assert data["default_permission"] == "ask"
     assert data["metadata"]["touched_paths"] == ["src/a.py"]
+
+
+def test_call_tool_traced_run_tests_writes_test_metadata(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_ok.py").write_text("def test_ok():\n    assert True\n", encoding="utf-8")
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    call_tool_traced("run_tests", trace_logger=logger, repo=tmp_path, command="python -m pytest -q")
+
+    data = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert data["tool_name"] == "run_tests"
+    assert data["risk"] == "local_execution"
+    assert data["side_effect"] == "local_exec"
+    assert "status" in data["metadata"]
+    assert "returncode" in data["metadata"]
+    assert "failed_tests" in data["metadata"]
+
+
+def test_call_tool_traced_git_status_writes_changed_files_metadata(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "demo@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Demo"], cwd=tmp_path, check=True)
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    call_tool_traced("git_status", trace_logger=logger, repo=tmp_path)
+
+    data = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert "changed_files" in data["metadata"]
+    assert "clean" in data["metadata"]
+
+
+def test_call_tool_traced_git_diff_writes_diff_metadata(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.email", "demo@example.com"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "config", "user.name", "Demo"], cwd=tmp_path, check=True)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "a.py").write_text("old\n", encoding="utf-8")
+    subprocess.run(["git", "add", "src/a.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=tmp_path, check=True)
+    (tmp_path / "src" / "a.py").write_text("new\n", encoding="utf-8")
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    call_tool_traced("git_diff", trace_logger=logger, repo=tmp_path, path="src/a.py", include_content=True)
+
+    data = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert "include_content" in data["metadata"]
+    assert "path" in data["metadata"]
+    assert "staged" in data["metadata"]
+    assert "truncated" in data["metadata"]
+
+
+def test_call_tool_traced_run_tests_output_preview_is_summary(tmp_path: Path) -> None:
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_big.py").write_text(
+        "def test_big():\n    assert False, '" + ("x" * 3000) + "'\n",
+        encoding="utf-8",
+    )
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    call_tool_traced(
+        "run_tests",
+        trace_logger=logger,
+        repo=tmp_path,
+        command="python -m pytest -q",
+        max_output_chars=500,
+        max_summary_chars=200,
+        output_preview_chars=100,
+    )
+
+    data = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert len(data["output_preview"]) <= 100

@@ -5,9 +5,29 @@ from codepilot.tools.registry import TOOL_FUNCTIONS, TOOL_SPECS, call_tool, get_
 
 
 def test_registry_contains_expected_tools() -> None:
-    assert set(TOOL_SPECS) == {"list_files", "read_file", "search_code", "run_shell", "apply_patch", "replace_range"}
-    assert set(TOOL_FUNCTIONS) == {"list_files", "read_file", "search_code", "run_shell", "apply_patch", "replace_range"}
-    assert len(list_tool_specs()) == 6
+    assert set(TOOL_SPECS) == {
+        "list_files",
+        "read_file",
+        "search_code",
+        "run_shell",
+        "apply_patch",
+        "replace_range",
+        "run_tests",
+        "git_status",
+        "git_diff",
+    }
+    assert set(TOOL_FUNCTIONS) == {
+        "list_files",
+        "read_file",
+        "search_code",
+        "run_shell",
+        "apply_patch",
+        "replace_range",
+        "run_tests",
+        "git_status",
+        "git_diff",
+    }
+    assert len(list_tool_specs()) == 9
 
 
 def test_readonly_specs_are_allow() -> None:
@@ -26,12 +46,28 @@ def test_run_shell_spec_is_ask() -> None:
     assert spec.default_permission == DefaultPermission.ASK
 
 
+def test_run_tests_spec_is_local_execution_ask() -> None:
+    spec = get_tool_spec("run_tests")
+
+    assert spec.risk == ToolRisk.LOCAL_EXECUTION
+    assert spec.side_effect == ToolSideEffect.LOCAL_EXEC
+    assert spec.default_permission == DefaultPermission.ASK
+
+
 def test_edit_tool_specs_are_local_write_ask() -> None:
     for name in ("apply_patch", "replace_range"):
         spec = get_tool_spec(name)
         assert spec.risk == ToolRisk.LOCAL_WRITE
         assert spec.side_effect == ToolSideEffect.LOCAL_WRITE
         assert spec.default_permission == DefaultPermission.ASK
+
+
+def test_git_tool_specs_are_read_only_allow() -> None:
+    for name in ("git_status", "git_diff"):
+        spec = get_tool_spec(name)
+        assert spec.risk == ToolRisk.READ_ONLY
+        assert spec.side_effect == ToolSideEffect.NONE
+        assert spec.default_permission == DefaultPermission.ALLOW
 
 
 def test_tool_specs_include_parameters() -> None:
@@ -45,6 +81,11 @@ def test_tool_specs_include_parameters() -> None:
     assert "start_line" in get_tool_spec("replace_range").parameters
     assert "end_line" in get_tool_spec("replace_range").parameters
     assert "replacement" in get_tool_spec("replace_range").parameters
+    assert "command" in get_tool_spec("run_tests").parameters
+    assert "timeout" in get_tool_spec("run_tests").parameters
+    assert "max_entries" in get_tool_spec("git_status").parameters
+    assert "include_content" in get_tool_spec("git_diff").parameters
+    assert "path" in get_tool_spec("git_diff").parameters
 
 def test_call_tool_success(tmp_path: Path) -> None:
     (tmp_path / "hello.txt").write_text("hello\n", encoding="utf-8")
