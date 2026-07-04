@@ -100,5 +100,28 @@ def test_format_observation_keeps_only_whitelisted_metadata() -> None:
 def test_format_parse_error_observation() -> None:
     observation = format_parse_error_observation(AgentActionParseError("bad json"))
 
-    assert "could not be parsed" in observation
-    assert 'type "tool_call" or "finish"' in observation
+    assert "Action parse failed" in observation
+    assert "tool_name" in observation
+    assert "arguments" in observation
+
+
+def test_format_parse_error_observation_mentions_non_standard_fields() -> None:
+    error = AgentActionParseError(
+        "Missing required field after normalization: tool_name.",
+        raw_action={"type": "tool_call", "tool": "list_files", "parameters": {}},
+        normalized_action={"type": "tool_call", "arguments": {}},
+        normalization_metadata={
+            "normalization_applied": True,
+            "normalized_fields": {"parameters": "arguments"},
+            "non_standard_fields": ["tool", "parameters"],
+            "conflicts": [],
+        },
+    )
+
+    observation = format_parse_error_observation(error)
+
+    assert "tool" in observation
+    assert "parameters" in observation
+    assert "tool_name" in observation
+    assert "arguments" in observation
+    assert '{"type":"tool_call"' in observation

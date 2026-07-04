@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+import shlex
 
 from codepilot.agent.actions import AgentFinishAction
 from codepilot.llm.types import ChatMessage
@@ -39,6 +40,23 @@ def _append_unique(items: list[str], value: str) -> None:
         items.append(value)
 
 
+def looks_like_pytest_command(command: str) -> bool:
+    """用很小的启发式判断命令是否是在跑 pytest。"""
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+    first_token = Path(tokens[0]).name
+    if first_token == "pytest":
+        return True
+    if len(tokens) >= 3 and first_token.startswith("python") and tokens[1] == "-m" and tokens[2] == "pytest":
+        return True
+    return False
+
+
 def create_initial_state(task: str, repo: str | Path, *, max_steps: int) -> AgentState:
     """创建 loop 初始状态。"""
 
@@ -63,6 +81,14 @@ def update_state_from_route_result(state: AgentState, route_result: ToolRouteRes
             state.last_test_command = metadata["command"]
         if isinstance(metadata.get("failed_tests"), list):
             state.last_failed_tests = [str(item) for item in metadata["failed_tests"]]
+    if route_result.tool_name == "run_shell" and isinstance(metadata.get("command"), str) and looks_like_pytest_command(metadata["command"]):
+        if route_result.success and metadata.get("returncode") == 0:
+            state.last_test_status = "passed"
+            state.last_test_command = metadata["command"]
+            state.last_failed_tests = []
+        elif isinstance(metadata.get("returncode"), int):
+            state.last_test_status = "failed"
+            state.last_test_command = metadata["command"]
     if route_result.tool_name == "git_status":
         if isinstance(metadata.get("changed_files"), list):
             for path in metadata["changed_files"]:

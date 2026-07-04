@@ -9,13 +9,51 @@ from __future__ import annotations
 """
 
 import os
-from pathlib import Path
 import shlex
 import subprocess
+import sys
+from pathlib import Path
 from time import perf_counter
 
 from codepilot.tools.base import ToolResult, ToolRisk, elapsed_ms
 from codepilot.tools.test_summary import summarize_test_output
+
+
+def normalize_test_command(command: str) -> list[str]:
+    """把常见的 pytest 命令归一化为当前 Python 解释器显式调用。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise ValueError(f"Invalid test command: {exc}") from exc
+    if not argv:
+        return argv
+    if looks_like_pytest_command(command):
+        if Path(argv[0]).name == "pytest":
+            return [sys.executable, "-m", "pytest", *argv[1:]]
+        return [sys.executable, "-m", "pytest", *argv[3:]]
+    return argv
+
+
+def looks_like_pytest_command(command: str) -> bool:
+    """判断命令是否是在调用 pytest 或 python -m pytest。"""
+
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return False
+    if not argv:
+        return False
+    first_token = Path(argv[0]).name
+    if first_token == "pytest":
+        return True
+    return len(argv) >= 3 and first_token.startswith("python") and argv[1] == "-m" and argv[2] == "pytest"
+
+
+def _executed_command(argv: list[str]) -> str:
+    """把实际执行的 argv 压成适合写入 metadata 的字符串。"""
+
+    return shlex.join(argv)
 
 
 def _invalid_result(
@@ -34,6 +72,9 @@ def _invalid_result(
         error=error,
         metadata={
             "command": command,
+            "original_command": command,
+            "executed_command": "",
+            "executed_argv": [],
             "argv": [],
             "cwd": str(repo_path),
             "returncode": -1,
@@ -81,7 +122,11 @@ def run_tests(
     if max_summary_chars <= 0:
         return _invalid_result(start, repo_path, command, timeout, max_output_chars, max_summary_chars, "max_summary_chars must be greater than 0.")
 
-    argv = shlex.split(command)
+    try:
+        argv = normalize_test_command(command)
+    except ValueError as exc:
+        return _invalid_result(start, repo_path, command, timeout, max_output_chars, max_summary_chars, str(exc))
+    executed_command = _executed_command(argv)
     env = os.environ.copy()
     env.update(
         {
@@ -116,6 +161,9 @@ def run_tests(
             error=f"Test executable not found: {exc.filename or command}",
             metadata={
                 "command": command,
+                "original_command": command,
+                "executed_command": executed_command,
+                "executed_argv": argv,
                 "argv": argv,
                 "cwd": str(repo_path),
                 "returncode": -1,
@@ -143,6 +191,9 @@ def run_tests(
             error=f"Test command failed to start: {exc}",
             metadata={
                 "command": command,
+                "original_command": command,
+                "executed_command": executed_command,
+                "executed_argv": argv,
                 "argv": argv,
                 "cwd": str(repo_path),
                 "returncode": -1,
@@ -182,6 +233,9 @@ def run_tests(
             formatted_output += f"\n\nRelevant output:\n{summary.relevant_output}"
         metadata = {
             "command": command,
+            "original_command": command,
+            "executed_command": executed_command,
+            "executed_argv": argv,
             "argv": argv,
             "cwd": str(repo_path),
             "returncode": -1,
@@ -220,6 +274,9 @@ def run_tests(
 
     metadata = {
         "command": command,
+        "original_command": command,
+        "executed_command": executed_command,
+        "executed_argv": argv,
         "argv": argv,
         "cwd": str(repo_path),
         "returncode": returncode,

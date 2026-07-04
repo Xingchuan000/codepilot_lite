@@ -386,6 +386,27 @@ codepilot route '{"tool_name":"apply_patch","arguments":{"repo":".","patch":"dif
 - 修改后应执行 `run_tests`
 - `finish` 前应执行 `git_status` 或 `git_diff`
 
+如果真实模型偶尔输出字段别名，当前第八步会在解析阶段自动归一化这些常见写法：
+
+- `action` -> `type` 或 `tool_name`
+- `tool` / `name` / `function_name` / `function` -> `tool_name`
+- `parameters` / `input` / `args` -> `arguments`
+- `type=final` -> `type=finish`
+
+归一化只负责把常见字段别名整理成标准 `AgentAction`，不会跳过 `ToolRouter -> PolicyChecker -> call_tool_traced(...)` 这条执行链。你可以用下面的 fake actions 文件直接验证这条兼容路径：
+
+```bash
+PYTHONPATH=src python -m codepilot.cli agent-run \
+  "Fix the failing add test" \
+  --repo /tmp/codepilot-agent-demo \
+  --fake-actions tests/codepilot/fixtures/agent_actions_aliases.jsonl \
+  --approve \
+  --policy-mode build \
+  --run-id demo-agent-alias-actions
+```
+
+运行后，`runs/demo-agent-alias-actions/trace.jsonl` 里的 `agent_action` 事件会带上 `normalization_applied`、`normalized_fields`、`raw_action_preview` 和 `normalized_action_preview`，方便排查真实 LLM 的字段漂移。
+
 ### 使用 fake actions 运行最小闭环
 
 可以用 JSONL 文件驱动 `FakeLLMClient`，逐步验证 loop 行为：

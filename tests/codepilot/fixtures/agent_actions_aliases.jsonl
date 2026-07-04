@@ -1,0 +1,6 @@
+{"action":"read_file","parameters":{"path":"src/calc.py","start_line":1,"end_line":20}}
+{"type":"tool_call","tool":"replace_range","parameters":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\n"}}
+{"name":"run_tests","input":{"command":"python -m pytest -q","timeout":30}}
+{"type":"tool_call","tool":"git_status","parameters":{}}
+{"type":"tool_call","tool":"git_diff","parameters":{"path":"src/calc.py","include_content":true}}
+{"type":"finish","status":"success","summary":"Fixed add() and verified tests passed.","tests":"python -m pytest -q passed","changed_files":["src/calc.py"]}

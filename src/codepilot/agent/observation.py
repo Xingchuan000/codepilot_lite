@@ -79,11 +79,52 @@ def format_observation(route_result: ToolRouteResult, *, max_output_chars: int =
     return "\n".join(lines)
 
 
-def format_parse_error_observation(error: AgentActionParseError) -> str:
-    """把动作解析错误转成清晰的修正提示。"""
+def format_parse_error_observation(error: Exception) -> str:
+    """把动作解析错误转成更具体的修正提示。"""
 
-    return (
-        "Your previous response could not be parsed as a CodePilot AgentAction.\n"
-        f"Error: {error}\n"
-        'Return exactly one JSON object with type "tool_call" or "finish".'
+    norm_meta = getattr(error, "normalization_metadata", {}) or {}
+    non_standard_fields = norm_meta.get("non_standard_fields", [])
+    normalized_fields = norm_meta.get("normalized_fields", {})
+    lines = [
+        "Action parse failed.",
+        f"Reason: {error}",
+    ]
+    if non_standard_fields:
+        lines.append("Your previous action used non-standard fields: " + ", ".join(str(item) for item in non_standard_fields) + ".")
+    if normalized_fields:
+        lines.append(f"I attempted to normalize these fields: {normalized_fields}.")
+    lines.extend(
+        [
+            "Use exactly this format for tool calls:",
+            '{"type":"tool_call","tool_name":"list_files","arguments":{"path":"."}}',
+            'For finish, use exactly: {"type":"finish","status":"success","summary":"...","tests":"...","changed_files":[]}',
+            "Return one JSON object only. Do not use Markdown.",
+        ]
     )
+    return "\n".join(lines)
+
+
+def format_finish_blocked_observation(
+    *,
+    last_test_status: str | None,
+    last_test_command: str | None,
+) -> str:
+    """把无法以 success 结束的原因清楚地反馈给模型。"""
+
+    lines = [
+        "Finish blocked.",
+        "Reason: The model requested finish with status=success, but no passed run_tests result is recorded.",
+        f"Current last_test_status: {last_test_status or 'unknown'}",
+    ]
+    if last_test_command:
+        lines.append(f"Current last_test_command: {last_test_command}")
+    lines.extend(
+        [
+            "Before finishing successfully:",
+            '1. Call run_tests with a passing command, for example {"type":"tool_call","tool_name":"run_tests","arguments":{"command":"python -m pytest tests/","timeout":30}}',
+            "2. Inspect git_status or git_diff if needed.",
+            '3. Then return finish with status=success.',
+            "Do not use finish success until run_tests has passed.",
+        ]
+    )
+    return "\n".join(lines)

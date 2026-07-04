@@ -59,6 +59,37 @@ def test_cli_agent_run_with_fake_actions(tmp_path: Path) -> None:
     assert (tmp_path / "runs" / "run-test" / "trace.jsonl").exists()
 
 
+def test_cli_agent_run_with_alias_fake_actions(tmp_path: Path) -> None:
+    repo = _write_bug_repo(tmp_path)
+    fixture = Path("tests/codepilot/fixtures/agent_actions_aliases.jsonl").resolve()
+
+    result = runner.invoke(
+        app,
+        [
+            "agent-run",
+            "Fix the failing add test",
+            "--repo",
+            str(repo),
+            "--fake-actions",
+            str(fixture),
+            "--approve",
+            "--policy-mode",
+            "build",
+            "--runs-dir",
+            str(tmp_path / "runs"),
+            "--run-id",
+            "run-test-aliases",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert "Status: success" in result.stdout
+    assert "Steps: 6" in result.stdout
+    trace_path = tmp_path / "runs" / "run-test-aliases" / "trace.jsonl"
+    assert trace_path.exists()
+    assert "normalization_applied" in trace_path.read_text(encoding="utf-8")
+
+
 def test_cli_agent_run_read_only_does_not_modify_file(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
     fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()

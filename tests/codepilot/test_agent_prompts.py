@@ -17,6 +17,14 @@ def test_system_prompt_contains_required_rules() -> None:
     assert "run_tests" in prompt
     assert "git_status" in prompt
     assert "git_diff" in prompt
+    assert "IMPORTANT JSON FIELD RULES" in prompt
+    assert '"tool_name"' in prompt
+    assert '"arguments"' in prompt
+    assert "necessary trailing newline" in prompt
+    assert '"parameters"' in prompt
+    assert '"action"' in prompt
+    assert "GOOD:" in prompt
+    assert "BAD:" in prompt
 
 
 def test_render_tool_catalog_reads_registry_and_omits_repo_by_default() -> None:

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from codepilot.agent.actions import AgentFinishAction
-from codepilot.agent.state import create_initial_state, mark_finished_from_action, update_state_from_route_result
+from codepilot.agent.state import create_initial_state, looks_like_pytest_command, mark_finished_from_action, update_state_from_route_result
 from codepilot.router.actions import ToolRouteResult
 from codepilot.tools.base import ToolResult
 
@@ -96,6 +96,48 @@ def test_update_state_counts_policy_violations(tmp_path: Path) -> None:
     update_state_from_route_result(state, denied)
 
     assert state.policy_violations == 1
+
+
+def test_update_state_from_run_shell_pytest_command_marks_passed(tmp_path: Path) -> None:
+    state = create_initial_state("demo", tmp_path, max_steps=3)
+    result = ToolRouteResult(
+        action_id="a1",
+        tool_name="run_shell",
+        success=True,
+        result=ToolResult(success=True, metadata={"command": "python -m pytest tests/", "returncode": 0}),
+    )
+
+    update_state_from_route_result(state, result)
+
+    assert state.last_test_status == "passed"
+    assert state.last_test_command == "python -m pytest tests/"
+    assert state.last_failed_tests == []
+
+
+def test_update_state_from_run_shell_non_pytest_command_is_ignored(tmp_path: Path) -> None:
+    state = create_initial_state("demo", tmp_path, max_steps=3)
+    result = ToolRouteResult(
+        action_id="a1",
+        tool_name="run_shell",
+        success=True,
+        result=ToolResult(success=True, metadata={"command": "echo pytest", "returncode": 0}),
+    )
+
+    update_state_from_route_result(state, result)
+
+    assert state.last_test_status is None
+    assert state.last_test_command is None
+
+
+def test_looks_like_pytest_command_handles_common_forms() -> None:
+    assert looks_like_pytest_command("pytest")
+    assert looks_like_pytest_command("pytest -q")
+    assert looks_like_pytest_command("python -m pytest")
+    assert looks_like_pytest_command("python3 -m pytest tests/")
+    assert looks_like_pytest_command("/absolute/path/to/python -m pytest tests/")
+    assert not looks_like_pytest_command("echo pytest")
+    assert not looks_like_pytest_command("cat pytest.ini")
+    assert not looks_like_pytest_command("python script.py pytest")
 
 
 def test_mark_finished_from_action_updates_state(tmp_path: Path) -> None:

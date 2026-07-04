@@ -19,6 +19,25 @@ After making changes, you must run_tests.
 Before finish, you must inspect git_status or git_diff.
 If a policy deny happens, do not repeat the same unsafe action.
 The repo argument may be omitted because the loop will inject the current repo.
+IMPORTANT JSON FIELD RULES:
+For tool calls, use exactly these standard keys:
+{"type":"tool_call","tool_name":"<one registered tool name>","arguments":{}}
+When replacement text spans multiple lines, keep the necessary trailing newline in "replacement".
+Do NOT use these non-standard keys in your final answer:
+- "tool"
+- "parameters"
+- "action"
+- "name"
+- "input"
+- "args"
+For finish, use exactly:
+{"type":"finish","status":"success","summary":"...","tests":"...","changed_files":[]}
+GOOD:
+{"type":"tool_call","tool_name":"list_files","arguments":{"path":"."}}
+BAD:
+{"action":"list_files","parameters":{"path":"."}}
+BAD:
+{"type":"tool_call","tool":"list_files","parameters":{"path":"."}}
 """
 
 

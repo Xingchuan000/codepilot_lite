@@ -162,3 +162,48 @@ def test_fake_loop_unknown_tool_does_not_crash(tmp_path: Path) -> None:
     result = loop.run("Inspect repo", repo)
 
     assert result.status == "partial"
+
+
+def test_fake_loop_blocks_finish_success_until_tests_pass(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    loop = _build_loop(
+        tmp_path,
+        [
+            '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\\n"}}',
+            '{"type":"finish","status":"success","summary":"done"}',
+            '{"type":"tool_call","tool_name":"run_tests","arguments":{"command":"pytest","timeout":30}}',
+            '{"type":"finish","status":"success","summary":"done after passed tests","tests":"pytest passed","changed_files":["src/calc.py"]}',
+        ],
+        max_steps=4,
+    )
+
+    result = loop.run("Fix the failing add test", repo)
+    events = _read_trace_events(Path(result.trace_path))
+
+    assert result.success is True
+    assert result.status == "success"
+    assert result.last_test_status == "passed"
+    assert any(
+        event["event_type"] == "agent_action"
+        and event["metadata"].get("finish_blocked_without_passed_tests") is True
+        for event in events
+    )
+    assert any(
+        event["event_type"] == "agent_observation"
+        and "Finish blocked." in (event.get("output_summary") or "")
+        for event in events
+    )
+
+
+def test_fake_loop_allows_partial_finish_without_tests(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    loop = _build_loop(
+        tmp_path,
+        ['{"type":"finish","status":"partial","summary":"Need more work"}'],
+        max_steps=1,
+    )
+
+    result = loop.run("Inspect repo", repo)
+
+    assert result.success is False
+    assert result.status == "partial"

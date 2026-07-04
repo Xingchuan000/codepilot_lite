@@ -7,10 +7,11 @@ from typing import Any
 from codepilot.agent.actions import (
     AgentFinishAction,
     AgentToolCallAction,
+    agent_action_dict_to_trace_preview,
     agent_action_to_trace_input,
-    parse_agent_action,
+    parse_agent_action_with_metadata,
 )
-from codepilot.agent.observation import format_observation, format_parse_error_observation
+from codepilot.agent.observation import format_finish_blocked_observation, format_observation, format_parse_error_observation
 from codepilot.agent.prompts import build_initial_messages
 from codepilot.agent.state import create_initial_state, mark_finished_from_action, update_state_from_route_result
 from codepilot.llm.fake import FakeLLMExhaustedError
@@ -119,26 +120,76 @@ class MinimalAgentLoop:
                     usage=response.usage,
                 )
                 try:
-                    action = parse_agent_action(response.content)
+                    parsed_action = parse_agent_action_with_metadata(response.content)
+                    action = parsed_action.action
                 except Exception as exc:
+                    normalization_metadata = getattr(exc, "normalization_metadata", {}) or {}
                     self.trace_logger.record_agent_action(
                         action_type=None,
                         input={},
                         success=False,
                         error=str(exc),
-                        metadata={"parse_success": False},
+                        metadata={
+                            "parse_success": False,
+                            "normalization_applied": normalization_metadata.get("normalization_applied", False),
+                            "normalized_fields": normalization_metadata.get("normalized_fields", {}),
+                            "non_standard_fields": normalization_metadata.get("non_standard_fields", []),
+                            "raw_action_preview": agent_action_dict_to_trace_preview(getattr(exc, "raw_action", {}) or {}),
+                            "normalized_action_preview": agent_action_dict_to_trace_preview(
+                                getattr(exc, "normalized_action", {}) or {}
+                            ),
+                        },
                     )
                     state.messages.append(ChatMessage(role="assistant", content=response.content))
                     observation = format_parse_error_observation(exc)
                     state.messages.append(ChatMessage(role="user", content=observation))
                     self.trace_logger.record_agent_observation(tool_name=None, observation=observation)
                     continue
+                if isinstance(action, AgentFinishAction):
+                    if action.status == "success" and state.last_test_status != "passed":
+                        observation = format_finish_blocked_observation(
+                            last_test_status=state.last_test_status,
+                            last_test_command=state.last_test_command,
+                        )
+                        self.trace_logger.record_agent_action(
+                            action_type=action.type,
+                            tool_name=None,
+                            input=agent_action_to_trace_input(action),
+                            success=False,
+                            error="finish success blocked without passed tests",
+                            metadata={
+                                "finish_blocked_without_passed_tests": True,
+                                "requested_status": action.status,
+                                "last_test_status": state.last_test_status,
+                                "last_test_command": state.last_test_command,
+                            },
+                        )
+                        state.messages.append(ChatMessage(role="assistant", content=response.content))
+                        state.messages.append(ChatMessage(role="user", content=observation))
+                        self.trace_logger.record_agent_observation(
+                            tool_name=None,
+                            observation=observation,
+                            metadata={
+                                "finish_blocked_without_passed_tests": True,
+                                "last_test_status": state.last_test_status,
+                                "last_test_command": state.last_test_command,
+                            },
+                        )
+                        continue
                 self.trace_logger.record_agent_action(
                     action_type=action.type,
                     tool_name=action.tool_name if isinstance(action, AgentToolCallAction) else None,
                     input=agent_action_to_trace_input(action),
                     success=True,
-                    metadata={"parse_success": True},
+                    metadata={
+                        "parse_success": True,
+                        "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
+                        "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
+                        "non_standard_fields": parsed_action.normalization_metadata.get("non_standard_fields", []),
+                        "normalization_conflicts": parsed_action.normalization_metadata.get("conflicts", []),
+                        "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
+                        "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
+                    },
                 )
                 if isinstance(action, AgentFinishAction):
                     mark_finished_from_action(state, action)
@@ -148,8 +199,6 @@ class MinimalAgentLoop:
                         metadata={"tests": action.tests, "changed_files": action.changed_files},
                     )
                     run_end_metadata: dict[str, Any] = {}
-                    if action.status == "success" and state.last_test_status != "passed":
-                        run_end_metadata["warning"] = "finish_without_passed_tests"
                     self.trace_logger.record_run_end(
                         success=action.status == "success",
                         summary=action.summary,
@@ -170,6 +219,10 @@ class MinimalAgentLoop:
                         tool_name=action.tool_name,
                         arguments=injected_args,
                         reason=action.short_rationale,
+                        metadata={
+                            "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
+                            "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
+                        },
                     )
                     route_result = self.router.route(tool_action)
                 except Exception as exc:
