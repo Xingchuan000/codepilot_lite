@@ -14,9 +14,23 @@ import os
 from pathlib import Path
 from typing import Any, Protocol
 
-import dotenv
-from platformdirs import user_config_dir
-from rich.console import Console
+try:
+    import dotenv
+except ModuleNotFoundError:  # pragma: no cover - 测试环境可能缺少可选依赖
+    dotenv = None
+
+try:
+    from platformdirs import user_config_dir
+except ModuleNotFoundError:  # pragma: no cover - 测试环境可能缺少可选依赖
+    def user_config_dir(appname: str) -> str:  # type: ignore[override]
+        return str(Path.home() / ".config" / appname)
+
+try:
+    from rich.console import Console
+except ModuleNotFoundError:  # pragma: no cover - 测试环境可能缺少可选依赖
+    class Console:  # type: ignore[override]
+        def print(self, *args: Any, **kwargs: Any) -> None:
+            print(*args, **kwargs)
 
 from minisweagent.utils.log import logger
 
@@ -24,7 +38,11 @@ package_dir = Path(__file__).resolve().parent
 
 
 global_config_dir = Path(os.getenv("MSWEA_GLOBAL_CONFIG_DIR") or user_config_dir("mini-swe-agent"))
-global_config_dir.mkdir(parents=True, exist_ok=True)
+try:
+    global_config_dir.mkdir(parents=True, exist_ok=True)
+except PermissionError:  # pragma: no cover - 测试环境可能不允许写入用户配置目录
+    global_config_dir = Path("/tmp") / "mini-swe-agent"
+    global_config_dir.mkdir(parents=True, exist_ok=True)
 global_config_file = Path(global_config_dir) / ".env"
 
 if not os.getenv("MSWEA_SILENT_STARTUP"):
@@ -33,7 +51,8 @@ if not os.getenv("MSWEA_SILENT_STARTUP"):
         f"Check the [bold red]v2 migration guide[/] at [bold red]https://klieret.short.gy/mini-v2-migration[/]\n"
         f"Loading global config from [bold green]'{global_config_file}'[/bold green]",
     )
-dotenv.load_dotenv(dotenv_path=global_config_file)
+if dotenv is not None:
+    dotenv.load_dotenv(dotenv_path=global_config_file)
 
 
 # === Protocols ===

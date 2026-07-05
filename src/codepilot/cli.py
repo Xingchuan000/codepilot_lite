@@ -11,6 +11,7 @@ from codepilot.agent.loop import MinimalAgentLoop
 from codepilot.llm.fake import FakeLLMClient
 from codepilot.llm.swe_agent_adapter import SweAgentModelAdapter
 from codepilot.policy import PolicyChecker, PolicyContext
+from codepilot.report.generator import ReportExistsError, generate_report
 from codepilot.router import ToolRouter
 from codepilot.tools.base import ToolSideEffect
 from codepilot.tools.registry import call_tool, call_tool_traced, find_tool_spec, list_tool_specs
@@ -122,6 +123,45 @@ def tools() -> None:
 
     for spec in list_tool_specs():
         typer.echo(f"{spec.name}\t{spec.risk.value}\t{spec.default_permission.value}")
+
+
+@app.command("report")
+def report_command(
+    trace: str | None = typer.Option(None, "--trace", help="Path to trace.jsonl."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run id under --runs-dir."),
+    runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory containing run folders."),
+    output: str | None = typer.Option(None, "--output", help="Output report.md path."),
+    write_json: bool = typer.Option(False, "--json", help="Also write report.json."),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing report output."),
+) -> None:
+    """从已有 trace 生成 Evidence Report。"""
+
+    if (trace is None) == (run_id is None):
+        typer.echo("Provide exactly one of --trace or --run-id.", err=True)
+        raise typer.Exit(1)
+
+    trace_path = Path(trace) if trace is not None else Path(runs_dir) / run_id / "trace.jsonl"
+    output_path = Path(output) if output is not None else None
+
+    try:
+        report_path, report = generate_report(trace_path, output_path, write_json=write_json, overwrite=overwrite)
+    except FileNotFoundError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+    except ReportExistsError as exc:
+        typer.echo(f"{exc}\nUse --overwrite to replace it.", err=True)
+        raise typer.Exit(1) from exc
+    except Exception as exc:
+        typer.echo(f"Report generation failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo(f"Report written: {report_path}")
+    typer.echo(f"Status: {report.status or 'unknown'}")
+    typer.echo(f"Tests: {report.tests.status or 'unknown'}")
+    typer.echo(f"Changed files: {len(report.changed_files)}")
+    typer.echo(f"Policy violations: {len(report.policy.violations)}")
+    if write_json:
+        typer.echo(f"Report JSON written: {report_path.with_suffix('.json')}")
 
 
 @app.command("agent-run")

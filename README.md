@@ -239,6 +239,39 @@ codepilot tool list_files '{"repo":".","path":".","max_depth":2}'
 codepilot tool list_files '{"repo":".","path":".","max_depth":2}' --trace
 ```
 
+### Evidence Report 使用说明
+
+第九步新增了 `codepilot report` 命令，用来把已有的 `trace.jsonl` 转成可阅读的 `report.md`。
+这个命令只读取 trace，不会重新调用 LLM，也不会重新执行任何工具。
+
+```bash
+# 直接指定 trace 文件
+codepilot report --trace runs/<run_id>/trace.jsonl --overwrite
+
+# 通过 run_id 自动定位到 runs/<run_id>/trace.jsonl
+codepilot report --run-id <run_id> --runs-dir runs --overwrite
+
+# 额外输出 report.json
+codepilot report --trace runs/<run_id>/trace.jsonl --json --overwrite
+```
+
+默认输出文件是 `trace.jsonl` 同目录下的 `report.md`。  
+如果希望写到别的位置，可以加 `--output <path>`。  
+如果目标 `report.md` 已存在，需要显式加 `--overwrite` 才会覆盖。
+
+`report` 在生成 `RunReport.run_id` 时，严格按下面顺序取值：
+
+1. `run_start` 事件中的 `run_id`
+2. `trace_path.parent.name`，但仅限 `trace.jsonl` 位于类似 `runs/run-abc/trace.jsonl` 或 `runs/demo-xyz/trace.jsonl` 这类真实 run 目录下
+3. trace 中第一个非空的事件顶层 `run_id`
+4. trace 中第一个非空的 `metadata.run_id`
+5. `unknown-run`
+
+这意味着：
+
+- 如果 trace 文件位于标准 `runs/<run_id>/trace.jsonl` 目录结构中，而 `run_start` 缺失，生成的 report 会优先使用目录名作为 `run_id`
+- 如果 trace 文件只是放在普通临时目录里，例如 `/tmp/trace.jsonl`，则不会错误使用临时目录名，而是回退到事件里的 `run_id`
+
 ## CodePilot Lite 第七步 — Verification Tools v1
 
 第七步在现有结构化工具层上新增了 3 个 verification 工具：

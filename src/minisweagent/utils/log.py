@@ -1,7 +1,12 @@
 import logging
 from pathlib import Path
 
-from rich.logging import RichHandler
+try:
+    from rich.logging import RichHandler
+except ModuleNotFoundError:  # pragma: no cover - 测试环境可能缺少可选依赖
+    class RichHandler(logging.StreamHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
 
 
 def _setup_root_logger() -> None:
