@@ -178,3 +178,46 @@ def test_apply_patch_read_only_denied_without_tool_call(tmp_path: Path) -> None:
     assert routed.success is False
     assert routed.metadata["policy_decision"] == "deny"
     assert _event_types(tmp_path) == ["policy_decision"]
+
+
+def test_policy_denies_replace_range_for_github_workflows_even_when_approved(tmp_path: Path) -> None:
+    (tmp_path / ".github" / "workflows").mkdir(parents=True)
+    (tmp_path / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
+    router = _router(tmp_path, approved=True)
+
+    routed = router.route(
+        ToolAction(
+            tool_name="replace_range",
+            arguments={
+                "repo": tmp_path,
+                "path": ".github/workflows/ci.yml",
+                "start_line": 1,
+                "end_line": 1,
+                "replacement": "changed\n",
+            },
+        )
+    )
+
+    assert routed.success is False
+    assert routed.metadata["policy_decision"] == "deny"
+    assert (tmp_path / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8") == "name: ci\n"
+    assert _event_types(tmp_path) == ["policy_decision"]
+
+
+def test_policy_denies_apply_patch_for_runs_directory(tmp_path: Path) -> None:
+    (tmp_path / "runs").mkdir()
+    router = _router(tmp_path, approved=True)
+
+    routed = router.route(
+        ToolAction(
+            tool_name="apply_patch",
+            arguments={
+                "repo": tmp_path,
+                "patch": "diff --git a/runs/foo.txt b/runs/foo.txt\n--- a/runs/foo.txt\n+++ b/runs/foo.txt\n@@ -0,0 +1 @@\n+demo\n",
+            },
+        )
+    )
+
+    assert routed.success is False
+    assert routed.metadata["policy_decision"] == "deny"
+    assert _event_types(tmp_path) == ["policy_decision"]

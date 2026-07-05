@@ -30,6 +30,8 @@ def test_policy_checker_denies_sensitive_directories(tmp_path: Path) -> None:
     assert _decision("read_file", {"repo": tmp_path, "path": "secrets/token.txt"}).denied is True
     assert _decision("list_files", {"repo": tmp_path, "path": "secrets"}).denied is True
     assert _decision("list_files", {"repo": tmp_path, "path": ".ssh"}).denied is True
+    assert _decision("read_file", {"repo": tmp_path, "path": ".github/workflows/ci.yml"}).denied is True
+    assert _decision("read_file", {"repo": tmp_path, "path": "runs/output.txt"}).denied is True
 
 
 def test_policy_checker_denies_paths_outside_repo(tmp_path: Path) -> None:
@@ -54,6 +56,13 @@ def test_policy_checker_allows_safe_shell_prefixes_in_build_mode(tmp_path: Path)
 def test_policy_checker_denies_dangerous_shell_commands(tmp_path: Path) -> None:
     assert _decision("run_shell", {"repo": tmp_path, "command": "rm -rf ."}).denied is True
     assert _decision("run_shell", {"repo": tmp_path, "command": "  git   push origin main"}).denied is True
+    assert _decision("run_shell", {"repo": tmp_path, "command": "printf SECRET=1 > .env"}).denied is True
+    assert _decision("run_shell", {"repo": tmp_path, "command": "cat .github/workflows/ci.yml"}).denied is True
+    assert _decision(
+        "run_shell",
+        {"repo": tmp_path, "command": "printf SECRET=1 > .env"},
+        context=PolicyContext(mode="build", approved=True),
+    ).denied is True
     assert _decision("run_tests", {"repo": tmp_path, "command": "rm -rf ."}).denied is True
     assert _decision("run_tests", {"repo": tmp_path, "command": "curl http://example.com"}).denied is True
 

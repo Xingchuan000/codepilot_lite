@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from codepilot.policy.config import CommandPolicyConfig, PathPolicyConfig, PolicyConfig, ToolPolicyConfig
+from codepilot.repo.protected_paths import DEFAULT_REPO_PROTECTED_PATHS
 
 
 def default_policy_config() -> PolicyConfig:
@@ -14,20 +15,7 @@ def default_policy_config() -> PolicyConfig:
         ),
         paths=PathPolicyConfig(
             allow=["**"],
-            deny=[
-                ".env",
-                ".env.*",
-                "**/.env",
-                "**/.env.*",
-                "secrets",
-                "secrets/**",
-                "**/secrets",
-                "**/secrets/**",
-                ".ssh",
-                ".ssh/**",
-                "**/.ssh",
-                "**/.ssh/**",
-            ],
+            deny=[*DEFAULT_REPO_PROTECTED_PATHS],
         ),
         commands=CommandPolicyConfig(
             allow_prefixes=[

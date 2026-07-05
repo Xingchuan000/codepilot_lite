@@ -259,6 +259,127 @@ codepilot report --trace runs/<run_id>/trace.jsonl --json --overwrite
 如果希望写到别的位置，可以加 `--output <path>`。  
 如果目标 `report.md` 已存在，需要显式加 `--overwrite` 才会覆盖。
 
+### Issue Workflow Hardening 使用说明
+
+第十一步为 `codepilot issue` 增加了仓库安全检查、隔离 worktree、产物清单和恢复说明。
+这些能力只围绕 issue workflow 生效，不会自动执行 commit、push、创建 PR、stash 或 reset。
+
+```bash
+# 干净仓库，按默认 fail 策略运行
+codepilot issue --issue-file issue.md --repo . --approve
+
+# 仓库有未提交改动时，仅记录 warning 并继续
+codepilot issue --issue-file issue.md --repo . --dirty-policy warn --approve
+
+# 在隔离 worktree 中运行，避免直接改动原仓库
+codepilot issue --issue-file issue.md --repo . --worktree --approve
+
+# 运行结束后自动尝试清理 worktree
+codepilot issue --issue-file issue.md --repo . --worktree --cleanup-worktree --approve
+
+# 输出路径脱敏，适合后续分享 artifact
+codepilot issue --issue-file issue.md --repo . --redact-absolute-paths --approve
+```
+
+新增参数说明：
+
+| 参数 | 说明 |
+|------|------|
+| `--dirty-policy fail|warn|allow` | 控制原仓库存在未提交改动时是否拒绝、警告继续或直接允许 |
+| `--worktree / --no-worktree` | 是否在隔离 worktree 中执行 agent |
+| `--worktree-base-dir` | 指定 worktree 根目录，必须位于原仓库之外 |
+| `--cleanup-worktree / --keep-worktree` | 运行后是否尝试移除 worktree |
+| `--manifest / --no-manifest` | 是否写出 `artifact_manifest.json` |
+| `--restore-plan / --no-restore-plan` | 是否写出 `restore_plan.md` |
+| `--require-clean-source-for-worktree` | worktree 模式下是否要求原仓库必须干净 |
+| `--worktree-branch-prefix` | worktree 分支前缀，默认 `codepilot` |
+| `--redact-absolute-paths` | 在 manifest 中把绝对路径替换为 `[REDACTED_PATH]` |
+
+新增产物说明：
+
+| 文件 | 说明 |
+|------|------|
+| `artifact_manifest.json` | 记录 run 状态、repo safety 结果、patch metadata 和所有产物索引 |
+| `restore_plan.md` | 提供人工恢复说明，不会建议 `git reset --hard` 或 `git clean -fd` |
+| `changes.patch` | 仍然导出当前 effective repo 的二进制安全 diff |
+| `pr_summary.md` | 新增 Repo Safety、Patch Metadata、Manifest、Restore plan 信息 |
+
+## CodePilot Lite 第十步 - GitHub Issue Workflow 使用说明
+
+第十步新增了围绕 issue 输入的完整工作流入口：`codepilot issue`。  
+这个命令严格按固定链路执行：
+
+```text
+issue.md / GitHub issue URL
+→ issue.json
+→ MinimalAgentLoop
+→ trace.jsonl
+→ report.md / report.json
+→ changes.patch
+→ pr_summary.md
+```
+
+### 本地 issue 文件运行
+
+```bash
+codepilot issue \
+  --issue-file examples/issues/add_bug.md \
+  --repo /path/to/local/repo \
+  --fake-actions tests/codepilot/fixtures/agent_actions_success.jsonl \
+  --approve \
+  --runs-dir runs \
+  --run-id issue-demo \
+  --overwrite
+```
+
+### GitHub issue URL 运行
+
+默认会从环境变量 `GITHUB_TOKEN` 读取 token；如果不需要认证，也可以不设置。
+
+```bash
+export GITHUB_TOKEN=ghp_xxx
+
+codepilot issue \
+  https://github.com/<owner>/<repo>/issues/<number> \
+  --repo /path/to/local/repo \
+  --runs-dir runs \
+  --run-id issue-demo \
+  --overwrite
+```
+
+如果 token 放在别的环境变量中，可以用 `--github-token-env <ENV_NAME>` 指定变量名。
+
+### 主要参数
+
+- `--issue-file`：本地 Markdown issue 文件，与位置参数里的 GitHub issue URL 二选一。
+- `--repo`：要修复的本地仓库路径。
+- `--policy-mode`：权限模式，支持 `read_only`、`build`、`danger`。
+- `--approve`：批准 `ask` 类工具执行。
+- `--fake-actions`：传入 JSONL 假响应，便于离线演示或测试。
+- `--max-steps`：覆盖默认 agent 最大步数。
+- `--report / --no-report`：是否生成 `report.md`。
+- `--json-report / --no-json-report`：是否生成 `report.json`。
+- `--runs-dir`、`--run-id`：指定产物输出目录。
+- `--overwrite`：覆盖已有产物文件。
+
+### 产物说明
+
+执行成功后会在 `runs/<run_id>/` 下生成以下文件：
+
+- `issue.json`：结构化 issue 输入。
+- `trace.jsonl`：完整运行轨迹。
+- `report.md`：Evidence Report Markdown。
+- `report.json`：Evidence Report JSON。
+- `changes.patch`：`git diff --binary` 导出的补丁。
+- `pr_summary.md`：可直接复用的 PR 摘要。
+
+### 行为边界
+
+- 不会自动执行 `git commit`。
+- 不会自动执行 `git push`。
+- 不会自动创建 Pull Request。
+- 不会把 GitHub token 写入 `issue.json`、trace、report 或 PR 摘要。
+
 `report` 在生成 `RunReport.run_id` 时，严格按下面顺序取值：
 
 1. `run_start` 事件中的 `run_id`

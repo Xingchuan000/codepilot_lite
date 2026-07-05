@@ -157,7 +157,7 @@ def test_cli_agent_run_uses_swe_adapter_path_when_fake_actions_missing(tmp_path:
             calls.append(messages)
             return {"role": "assistant", "content": '{"type":"finish","status":"partial","summary":"done"}'}
 
-    monkeypatch.setattr("codepilot.cli.get_model", lambda config=None: FakeModel())
+    monkeypatch.setattr("codepilot.agent.runner.get_model", lambda config=None: FakeModel())
 
     result = runner.invoke(
         app,

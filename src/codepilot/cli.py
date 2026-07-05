@@ -1,37 +1,23 @@
 """CodePilot Lite 命令行入口。"""
 
 import json
+import os
 from pathlib import Path
 from typing import Literal
 
 import typer
 from pydantic import ValidationError
 
-from codepilot.agent.loop import MinimalAgentLoop
-from codepilot.llm.fake import FakeLLMClient
-from codepilot.llm.swe_agent_adapter import SweAgentModelAdapter
+from codepilot.agent.runner import run_agent_task
+from codepilot.github.workflow import run_issue_workflow
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.report.generator import ReportExistsError, generate_report
 from codepilot.router import ToolRouter
 from codepilot.tools.base import ToolSideEffect
 from codepilot.tools.registry import call_tool, call_tool_traced, find_tool_spec, list_tool_specs
 from codepilot.trace.logger import TraceLogger
-from minisweagent.config import get_config_from_spec
-from minisweagent.models import get_model
-from minisweagent.utils.serialize import recursive_merge
 
 app = typer.Typer(add_completion=False, help="CodePilot Lite structured tools CLI.")
-
-
-def build_swe_model_from_config_specs(model_config: list[str], model_name: str | None = None):
-    """复用 mini-SWE-agent 现有配置解析来构造模型对象。"""
-
-    config: dict = {}
-    for spec in model_config:
-        config = recursive_merge(config, get_config_from_spec(spec))
-    if model_name is not None:
-        config = recursive_merge(config, {"model": {"model_name": model_name}})
-    return get_model(config=config.get("model", {}))
 
 
 @app.command()
@@ -187,20 +173,18 @@ def agent_run(
 ) -> None:
     """运行第八步 MinimalAgentLoop。"""
 
-    repo_path = Path(repo).expanduser().resolve()
-    llm = (
-        FakeLLMClient.from_jsonl(fake_actions)
-        if fake_actions
-        else SweAgentModelAdapter(model=build_swe_model_from_config_specs(model_config, model_name=model))
-    )
-    policy_context = PolicyContext(repo=repo_path, mode=policy_mode, approved=approve, interactive=False)
-    router = ToolRouter.from_runs_dir(
+    result = run_agent_task(
+        task=task,
+        repo=repo,
+        max_steps=max_steps,
+        policy_mode=policy_mode,
+        approve=approve,
+        fake_actions=fake_actions,
+        model=model,
+        model_config=model_config,
         runs_dir=runs_dir,
         run_id=run_id,
-        policy_checker=PolicyChecker.default(),
-        policy_context=policy_context,
     )
-    result = MinimalAgentLoop(llm=llm, router=router, max_steps=max_steps).run(task=task, repo=repo_path)
 
     typer.echo(f"Status: {result.status}")
     typer.echo(f"Success: {str(result.success).lower()}")
@@ -212,6 +196,114 @@ def agent_run(
     typer.echo(f"Policy violations: {result.policy_violations}")
     typer.echo(f"Trace: {result.trace_path}")
     if not result.success:
+        raise typer.Exit(1)
+
+
+@app.command("issue")
+def issue_command(
+    issue_url: str | None = typer.Argument(None, help="GitHub issue URL."),
+    issue_file: str | None = typer.Option(None, "--issue-file", help="Local issue markdown file."),
+    repo: str = typer.Option(..., "--repo", help="Local repository path."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run id under --runs-dir."),
+    runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory for run artifacts."),
+    policy_mode: Literal["read_only", "build", "danger"] = typer.Option("build", "--policy-mode"),
+    approve: bool = typer.Option(False, "--approve", help="Approve ask tools."),
+    fake_actions: str | None = typer.Option(None, "--fake-actions", help="JSONL fake LLM action responses."),
+    max_steps: int | None = typer.Option(None, "--max-steps", help="Maximum LLM loop steps."),
+    report: bool = typer.Option(True, "--report/--no-report", help="Generate report.md."),
+    json_report: bool = typer.Option(True, "--json-report/--no-json-report", help="Generate report.json."),
+    dirty_policy: Literal["fail", "warn", "allow"] = typer.Option("fail", "--dirty-policy"),
+    worktree: bool = typer.Option(False, "--worktree/--no-worktree"),
+    worktree_base_dir: str | None = typer.Option(None, "--worktree-base-dir"),
+    cleanup_worktree: bool = typer.Option(False, "--cleanup-worktree/--keep-worktree"),
+    manifest: bool = typer.Option(True, "--manifest/--no-manifest"),
+    restore_plan: bool = typer.Option(True, "--restore-plan/--no-restore-plan"),
+    require_clean_source_for_worktree: bool = typer.Option(
+        False,
+        "--require-clean-source-for-worktree/--no-require-clean-source-for-worktree",
+    ),
+    worktree_branch_prefix: str = typer.Option("codepilot", "--worktree-branch-prefix"),
+    redact_absolute_paths: bool = typer.Option(False, "--redact-absolute-paths/--no-redact-absolute-paths"),
+    github_token_env: str = typer.Option(
+        "GITHUB_TOKEN",
+        "--github-token-env",
+        help="Environment variable name for GitHub token.",
+    ),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing run artifacts."),
+) -> None:
+    """执行第十步 issue workflow。"""
+
+    repo_path = Path(repo).expanduser().resolve()
+    if cleanup_worktree and not worktree:
+        typer.echo("cleanup_worktree requires --worktree.", err=True)
+        raise typer.Exit(1)
+    if worktree_base_dir is not None:
+        resolved_worktree_base_dir = Path(worktree_base_dir).expanduser().resolve()
+        try:
+            resolved_worktree_base_dir.relative_to(repo_path)
+        except ValueError:
+            pass
+        else:
+            typer.echo("worktree_base_dir must be outside the repository.", err=True)
+            raise typer.Exit(1)
+    if not manifest:
+        typer.echo("Warning: --no-manifest is not recommended for later automation.", err=True)
+    if not restore_plan:
+        typer.echo("Warning: --no-restore-plan means manual recovery info will not be generated.", err=True)
+    github_token = os.environ.get(github_token_env)
+    try:
+        result = run_issue_workflow(
+            issue_file=issue_file,
+            issue_url=issue_url,
+            repo=repo,
+            run_id=run_id,
+            runs_dir=runs_dir,
+            policy_mode=policy_mode,
+            approve=approve,
+            fake_actions=fake_actions,
+            max_steps=max_steps,
+            generate_report_markdown=report,
+            export_json_report=json_report,
+            github_token=github_token,
+            dirty_policy=dirty_policy,
+            worktree=worktree,
+            worktree_base_dir=worktree_base_dir,
+            keep_worktree=not cleanup_worktree,
+            cleanup_worktree=cleanup_worktree,
+            write_manifest=manifest,
+            write_restore_plan=restore_plan,
+            require_clean_source_for_worktree=require_clean_source_for_worktree,
+            worktree_branch_prefix=worktree_branch_prefix,
+            redact_absolute_paths=redact_absolute_paths,
+            overwrite=overwrite,
+        )
+    except (FileNotFoundError, ValueError, RuntimeError, FileExistsError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("Issue workflow completed.")
+    typer.echo(f"Run ID: {result.run_id}")
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Success: {str(bool(result.success)).lower()}")
+    typer.echo(f"Repo: {result.repo_path}")
+    typer.echo(f"Effective repo: {result.effective_repo_path}")
+    typer.echo(f"Worktree: {'enabled' if result.used_worktree else 'disabled'}")
+    typer.echo(f"Issue: {result.issue_json_path}")
+    typer.echo(f"Trace: {result.trace_path}")
+    typer.echo(f"Report: {result.report_path}")
+    typer.echo(f"Report JSON: {result.report_json_path}")
+    typer.echo(f"Patch: {result.patch_path}")
+    typer.echo(f"PR summary: {result.pr_summary_path}")
+    typer.echo(f"Manifest: {result.manifest_path}")
+    typer.echo(f"Restore plan: {result.restore_plan_path}")
+    typer.echo("Warnings:")
+    for warning in result.warnings:
+        typer.echo(f"- {warning}", err=True)
+    if result.success is False or result.status in {
+        "repo_safety_denied",
+        "protected_patch_path_denied",
+        "protected_after_path_denied",
+    }:
         raise typer.Exit(1)
 
 

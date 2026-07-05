@@ -14,6 +14,7 @@ from codepilot.tools.patch_utils import extract_paths_from_patch
 from codepilot.tools.registry import find_tool_spec
 
 COMMAND_TOOLS = {"run_shell", "run_tests"}
+PROTECTED_COMMAND_TOKENS = [".env", ".github/workflows", ".codepilot", "secrets/", ".ssh"]
 
 
 class PolicyChecker:
@@ -379,6 +380,18 @@ class PolicyChecker:
         normalized_command = self._normalize_command(raw_command)
         command_metadata = dict(metadata)
         command_metadata.update({"raw_command": raw_command, "normalized_command": normalized_command})
+        if tool_name == "run_shell":
+            for token in PROTECTED_COMMAND_TOKENS:
+                if token in normalized_command:
+                    command_metadata["command_rule"] = token
+                    return self._decision(
+                        "deny",
+                        f"Command references protected path token '{token}'.",
+                        tool_name=tool_name,
+                        matched_rule="command.protected_path_token.deny",
+                        context=context,
+                        metadata=command_metadata,
+                    )
 
         denied = self._matches_denied_command(normalized_command, self.config.commands.deny_substrings)
         if denied is not None:
