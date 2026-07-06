@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Any
 
-from codepilot.pr_feedback.github_client import PRFeedbackGitHubClientProtocol
+from codepilot.pr_feedback.github_client import PRFeedbackGitHubClientProtocol, PRFeedbackGitHubError, redact_feedback_text
 from codepilot.pr_feedback.models import CheckConclusion, CheckCorrelation, CheckRunSummary, PRRef
 
 
@@ -175,6 +175,44 @@ def collect_pr_checks(*, client: PRFeedbackGitHubClientProtocol, pr: PRRef) -> l
                 for job in client.list_workflow_jobs(pr.owner, pr.repo, run_id)
             )
     return checks
+
+
+def collect_pr_checks_degraded(*, client: PRFeedbackGitHubClientProtocol, pr: PRRef) -> tuple[list[CheckRunSummary], list[str], list[str]]:
+    """按固定顺序收集 checks，并允许局部 API 失败降级。"""
+
+    warnings: list[str] = []
+    degraded_sources: list[str] = []
+    checks: list[CheckRunSummary] = []
+    try:
+        checks.extend(normalize_check_run(raw, pr=pr) for raw in client.list_check_runs_for_ref(pr))
+    except PRFeedbackGitHubError as exc:
+        warnings.append(redact_feedback_text(str(exc)))
+        degraded_sources.append("checks")
+    try:
+        checks.extend(normalize_commit_status(raw, pr=pr) for raw in client.list_commit_statuses(pr))
+    except PRFeedbackGitHubError as exc:
+        warnings.append(redact_feedback_text(str(exc)))
+        degraded_sources.append("checks")
+    try:
+        workflow_runs = client.list_workflow_runs_for_pr(pr)
+    except PRFeedbackGitHubError as exc:
+        warnings.append(redact_feedback_text(str(exc)))
+        degraded_sources.append("checks")
+        return checks, warnings, degraded_sources
+    for raw in workflow_runs:
+        workflow_run = normalize_workflow_run(raw, pr=pr)
+        checks.append(workflow_run)
+        run_id = raw.get("id")
+        if not isinstance(run_id, int):
+            continue
+        try:
+            jobs = client.list_workflow_jobs(pr.owner, pr.repo, run_id)
+        except PRFeedbackGitHubError as exc:
+            warnings.append(redact_feedback_text(str(exc)))
+            degraded_sources.append("checks")
+            continue
+        checks.extend(_normalize_workflow_job(job, pr=pr, workflow_run_id=run_id) for job in jobs)
+    return checks, warnings, degraded_sources
 
 
 def summarize_check_state(checks: list[CheckRunSummary]) -> dict[str, int]:

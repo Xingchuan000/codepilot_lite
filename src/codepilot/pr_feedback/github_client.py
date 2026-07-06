@@ -175,7 +175,11 @@ class RestPRFeedbackGitHubClient:
             raise PRFeedbackGitHubError(redact_github_error(str(exc))) from exc
         self._record("GET", url, response)
         if response.status_code not in {200, 201}:
-            raise PRFeedbackGitHubError(redact_github_error(response.text))
+            request_id = response.headers.get("X-GitHub-Request-Id")
+            raise PRFeedbackGitHubError(
+                f"GitHub API request failed: status={response.status_code}; "
+                f"request_id={request_id}; body={redact_github_error(response.text)[:500]}"
+            )
         return response.json()
 
     def _get_list(self, url: str) -> list[dict[str, Any]]:
@@ -223,7 +227,11 @@ class RestPRFeedbackGitHubClient:
             raise PRFeedbackGitHubError(redact_github_error(str(exc))) from exc
         self._record("GET", url, response)
         if response.status_code not in {200, 302}:
-            raise PRFeedbackGitHubError(redact_github_error(response.text))
+            request_id = response.headers.get("X-GitHub-Request-Id")
+            raise PRFeedbackGitHubError(
+                f"GitHub API request failed: status={response.status_code}; "
+                f"request_id={request_id}; body={redact_github_error(response.text)[:500]}"
+            )
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         for chunk in response.iter_content(chunk_size=8192):

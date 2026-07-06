@@ -6,6 +6,7 @@ from pathlib import Path
 
 from jinja2 import StrictUndefined, Template
 
+from codepilot.pr_feedback.reviews import quote_untrusted_feedback
 from codepilot.pr_feedback.models import FeedbackItem, PRRef
 TASK_TEMPLATE = Template(
     """# CodePilot Follow-up Task
@@ -50,12 +51,13 @@ Fix the CI/review feedback below while preserving the original PR intent.
 def render_feedback_item_for_task(item: FeedbackItem, index: int) -> str:
     """把单条反馈渲染成适合 LLM 阅读的分段。"""
 
-    excerpt = item.raw_excerpt or item.summary
+    excerpt = quote_untrusted_feedback(item.raw_excerpt or item.summary)
     return (
         f"### Feedback {index}\n"
         f"- Severity: {item.severity}\n"
         f"- Kind: {item.kind}\n"
         f"- Source: {item.source}\n"
+        f"- Confidence: {item.confidence}\n"
         f"- Fingerprint: {item.fingerprint or 'n/a'}\n"
         f"- File: {item.file_path or 'n/a'}\n"
         f"- Line: {item.line if item.line is not None else 'n/a'}\n"

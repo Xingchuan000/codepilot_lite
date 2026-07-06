@@ -431,3 +431,26 @@ def test_route_invalid_schema_returns_non_zero() -> None:
 
     assert result.exit_code != 0
     assert "ToolAction 校验失败" in result.stderr
+
+
+def test_cli_pr_feedback_dry_run_without_token_returns_zero(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    run_dir = tmp_path / "runs" / "issue-test"
+    run_dir.mkdir(parents=True)
+
+    result = runner.invoke(app, ["pr-feedback", "--run-dir", str(run_dir), "--dry-run", "--overwrite"])
+
+    assert result.exit_code == 0
+    assert "Status: feedback_unavailable" in result.stdout
+    assert (run_dir / "ci_feedback_manifest.json").exists()
+
+
+def test_cli_pr_feedback_execute_without_token_returns_non_zero(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    run_dir = tmp_path / "runs" / "issue-test"
+    run_dir.mkdir(parents=True)
+
+    result = runner.invoke(app, ["pr-feedback", "--run-dir", str(run_dir), "--execute", "--overwrite"])
+
+    assert result.exit_code != 0
+    assert "Status: blocked" in result.stdout

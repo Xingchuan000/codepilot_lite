@@ -18,6 +18,13 @@ def redact_review_body(body: str, *, limit: int = 1200) -> str:
     return redacted[:limit]
 
 
+def quote_untrusted_feedback(text: str, *, limit: int = 1200) -> str:
+    """把不可信反馈压成适合写入 Markdown 的安全文本。"""
+
+    sanitized = redact_review_body(text, limit=limit)
+    return sanitized.replace("```", "`\u200b``")
+
+
 def normalize_review(raw: dict[str, object]) -> ReviewCommentSummary:
     """把 review payload 转成安全摘要。"""
 

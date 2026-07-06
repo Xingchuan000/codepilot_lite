@@ -74,7 +74,7 @@ class PRFeedbackWorkflowInputError(PRFeedbackError):
     """CLI 或 workflow 输入参数不合法。"""
 
 
-class PRFeedbackStaleHeadError(PRFeedbackError):
+class PRFeedbackStaleHeadError(PRFeedbackSafetyError):
     """PR head sha 或 head branch 已变化，当前输入已过期。"""
 
 
@@ -245,6 +245,12 @@ class PRFeedbackResult:
     run_id: str
     run_dir: Path
     status: PRFeedbackStatus
+    dry_run: bool = True
+    execute: bool = False
+    allow_run_agent_input: bool = False
+    allow_push_update_input: bool = False
+    allow_comment_input: bool = False
+    feedback_sources_degraded: list[str] = field(default_factory=list)
     pr: PRRef | None = None
     feedback_freshness: FeedbackFreshness | None = None
     checks: list[CheckRunSummary] = field(default_factory=list)

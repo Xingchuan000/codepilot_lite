@@ -326,6 +326,7 @@ codepilot auto-pr \
 
 第十四步新增了 `codepilot pr-feedback` 命令，用来消费第十三步生成的 `auto_pr_manifest.json`，读取 PR 的 checks、CI 日志和 review comments，并生成 follow-up 任务、更新计划和反馈报告。
 默认也是 **dry-run**，只生成本地产物，不会运行 follow-up agent，也不会更新 PR 分支。
+如果当前环境没有可用的 GitHub token，dry-run 会写出 `feedback_unavailable` 或 `api_degraded` 类型的产物，不会直接失败退出；`--execute` 在缺 token、stale head、pending checks 或未授权执行时会写出 `blocked` 产物。
 
 ```bash
 # 1. 先完成 issue workflow
@@ -351,6 +352,14 @@ codepilot pr-feedback --run-id issue-test --overwrite
 - `ci_feedback_manifest.json`
 - `pr_feedback_workflow.yml`
 
+其中 `pr_update_plan.md` 会直接反映 CLI 传入的模式和开关，例如：
+
+- `Mode: dry-run` / `Dry run: yes`
+- `Mode: execute` / `Dry run: no`
+- `allow_run_agent`
+- `allow_push_update`
+- `allow_comment`
+
 如果要真正执行 follow-up agent 和 PR 分支更新，需要显式打开执行开关：
 
 ```bash
@@ -363,13 +372,19 @@ codepilot pr-feedback \
   --overwrite
 ```
 
+常用输入开关包括 `--repo-slug`、`--pull-number`、`--head-branch`、`--include-logs/--no-include-logs`、`--max-log-bytes`、`--max-feedback-items` 和 `--allow-comment`。
+
 执行模式的关键规则：
 
 - 只允许在 `codepilot/` 开头的受控 PR 分支上工作
+- `--execute` 会在 stale head、pending checks、missing token 或 API degraded 时写出 `blocked` 产物
 - `--allow-push-update` 必须搭配 `--allow-run-agent`
 - `--no-dry-run` 单独传入无效，必须搭配 `--execute`
 - 默认不会写完整 CI 日志到 `followup_task.md` 或 `ci_feedback_report.md`
 - 默认不会把 token、secret 或 Authorization 原文写入产物
+- `ci_feedback_manifest.json` 会保存 checks、logs、reviews、feedback_items 的安全摘要，以及本次输入的 `dry_run` / `execute` / `allow_*` 开关
+
+如果要把这个命令放到 GitHub Actions 里执行，可以直接使用 `runs/<run_id>/pr_feedback_workflow.yml`，它会把 workflow inputs 传给 CLI，并且只上传白名单里的 artifact。
 
 如果只想查看 GitHub Actions 模板，可以直接看：
 
@@ -379,7 +394,7 @@ codepilot pr-feedback \
 
 - 顶层 `permissions: {}`
 - `feedback-plan` job 只读
-- `execute-update` job 只有在 `follow_up=true` 且 `update_pr=true` 时才执行
+- `execute-update` job 只有在 `execute=true`、`allow_run_agent=true` 且 `allow_push_update=true` 时才执行
 - 不自动写入 `.github/workflows/`
 
 ### Manual PR Assist 使用说明

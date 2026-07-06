@@ -565,7 +565,10 @@ def pr_feedback_command(
         f"{checks_summary['failure']} failed, {checks_summary['success']} passed, {checks_summary['pending']} pending"
     )
     typer.echo(f"Feedback items: {len(result.feedback_items)}")
-    typer.echo(f"Head stale: {'yes' if result.feedback_freshness.is_stale else 'no' if result.feedback_freshness else 'unknown'}")
+    head_stale = "unknown"
+    if result.feedback_freshness is not None:
+        head_stale = "yes" if result.feedback_freshness.is_stale else "no"
+    typer.echo(f"Head stale: {head_stale}")
     typer.echo(f"Agent ran: {'yes' if result.agent_ran else 'no'}")
     typer.echo(f"Follow-up patch generated: {'yes' if result.patch_generated else 'no'}")
     typer.echo(f"Commit created: {'yes' if result.commit_created else 'no'}")

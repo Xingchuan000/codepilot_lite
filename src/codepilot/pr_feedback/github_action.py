@@ -14,18 +14,39 @@ on:
         required: true
       pull_number:
         required: false
+      repo_slug:
+        required: false
+      head_branch:
+        required: false
       dry_run:
         required: true
         default: "true"
+      execute:
+        required: true
+        default: "false"
       wait_ci:
         required: true
         default: "false"
-      follow_up:
+      include_logs:
+        required: true
+        default: "true"
+      max_log_bytes:
+        required: true
+        default: "200000"
+      max_feedback_items:
+        required: true
+        default: "20"
+      allow_run_agent:
         required: true
         default: "false"
-      update_pr:
+      allow_push_update:
         required: true
         default: "false"
+      allow_comment:
+        required: true
+        default: "false"
+      artifact_path:
+        required: false
 
 permissions: {}
 
@@ -41,32 +62,104 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Run PR feedback dry-run
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
         run: |
-          PYTHONPATH=src python -m codepilot.cli pr-feedback --run-id "${{ inputs.run_id }}" --dry-run --overwrite
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+      - name: Run PR feedback dry-run
+        env:
+          CODEPILOT_RUN_ID: ${{ inputs.run_id }}
+          CODEPILOT_PULL_NUMBER: ${{ inputs.pull_number }}
+          CODEPILOT_REPO_SLUG: ${{ inputs.repo_slug }}
+          CODEPILOT_HEAD_BRANCH: ${{ inputs.head_branch }}
+          CODEPILOT_INCLUDE_LOGS: ${{ inputs.include_logs }}
+          CODEPILOT_MAX_LOG_BYTES: ${{ inputs.max_log_bytes }}
+          CODEPILOT_MAX_FEEDBACK_ITEMS: ${{ inputs.max_feedback_items }}
+          CODEPILOT_WAIT_CI: ${{ inputs.wait_ci }}
+          CODEPILOT_ARTIFACT_PATH: ${{ inputs.artifact_path }}
+        run: |
+          set -eu
+          argv="PYTHONPATH=src python -m codepilot.cli pr-feedback --run-id \"$CODEPILOT_RUN_ID\" --dry-run --overwrite"
+          if [ -n "$CODEPILOT_PULL_NUMBER" ]; then
+            argv="$argv --pull-number \"$CODEPILOT_PULL_NUMBER\""
+          fi
+          if [ -n "$CODEPILOT_REPO_SLUG" ]; then
+            argv="$argv --repo-slug \"$CODEPILOT_REPO_SLUG\""
+          fi
+          if [ -n "$CODEPILOT_HEAD_BRANCH" ]; then
+            argv="$argv --head-branch \"$CODEPILOT_HEAD_BRANCH\""
+          fi
+          if [ "$CODEPILOT_INCLUDE_LOGS" = "false" ]; then
+            argv="$argv --no-include-logs"
+          fi
+          if [ "$CODEPILOT_WAIT_CI" = "true" ]; then
+            argv="$argv --wait-ci"
+          fi
+          argv="$argv --max-log-bytes \"$CODEPILOT_MAX_LOG_BYTES\" --max-feedback-items \"$CODEPILOT_MAX_FEEDBACK_ITEMS\""
+          eval "$argv"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: pr-feedback-plan
-          path: runs/${{ inputs.run_id }}/
+          path: |
+            runs/${{ inputs.run_id }}/ci_status.json
+            runs/${{ inputs.run_id }}/review_feedback.json
+            runs/${{ inputs.run_id }}/ci_feedback_report.md
+            runs/${{ inputs.run_id }}/followup_task.md
+            runs/${{ inputs.run_id }}/pr_update_plan.md
+            runs/${{ inputs.run_id }}/ci_feedback_manifest.json
+            runs/${{ inputs.run_id }}/pr_feedback_workflow.yml
+            runs/${{ inputs.run_id }}/ci_logs/*.summary.md
 
   execute-update:
     needs: feedback-plan
-    if: ${{ inputs.follow_up == 'true' && inputs.update_pr == 'true' }}
+    if: ${{ inputs.execute == 'true' && inputs.allow_run_agent == 'true' && inputs.allow_push_update == 'true' }}
     permissions:
       contents: write
       pull-requests: write
+      checks: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
       - uses: actions/download-artifact@v4
         with:
           name: pr-feedback-plan
       - name: Run PR feedback execute
+        env:
+          CODEPILOT_RUN_ID: ${{ inputs.run_id }}
+          CODEPILOT_PULL_NUMBER: ${{ inputs.pull_number }}
+          CODEPILOT_REPO_SLUG: ${{ inputs.repo_slug }}
+          CODEPILOT_HEAD_BRANCH: ${{ inputs.head_branch }}
+          CODEPILOT_ALLOW_COMMENT: ${{ inputs.allow_comment }}
         run: |
-          PYTHONPATH=src python -m codepilot.cli pr-feedback --run-id "${{ inputs.run_id }}" --execute --allow-run-agent --allow-push-update --overwrite
+          set -eu
+          argv="PYTHONPATH=src python -m codepilot.cli pr-feedback --run-id \"$CODEPILOT_RUN_ID\" --execute --allow-run-agent --allow-push-update --overwrite"
+          if [ -n "$CODEPILOT_PULL_NUMBER" ]; then
+            argv="$argv --pull-number \"$CODEPILOT_PULL_NUMBER\""
+          fi
+          if [ -n "$CODEPILOT_REPO_SLUG" ]; then
+            argv="$argv --repo-slug \"$CODEPILOT_REPO_SLUG\""
+          fi
+          if [ -n "$CODEPILOT_HEAD_BRANCH" ]; then
+            argv="$argv --head-branch \"$CODEPILOT_HEAD_BRANCH\""
+          fi
+          if [ "$CODEPILOT_ALLOW_COMMENT" = "true" ]; then
+            argv="$argv --allow-comment"
+          fi
+          eval "$argv"
 """
 
 

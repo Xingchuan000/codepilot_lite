@@ -46,6 +46,14 @@ def push_pr_branch_update_if_allowed(
 ) -> dict[str, Any]:
     """在 execute 且显式允许 push_update 时才更新远端 PR 分支。"""
 
+    if not execute:
+        return {"pushed": False, "reason": "execute=false"}
+    if not allow_push_update:
+        return {"pushed": False, "reason": "allow_push_update=false"}
+    if not pr.head_branch.startswith("codepilot/"):
+        raise PRFeedbackStaleHeadError("head_branch must start with codepilot/")
+    if pr.head_branch in {"main", "master", pr.base_branch}:
+        raise PRFeedbackStaleHeadError("head_branch must not equal main, master, or base branch")
     assert_remote_branch_sha_for_push(repo_path, remote_name=remote_name, branch=pr.head_branch, expected_sha=expected_current_head_sha)
     return push_existing_pr_branch(
         repo_path,
