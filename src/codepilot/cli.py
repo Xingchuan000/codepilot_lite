@@ -13,6 +13,7 @@ from codepilot.auto_pr.workflow import run_auto_pr
 from codepilot.agent.runner import run_agent_task
 from codepilot.github.workflow import run_issue_workflow
 from codepilot.policy import PolicyChecker, PolicyContext
+from codepilot.post_pr.controller import run_post_pr_automation
 from codepilot.pr_feedback.models import PRFeedbackError, PRFeedbackManifestInvalidError
 from codepilot.pr_feedback.workflow import run_pr_feedback_loop
 from codepilot.pr_assist.models import ManifestInvalidError, PRAssistError
@@ -584,6 +585,103 @@ def pr_feedback_command(
     if result.status in {"blocked", "failed"}:
         raise typer.Exit(1)
     if execute and result.api_degraded:
+        raise typer.Exit(1)
+
+
+@app.command("post-pr")
+def post_pr_command(
+    run_dir: str | None = typer.Option(None, "--run-dir"),
+    run_id: str | None = typer.Option(None, "--run-id"),
+    runs_dir: str = typer.Option("runs", "--runs-dir"),
+    auto_pr_manifest: str | None = typer.Option(None, "--auto-pr-manifest"),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
+    execute: bool = typer.Option(False, "--execute"),
+    max_rounds: int = typer.Option(2, "--max-rounds"),
+    wait_ci: bool = typer.Option(False, "--wait-ci"),
+    poll_interval_seconds: int = typer.Option(30, "--poll-interval-seconds"),
+    timeout_seconds: int = typer.Option(900, "--timeout-seconds"),
+    include_logs: bool = typer.Option(True, "--include-logs/--no-include-logs"),
+    include_success_logs: bool = typer.Option(False, "--include-success-logs"),
+    max_log_bytes: int = typer.Option(200_000, "--max-log-bytes"),
+    max_feedback_items: int = typer.Option(20, "--max-feedback-items"),
+    stop_on_repeated_feedback: bool = typer.Option(True, "--stop-on-repeated-feedback/--no-stop-on-repeated-feedback"),
+    approval_file: str | None = typer.Option(None, "--approval-file"),
+    approve_run_agent: bool = typer.Option(False, "--approve-run-agent"),
+    approve_push_update: bool = typer.Option(False, "--approve-push-update"),
+    approve_comment: bool = typer.Option(False, "--approve-comment"),
+    resume: bool = typer.Option(False, "--resume"),
+    token_env: str = typer.Option("GITHUB_TOKEN", "--token-env"),
+    post_pr_action_template: bool = typer.Option(True, "--post-pr-action-template/--no-post-pr-action-template"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+) -> None:
+    """执行第十五步 Post-PR automation。"""
+
+    if (run_dir is None) == (run_id is None):
+        typer.echo("Provide exactly one of --run-dir or --run-id.", err=True)
+        raise typer.Exit(1)
+    if not execute and not dry_run:
+        typer.echo("--no-dry-run requires --execute.", err=True)
+        raise typer.Exit(1)
+    if approve_push_update and not approve_run_agent and not resume:
+        typer.echo("--approve-push-update requires --approve-run-agent or --resume.", err=True)
+        raise typer.Exit(1)
+    if approve_run_agent and not execute:
+        typer.echo("Warning: --approve-run-agent has no effect without --execute.", err=True)
+    if approve_push_update and not execute:
+        typer.echo("Warning: --approve-push-update has no effect without --execute.", err=True)
+    if approve_comment and not execute:
+        typer.echo(
+            "Note: --approve-comment also controls whether post_comment enters the dry-run approval request.",
+            err=True,
+        )
+    if max_rounds < 1 or max_rounds > 3:
+        typer.echo("max_rounds must be between 1 and 3.", err=True)
+        raise typer.Exit(1)
+
+    resolved_run_dir = Path(run_dir).expanduser().resolve() if run_dir else Path(runs_dir).expanduser().resolve() / str(run_id)
+    effective_dry_run = False if execute else dry_run
+    try:
+        result = run_post_pr_automation(
+            run_dir=resolved_run_dir,
+            auto_pr_manifest_path=auto_pr_manifest,
+            dry_run=effective_dry_run,
+            execute=execute,
+            max_rounds=max_rounds,
+            wait_ci=wait_ci,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_seconds=timeout_seconds,
+            token_env=token_env,
+            include_logs=include_logs,
+            include_success_logs=include_success_logs,
+            max_log_bytes=max_log_bytes,
+            max_feedback_items=max_feedback_items,
+            stop_on_repeated_feedback=stop_on_repeated_feedback,
+            approve_run_agent=approve_run_agent,
+            approve_push_update=approve_push_update,
+            approve_comment=approve_comment,
+            approval_file=approval_file,
+            resume=resume,
+            overwrite=overwrite,
+            post_pr_action_template=post_pr_action_template,
+        )
+    except (FileNotFoundError, FileExistsError, ValueError, RuntimeError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("Post-PR automation completed.")
+    typer.echo(f"Run ID: {result.run_id}")
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Terminal reason: {result.terminal_reason}")
+    typer.echo(f"Rounds: {len(result.rounds)} / {max_rounds}")
+    typer.echo(f"Mode: {'execute' if execute else 'dry-run'}")
+    typer.echo(f"Agent ran: {'yes' if any(item.agent_ran for item in result.rounds) else 'no'}")
+    typer.echo(f"PR branch updated: {'yes' if any(item.push_update_executed for item in result.rounds) else 'no'}")
+    typer.echo(f"Comment posted: {'yes' if any(item.comment_posted for item in result.rounds) else 'no'}")
+    typer.echo(f"Approval request: {result.approval_request_path or 'n/a'}")
+    typer.echo(f"Manifest: {result.manifest_path}")
+    typer.echo(f"Report: {result.report_path}")
+    typer.echo(f"Workflow: {result.workflow_path or 'n/a'}")
+    if result.status in {"blocked", "failed"} or result.terminal_reason in {"state_locked", "manifest_invalid", "stale_approval", "approval_expired", "push_failed", "agent_failed"}:
         raise typer.Exit(1)
 
 

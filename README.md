@@ -259,6 +259,53 @@ codepilot report --trace runs/<run_id>/trace.jsonl --json --overwrite
 如果希望写到别的位置，可以加 `--output <path>`。  
 如果目标 `report.md` 已存在，需要显式加 `--overwrite` 才会覆盖。
 
+### CodePilot Lite 第十五步 - Post-PR Automation 使用说明
+
+第十五步新增了 `codepilot post-pr` 命令，用来在 `auto-pr` 完成后继续做受控的 PR 后续处理。  
+这个命令默认是 `dry-run`，只会读取 `runs/<run_id>/auto_pr_manifest.json` 和第十四步生成的反馈产物，不会自动运行 agent、不会 push、也不会发评论。
+如果你希望审批请求里也包含 `post_comment`，那么计划阶段同样要传 `--approve-comment`，这样生成的 `approval_request.json` 才会把评论审批项写进去。
+
+```bash
+# 只做计划，生成 approval request / report / state
+codepilot post-pr --run-dir runs/<run_id> --overwrite
+
+# 使用 run-id 自动定位 runs/<run_id>
+codepilot post-pr --run-id <run_id> --runs-dir runs --overwrite
+
+# 计划阶段如果需要包含评论审批项，也要显式加上 --approve-comment
+codepilot post-pr --run-dir runs/<run_id> --overwrite --approve-comment
+
+# 显式进入 execute，但仍然需要审批文件或 CLI 授权参数
+codepilot post-pr --run-dir runs/<run_id> --execute --resume --approval-file runs/<run_id>/post_pr/approval_decision.json
+
+# 仅批准运行 follow-up agent
+codepilot post-pr --run-dir runs/<run_id> --execute --approve-run-agent --resume
+
+# 批准运行 agent 并允许继续推送分支更新
+codepilot post-pr --run-dir runs/<run_id> --execute --approve-run-agent --approve-push-update --resume
+
+# 如果还要批准评论发布，execute 阶段和 plan 阶段都要带上 --approve-comment
+codepilot post-pr --run-dir runs/<run_id> --execute --approve-run-agent --approve-push-update --approve-comment --resume
+```
+
+默认会在 `runs/<run_id>/post_pr/` 下生成这些文件：
+
+- `state.json`
+- `side_effects.json`
+- `approval_request.md`
+- `approval_request.json`
+- `approval_decision.json`
+- `post_pr_automation_manifest.json`
+- `post_pr_automation_report.md`
+- `post_pr_automation_workflow.yml`
+- `round-XXX/collect/...`
+- `round-XXX/execute/...`
+
+`approval_request.md` 只列出审批范围、相关哈希和待审产物，不包含完整日志、完整 diff、token 或环境变量。  
+`approval_file` 必须放在 `runs/<run_id>/post_pr/` 目录内，不能指向目录外的文件。
+如果要恢复执行，可以加 `--resume`，这样已经成功的 commit / push / comment 不会重复执行。
+Known limitation: concurrent post-pr runs with the same `run_id` should be avoided; use one active post-pr process per `run_id`.
+
 ### Controlled Auto PR 使用说明
 
 第十三步新增了 `codepilot auto-pr` 命令，用来消费第十二步生成的 `pr_assist_manifest.json`，产出受控的 Auto PR 计划、manifest 和 GitHub Action 模板。

@@ -145,7 +145,7 @@ def _write_manifest(
     return _write_json(output_path, payload, overwrite=overwrite)
 
 
-def _comment_body(result: PRFeedbackResult) -> str:
+def _comment_body(result: PRFeedbackResult, *, marker: str | None = None) -> str:
     """构造简短 PR 评论，只放状态，不放完整日志。"""
 
     lines = [
@@ -158,6 +158,8 @@ def _comment_body(result: PRFeedbackResult) -> str:
         f"- Commit created: {'yes' if result.commit_created else 'no'}",
         f"- PR branch updated: {'yes' if result.push_update_executed else 'no'}",
     ]
+    if marker:
+        lines.append(f"<!-- codepilot:post-pr:{marker} -->")
     if result.followup_attempt:
         lines.append(f"- Attempt: {result.followup_attempt.attempt_id}")
     return "\n".join(lines)
@@ -402,6 +404,7 @@ def run_pr_feedback_loop(
     pull_number: int | None = None,
     head_branch: str | None = None,
     feedback_action_template: bool = True,
+    comment_marker: str | None = None,
     overwrite: bool = False,
     github_client: PRFeedbackGitHubClientProtocol | None = None,
 ) -> PRFeedbackResult:
@@ -766,7 +769,7 @@ def run_pr_feedback_loop(
     comment_posted = False
     if allow_comment and final_status != "blocked":
         try:
-            github_client.post_pr_comment(pr, _comment_body(final_result))
+            github_client.post_pr_comment(pr, _comment_body(final_result, marker=comment_marker))
             comment_posted = True
         except PRFeedbackGitHubError as exc:
             warnings.append(redact_feedback_text(str(exc)))
