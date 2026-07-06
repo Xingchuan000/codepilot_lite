@@ -2598,6 +2598,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#g-artifact_manifest" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        验收 G：真实第十一步 artifact_manifest 兼容性
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -2726,6 +2737,20 @@
 <li>旧的 <code>pr_body.md</code>、<code>manual_pr_commands.md</code>、<code>review_checklist.md</code>、<code>github_action_template.yml</code>、<code>pr_assist_manifest.json</code> 被覆盖</li>
 <li><code>changes.patch</code>、<code>report.json</code>、<code>artifact_manifest.json</code> 保留</li>
 </ul>
+<h2 id="g-artifact_manifest">验收 G：真实第十一步 artifact_manifest 兼容性</h2>
+<p>执行：</p>
+<div class="highlight"><pre><span></span><code><span class="nv">PYTHONPATH</span><span class="o">=</span>src<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>codepilot.cli<span class="w"> </span>pr-assist<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--run-dir<span class="w"> </span>runs/&lt;existing-step11-run&gt;<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--overwrite
+</code></pre></div>
+<p>预期：</p>
+<ol>
+<li>不因 <code>artifact_manifest</code> 自身 size drift 被判定为 invalid；</li>
+<li>如果 safety gate fail，生成 review-only artifacts；</li>
+<li>如果只有 <code>report.md</code> 没有 <code>report.json</code>，仍生成 <code>pr_body.md</code>；</li>
+<li><code>pr_assist_manifest.json</code> 中包含 <code>pr_assist_manifest</code> 自身 artifact 记录；</li>
+<li><code>push_executed=false</code>、<code>pr_created=false</code>、<code>github_api_called=false</code>。</li>
+</ol>
 
 
 
