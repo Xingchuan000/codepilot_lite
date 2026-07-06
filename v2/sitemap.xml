@@ -25,6 +25,10 @@
          <lastmod>2026-07-06</lastmod>
     </url>
     <url>
+         <loc>https://mini-swe-agent.com/latest/manual_bounded_post_pr_automation_acceptance/</loc>
+         <lastmod>2026-07-06</lastmod>
+    </url>
+    <url>
          <loc>https://mini-swe-agent.com/latest/manual_ci_feedback_pr_review_loop_acceptance/</loc>
          <lastmod>2026-07-06</lastmod>
     </url>
@@ -42,6 +46,10 @@
     </url>
     <url>
          <loc>https://mini-swe-agent.com/latest/manual_pr_assist_acceptance/</loc>
+         <lastmod>2026-07-06</lastmod>
+    </url>
+    <url>
+         <loc>https://mini-swe-agent.com/latest/post_pr_human_approval_gate_setup/</loc>
          <lastmod>2026-07-06</lastmod>
     </url>
     <url>
@@ -70,6 +78,10 @@
     </url>
     <url>
          <loc>https://mini-swe-agent.com/latest/advanced/yaml_configuration/</loc>
+         <lastmod>2026-07-06</lastmod>
+    </url>
+    <url>
+         <loc>https://mini-swe-agent.com/latest/examples/post_pr_automation_report_example/</loc>
          <lastmod>2026-07-06</lastmod>
     </url>
     <url>
