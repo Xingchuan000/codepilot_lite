@@ -82,24 +82,31 @@ jobs:
           CODEPILOT_ARTIFACT_PATH: ${{ inputs.artifact_path }}
         run: |
           set -eu
-          argv="PYTHONPATH=src python -m codepilot.cli pr-feedback --run-id \"$CODEPILOT_RUN_ID\" --dry-run --overwrite"
+          case "$CODEPILOT_INCLUDE_LOGS" in true|false) ;; *) echo "invalid include_logs" >&2; exit 2 ;; esac
+          case "$CODEPILOT_WAIT_CI" in true|false) ;; *) echo "invalid wait_ci" >&2; exit 2 ;; esac
+          case "$CODEPILOT_MAX_LOG_BYTES" in ''|*[!0-9]*) echo "invalid max_log_bytes" >&2; exit 2 ;; esac
+          case "$CODEPILOT_MAX_FEEDBACK_ITEMS" in ''|*[!0-9]*) echo "invalid max_feedback_items" >&2; exit 2 ;; esac
           if [ -n "$CODEPILOT_PULL_NUMBER" ]; then
-            argv="$argv --pull-number \"$CODEPILOT_PULL_NUMBER\""
+            case "$CODEPILOT_PULL_NUMBER" in *[!0-9]*) echo "invalid pull_number" >&2; exit 2 ;; esac
+          fi
+          args=(python -m codepilot.cli pr-feedback --run-id "$CODEPILOT_RUN_ID" --dry-run --overwrite)
+          if [ -n "$CODEPILOT_PULL_NUMBER" ]; then
+            args+=(--pull-number "$CODEPILOT_PULL_NUMBER")
           fi
           if [ -n "$CODEPILOT_REPO_SLUG" ]; then
-            argv="$argv --repo-slug \"$CODEPILOT_REPO_SLUG\""
+            args+=(--repo-slug "$CODEPILOT_REPO_SLUG")
           fi
           if [ -n "$CODEPILOT_HEAD_BRANCH" ]; then
-            argv="$argv --head-branch \"$CODEPILOT_HEAD_BRANCH\""
+            args+=(--head-branch "$CODEPILOT_HEAD_BRANCH")
           fi
           if [ "$CODEPILOT_INCLUDE_LOGS" = "false" ]; then
-            argv="$argv --no-include-logs"
+            args+=(--no-include-logs)
           fi
           if [ "$CODEPILOT_WAIT_CI" = "true" ]; then
-            argv="$argv --wait-ci"
+            args+=(--wait-ci)
           fi
-          argv="$argv --max-log-bytes \"$CODEPILOT_MAX_LOG_BYTES\" --max-feedback-items \"$CODEPILOT_MAX_FEEDBACK_ITEMS\""
-          eval "$argv"
+          args+=(--max-log-bytes "$CODEPILOT_MAX_LOG_BYTES" --max-feedback-items "$CODEPILOT_MAX_FEEDBACK_ITEMS")
+          PYTHONPATH=src "${args[@]}"
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -146,20 +153,24 @@ jobs:
           CODEPILOT_ALLOW_COMMENT: ${{ inputs.allow_comment }}
         run: |
           set -eu
-          argv="PYTHONPATH=src python -m codepilot.cli pr-feedback --run-id \"$CODEPILOT_RUN_ID\" --execute --allow-run-agent --allow-push-update --overwrite"
+          case "$CODEPILOT_ALLOW_COMMENT" in true|false) ;; *) echo "invalid allow_comment" >&2; exit 2 ;; esac
           if [ -n "$CODEPILOT_PULL_NUMBER" ]; then
-            argv="$argv --pull-number \"$CODEPILOT_PULL_NUMBER\""
+            case "$CODEPILOT_PULL_NUMBER" in *[!0-9]*) echo "invalid pull_number" >&2; exit 2 ;; esac
+          fi
+          args=(python -m codepilot.cli pr-feedback --run-id "$CODEPILOT_RUN_ID" --execute --allow-run-agent --allow-push-update --overwrite)
+          if [ -n "$CODEPILOT_PULL_NUMBER" ]; then
+            args+=(--pull-number "$CODEPILOT_PULL_NUMBER")
           fi
           if [ -n "$CODEPILOT_REPO_SLUG" ]; then
-            argv="$argv --repo-slug \"$CODEPILOT_REPO_SLUG\""
+            args+=(--repo-slug "$CODEPILOT_REPO_SLUG")
           fi
           if [ -n "$CODEPILOT_HEAD_BRANCH" ]; then
-            argv="$argv --head-branch \"$CODEPILOT_HEAD_BRANCH\""
+            args+=(--head-branch "$CODEPILOT_HEAD_BRANCH")
           fi
           if [ "$CODEPILOT_ALLOW_COMMENT" = "true" ]; then
-            argv="$argv --allow-comment"
+            args+=(--allow-comment)
           fi
-          eval "$argv"
+          PYTHONPATH=src "${args[@]}"
 """
 
 

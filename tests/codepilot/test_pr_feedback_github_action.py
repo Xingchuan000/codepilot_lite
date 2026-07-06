@@ -47,6 +47,25 @@ def test_pr_feedback_github_action_upload_artifact_whitelist() -> None:
     assert "ci_logs/*.summary.md" in text
 
 
+def test_pr_feedback_github_action_does_not_use_eval_or_shell_string_argv() -> None:
+    text = render_pr_feedback_workflow_template()
+
+    assert "eval " not in text
+    assert "argv=" not in text
+    assert "args=(" in text
+    assert '"${args[@]}"' in text
+
+
+def test_pr_feedback_github_action_validates_workflow_inputs() -> None:
+    text = render_pr_feedback_workflow_template()
+
+    assert "invalid pull_number" in text
+    assert "invalid max_log_bytes" in text
+    assert "invalid max_feedback_items" in text
+    assert "invalid include_logs" in text
+    assert "invalid wait_ci" in text
+
+
 def test_write_pr_feedback_workflow_template_writes_file(tmp_path: Path) -> None:
     path = write_pr_feedback_workflow_template(tmp_path / "workflow.yml")
 

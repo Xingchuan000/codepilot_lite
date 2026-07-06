@@ -416,29 +416,6 @@ def run_pr_feedback_loop(
     artifact_paths = resolve_feedback_artifact_paths(run_dir_path)
     manifest_path = Path(auto_pr_manifest_path).expanduser().resolve() if auto_pr_manifest_path else run_dir_path / "auto_pr_manifest.json"
 
-    if github_client is None and not is_github_token_available(token_env):
-        return _write_terminal_artifacts(
-            run_id=run_dir_path.name,
-            run_dir=run_dir_path,
-            status="blocked" if execute else "feedback_unavailable",
-            pr=None,
-            feedback_freshness=None,
-            artifact_paths=artifact_paths,
-            source_auto_pr_manifest_path=manifest_path,
-            feedback_action_template=feedback_action_template,
-            overwrite=True,
-            dry_run=dry_run,
-            execute=execute,
-            allow_run_agent=allow_run_agent,
-            allow_push_update=allow_push_update,
-            allow_comment=allow_comment,
-            warnings=["missing required GitHub credential"],
-            blockers=["missing required GitHub credential"] if execute else [],
-            feedback_sources_degraded=["github"],
-        )
-    if github_client is None:
-        github_client = RestPRFeedbackGitHubClient(token_env=token_env)
-
     try:
         auto_pr_manifest = load_auto_pr_manifest(manifest_path)
         validation_errors = validate_auto_pr_manifest_for_feedback(auto_pr_manifest, run_dir_path)
@@ -447,7 +424,7 @@ def run_pr_feedback_loop(
         _, source_artifact_manifest = load_source_manifests_for_feedback(run_dir_path, auto_pr_manifest)
         pr = resolve_pr_ref(auto_pr_manifest, repo_slug=repo_slug, pull_number=pull_number, head_branch=head_branch)
         assert_controlled_head_branch(pr)
-    except (PRFeedbackManifestInvalidError, AutoPRManifestInvalidError, PRFeedbackSafetyError) as exc:
+    except (FileNotFoundError, PRFeedbackManifestInvalidError, AutoPRManifestInvalidError, PRFeedbackSafetyError) as exc:
         return _write_terminal_artifacts(
             run_id=run_dir_path.name,
             run_dir=run_dir_path,
@@ -468,6 +445,29 @@ def run_pr_feedback_loop(
         )
 
     run_id = str(auto_pr_manifest.get("run_id") or run_dir_path.name)
+    if github_client is None and not is_github_token_available(token_env):
+        return _write_terminal_artifacts(
+            run_id=run_id,
+            run_dir=run_dir_path,
+            status="blocked" if execute else "feedback_unavailable",
+            pr=pr,
+            feedback_freshness=None,
+            artifact_paths=artifact_paths,
+            source_auto_pr_manifest_path=manifest_path,
+            feedback_action_template=feedback_action_template,
+            overwrite=True,
+            dry_run=dry_run,
+            execute=execute,
+            allow_run_agent=allow_run_agent,
+            allow_push_update=allow_push_update,
+            allow_comment=allow_comment,
+            warnings=["missing required GitHub credential"],
+            blockers=["missing required GitHub credential"] if execute else [],
+            feedback_sources_degraded=["github"],
+        )
+    if github_client is None:
+        github_client = RestPRFeedbackGitHubClient(token_env=token_env)
+
     try:
         current_head_sha, observed_at = resolve_current_pr_head(github_client, pr)
         remote_head_checked = True

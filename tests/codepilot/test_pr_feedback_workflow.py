@@ -137,29 +137,32 @@ def _write_manifest_bundle(tmp_path: Path, *, manifest_head_sha: str, current_he
     return run_dir
 
 
-def test_workflow_dry_run_without_token_writes_feedback_unavailable_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_workflow_missing_manifest_is_blocked_before_token_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     run_dir = tmp_path / "runs" / "issue-test"
     run_dir.mkdir(parents=True)
 
     result = run_pr_feedback_loop(run_dir=run_dir, dry_run=True, execute=False, overwrite=True)
 
-    assert result.status == "feedback_unavailable"
-    assert result.api_degraded is True
-    assert result.dry_run is True
-    assert (run_dir / "ci_feedback_manifest.json").exists()
-    assert "Mode: dry-run" in (run_dir / "pr_update_plan.md").read_text(encoding="utf-8")
-
-
-def test_workflow_execute_without_token_writes_blocked_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    run_dir = tmp_path / "runs" / "issue-test"
-    run_dir.mkdir(parents=True)
-
-    result = run_pr_feedback_loop(run_dir=run_dir, dry_run=False, execute=True, overwrite=True)
-
     assert result.status == "blocked"
+    assert result.github_api_called is False
+    assert result.blockers
+    assert "auto_pr_manifest" in "\n".join(result.blockers)
     assert (run_dir / "ci_feedback_manifest.json").exists()
+
+
+def test_workflow_valid_manifest_without_token_keeps_pr_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    run_dir = _write_manifest_bundle(tmp_path, manifest_head_sha="abc123", current_head_sha="abc123")
+
+    result = run_pr_feedback_loop(run_dir=run_dir, dry_run=True, execute=False, overwrite=True)
+
+    assert result.status == "feedback_unavailable"
+    assert result.pr is not None
+    assert result.github_api_called is False
+    assert (run_dir / "ci_feedback_manifest.json").exists()
+    manifest = json.loads((run_dir / "ci_feedback_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["pr"]["head_branch"] == "codepilot/test"
 
 
 def test_workflow_injected_fake_client_does_not_require_token(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
