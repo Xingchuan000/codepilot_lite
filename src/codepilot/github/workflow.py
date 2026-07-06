@@ -54,6 +54,11 @@ def _known_artifact_paths(run_dir: Path) -> list[Path]:
         run_dir / "pr_summary.md",
         run_dir / "artifact_manifest.json",
         run_dir / "restore_plan.md",
+        run_dir / "pr_body.md",
+        run_dir / "manual_pr_commands.md",
+        run_dir / "review_checklist.md",
+        run_dir / "github_action_template.yml",
+        run_dir / "pr_assist_manifest.json",
     ]
 
 

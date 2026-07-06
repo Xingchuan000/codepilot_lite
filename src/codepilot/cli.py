@@ -11,6 +11,8 @@ from pydantic import ValidationError
 from codepilot.agent.runner import run_agent_task
 from codepilot.github.workflow import run_issue_workflow
 from codepilot.policy import PolicyChecker, PolicyContext
+from codepilot.pr_assist.models import ManifestInvalidError, PRAssistError
+from codepilot.pr_assist.workflow import run_pr_assist
 from codepilot.report.generator import ReportExistsError, generate_report
 from codepilot.router import ToolRouter
 from codepilot.tools.base import ToolSideEffect
@@ -304,6 +306,70 @@ def issue_command(
         "protected_patch_path_denied",
         "protected_after_path_denied",
     }:
+        raise typer.Exit(1)
+
+
+@app.command("pr-assist")
+def pr_assist_command(
+    run_dir: str | None = typer.Option(None, "--run-dir", help="Run directory containing artifact_manifest.json."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run id under --runs-dir."),
+    runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory containing run folders."),
+    strict_safety: bool = typer.Option(True, "--strict-safety/--no-strict-safety"),
+    redact_absolute_paths: bool = typer.Option(True, "--redact-absolute-paths/--no-redact-absolute-paths"),
+    include_gh_pr_command: bool = typer.Option(False, "--include-gh-pr-command"),
+    github_action_template: bool = typer.Option(True, "--github-action-template/--no-github-action-template"),
+    prepare_branch: bool = typer.Option(False, "--prepare-branch/--no-prepare-branch"),
+    branch_prefix: str = typer.Option("codepilot", "--branch-prefix"),
+    commit: bool = typer.Option(False, "--commit/--no-commit"),
+    commit_message_file: str | None = typer.Option(None, "--commit-message-file"),
+    overwrite: bool = typer.Option(False, "--overwrite", help="Overwrite existing PR assist artifacts."),
+) -> None:
+    """从第十一步 artifact_manifest.json 生成人工 PR 准备材料。"""
+
+    if (run_dir is None) == (run_id is None):
+        typer.echo("Provide exactly one of --run-dir or --run-id.", err=True)
+        raise typer.Exit(1)
+    resolved_run_dir = (
+        Path(run_dir).expanduser().resolve()
+        if run_dir
+        else Path(runs_dir).expanduser().resolve() / str(run_id)
+    )
+    try:
+        result = run_pr_assist(
+            run_dir=resolved_run_dir,
+            strict_safety=strict_safety,
+            redact_absolute_paths=redact_absolute_paths,
+            include_gh_pr_command=include_gh_pr_command,
+            generate_github_action_template=github_action_template,
+            prepare_branch=prepare_branch,
+            branch_prefix=branch_prefix,
+            commit=commit,
+            commit_message_file=commit_message_file,
+            overwrite=overwrite,
+        )
+    except (FileNotFoundError, FileExistsError, ValueError, ManifestInvalidError, PRAssistError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    typer.echo("PR assist generated." if result.status != "blocked_by_safety" else "PR assist blocked by safety gate.")
+    typer.echo(f"Run ID: {result.run_id}")
+    typer.echo(f"Run dir: {result.run_dir}")
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Safety gate: {result.safety_gate.status}")
+    typer.echo(f"PR body: {result.pr_body_path}")
+    typer.echo(f"Manual commands: {result.manual_commands_path}")
+    typer.echo(f"Review checklist: {result.review_checklist_path}")
+    typer.echo(f"GitHub Action template: {result.github_action_template_path}")
+    typer.echo(f"PR assist manifest: {result.pr_assist_manifest_path}")
+    if result.branch_name:
+        typer.echo(f"Local branch prepared: {result.branch_name}")
+    if result.commit_sha:
+        typer.echo(f"Commit prepared: {result.commit_sha}")
+    typer.echo("Push executed: no")
+    typer.echo("PR created: no")
+    for warning in result.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+    if result.status in {"manifest_invalid", "blocked_by_safety", "branch_failed", "commit_failed"}:
         raise typer.Exit(1)
 
 

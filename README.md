@@ -259,6 +259,51 @@ codepilot report --trace runs/<run_id>/trace.jsonl --json --overwrite
 如果希望写到别的位置，可以加 `--output <path>`。  
 如果目标 `report.md` 已存在，需要显式加 `--overwrite` 才会覆盖。
 
+### Manual PR Assist 使用说明
+
+第十二步新增了 `codepilot pr-assist` 命令。它只读取第十一步 `codepilot issue` 已经生成的 artifacts，再补出人工提 PR 所需材料：
+
+- `pr_body.md`
+- `manual_pr_commands.md`
+- `review_checklist.md`
+- `github_action_template.yml`
+- `pr_assist_manifest.json`
+
+这个命令**不会**重新运行 agent，**不会**重新生成 Evidence Report，默认也**不会**创建 branch、commit、push、PR 或调用 GitHub API。
+
+```bash
+# 通过 run_dir 直接生成 PR assist 产物
+codepilot pr-assist --run-dir runs/<run_id> --overwrite
+
+# 通过 run_id + runs_dir 定位
+codepilot pr-assist --run-id <run_id> --runs-dir runs --overwrite
+
+# 允许在文档里带上注释形式的 gh pr create 示例
+codepilot pr-assist --run-dir runs/<run_id> --include-gh-pr-command --overwrite
+
+# 可选：仅准备本地 branch
+codepilot pr-assist --run-dir runs/<run_id> --prepare-branch --branch-prefix codepilot --overwrite
+
+# 可选：在 branch 基础上继续准备本地 commit
+codepilot pr-assist --run-dir runs/<run_id> --prepare-branch --commit --overwrite
+```
+
+命令说明：
+
+- `--strict-safety`：默认开启。若第十一步 safety gate 失败，仍会生成 review-only artifacts，但会阻止 branch / commit 准备。
+- `--redact-absolute-paths`：默认开启。生成的命令文档会把仓库绝对路径写成 `<repo>`。
+- `--include-gh-pr-command`：只会在 `manual_pr_commands.md` 中生成注释形式的 `gh pr create` 示例，不会真的执行。
+- `--prepare-branch`：只创建本地 branch，不 push，不设置 upstream。
+- `--commit`：只提交 patch metadata 中声明的 `changed_files`，不会提交 `runs/<run_id>/`、`.env`、`.github/workflows`、`.codepilot` 等受保护路径。
+- `--no-github-action-template`：不生成 `github_action_template.yml`。
+
+生成结果中的几个关键文件：
+
+- `pr_body.md`：面向 PR 描述，汇总 issue、summary、changed files、tests、safety 和 evidence。
+- `manual_pr_commands.md`：给人工执行的命令清单，默认不包含 `git push`，也不包含可直接执行的 `gh pr create`。
+- `review_checklist.md`：人工复核清单，帮助确认 patch scope、tests、safety、worktree cleanup 和 PR body 内容。
+- `github_action_template.yml`：只写到 `runs/<run_id>/` 里，作为后续 GitHub Automation 准备模板，不会写入 `.github/workflows/`。
+
 ### Issue Workflow Hardening 使用说明
 
 第十一步为 `codepilot issue` 增加了仓库安全检查、隔离 worktree、产物清单和恢复说明。
