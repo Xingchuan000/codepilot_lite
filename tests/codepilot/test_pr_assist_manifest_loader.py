@@ -163,3 +163,29 @@ def test_validate_required_artifacts_allows_missing_patch_on_repo_safety_denied(
     manifest["patch"] = None
 
     assert validate_required_artifacts(run_dir, manifest) == []
+
+
+def test_validate_required_artifacts_allows_artifact_manifest_self_size_mismatch(tmp_path: Path) -> None:
+    run_dir = _write_run_dir(tmp_path)
+    manifest = load_artifact_manifest(run_dir / "artifact_manifest.json")
+    for item in manifest["artifacts"]:
+        if item["name"] == "artifact_manifest":
+            item["exists"] = True
+            item["size_bytes"] = 1
+            item["sha256"] = "bad"
+    errors = validate_required_artifacts(run_dir, manifest)
+
+    assert "artifact size mismatch: artifact_manifest" not in errors
+    assert "artifact sha256 mismatch: artifact_manifest" not in errors
+
+
+def test_validate_required_artifacts_allows_report_md_without_report_json(tmp_path: Path) -> None:
+    run_dir = _write_run_dir(tmp_path)
+    manifest = load_artifact_manifest(run_dir / "artifact_manifest.json")
+    manifest["artifacts"] = [item for item in manifest["artifacts"] if item["name"] != "report_json"]
+    (run_dir / "report.json").unlink()
+
+    errors = validate_required_artifacts(run_dir, manifest)
+
+    assert "missing artifact entry: report_json" not in errors
+    assert "missing report artifact entry: report_json or report_md" not in errors

@@ -124,3 +124,21 @@ PYTHONPATH=src python -m codepilot.cli pr-assist \
 
 - 旧的 `pr_body.md`、`manual_pr_commands.md`、`review_checklist.md`、`github_action_template.yml`、`pr_assist_manifest.json` 被覆盖
 - `changes.patch`、`report.json`、`artifact_manifest.json` 保留
+
+## 验收 G：真实第十一步 artifact_manifest 兼容性
+
+执行：
+
+```bash
+PYTHONPATH=src python -m codepilot.cli pr-assist \
+  --run-dir runs/<existing-step11-run> \
+  --overwrite
+```
+
+预期：
+
+1. 不因 `artifact_manifest` 自身 size drift 被判定为 invalid；
+2. 如果 safety gate fail，生成 review-only artifacts；
+3. 如果只有 `report.md` 没有 `report.json`，仍生成 `pr_body.md`；
+4. `pr_assist_manifest.json` 中包含 `pr_assist_manifest` 自身 artifact 记录；
+5. `push_executed=false`、`pr_created=false`、`github_api_called=false`。

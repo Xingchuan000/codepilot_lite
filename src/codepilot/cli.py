@@ -351,7 +351,14 @@ def pr_assist_command(
         typer.echo(str(exc), err=True)
         raise typer.Exit(1) from exc
 
-    typer.echo("PR assist generated." if result.status != "blocked_by_safety" else "PR assist blocked by safety gate.")
+    if result.status == "blocked_by_safety":
+        typer.echo("PR assist blocked by safety gate.")
+    elif result.status == "manifest_invalid":
+        typer.echo("PR assist manifest invalid.")
+    elif result.status in {"branch_failed", "commit_failed"}:
+        typer.echo("PR assist generated with local side-effect failure.")
+    else:
+        typer.echo("PR assist generated.")
     typer.echo(f"Run ID: {result.run_id}")
     typer.echo(f"Run dir: {result.run_dir}")
     typer.echo(f"Status: {result.status}")

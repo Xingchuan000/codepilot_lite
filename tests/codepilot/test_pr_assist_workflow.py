@@ -179,3 +179,95 @@ def test_run_pr_assist_prepare_commit_only_stages_changed_files(tmp_path: Path) 
 
     assert result.commit_sha == run_git(repo, ["rev-parse", "HEAD"])
     assert "runs/" not in "\n".join(run_git(repo, ["show", "--name-only", "--format=", "HEAD"]).splitlines())
+
+
+def test_run_pr_assist_accepts_manifest_self_size_drift(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    run_dir = _write_run_dir(tmp_path, repo=repo)
+    manifest = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+    for item in manifest["artifacts"]:
+        if item["name"] == "artifact_manifest":
+            item["exists"] = True
+            item["size_bytes"] = 1
+            item["sha256"] = None
+    (run_dir / "artifact_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    result = run_pr_assist(run_dir=run_dir, overwrite=True)
+
+    assert result.status == "generated"
+    assert (run_dir / "pr_body.md").exists()
+
+
+def test_run_pr_assist_generates_with_report_md_only(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    run_dir = _write_run_dir(tmp_path, repo=repo)
+    manifest = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+    manifest["artifacts"] = [item for item in manifest["artifacts"] if item["name"] != "report_json"]
+    (run_dir / "report.json").unlink()
+    (run_dir / "artifact_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    result = run_pr_assist(run_dir=run_dir, overwrite=True)
+
+    assert result.status == "generated"
+    assert (run_dir / "pr_body.md").exists()
+    assert "unknown" in (run_dir / "pr_body.md").read_text(encoding="utf-8")
+
+
+def test_run_pr_assist_no_strict_safety_generates_review_only_without_blocking(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    run_dir = _write_run_dir(tmp_path, repo=repo, safety_decision="deny", status="repo_safety_denied")
+
+    result = run_pr_assist(run_dir=run_dir, strict_safety=False, prepare_branch=True, commit=True, overwrite=True)
+
+    assert result.status == "generated"
+    text = (run_dir / "manual_pr_commands.md").read_text(encoding="utf-8")
+    assert "apply --check" not in text
+    assert "commit -m" not in text
+    assert result.branch_name is None
+    assert result.commit_sha is None
+
+
+def test_run_pr_assist_commit_skipped_on_safety_warn(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    (repo / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    run_dir = _write_run_dir(tmp_path, repo=repo, safety_decision="warn", status="success")
+    manifest = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+    manifest["safety_summary"]["baseline_dirty"] = True
+    (run_dir / "artifact_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    before = run_git(repo, ["rev-parse", "HEAD"])
+
+    result = run_pr_assist(run_dir=run_dir, overwrite=True, commit=True)
+
+    assert result.status == "commit_failed"
+    assert result.commit_sha is None
+    assert run_git(repo, ["rev-parse", "HEAD"]) == before
+
+
+def test_pr_assist_manifest_records_itself(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    run_dir = _write_run_dir(tmp_path, repo=repo)
+
+    run_pr_assist(run_dir=run_dir, overwrite=True)
+    payload = json.loads((run_dir / "pr_assist_manifest.json").read_text(encoding="utf-8"))
+    names = {item["name"] for item in payload["generated_artifacts"]}
+
+    assert "pr_assist_manifest" in names
+
+
+def test_run_pr_assist_manifest_invalid_does_not_prepare_branch_or_commit(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    (repo / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    run_dir = _write_run_dir(tmp_path, repo=repo)
+    manifest = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+    for item in manifest["artifacts"]:
+        if item["name"] == "patch":
+            item["sha256"] = "bad"
+    (run_dir / "artifact_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    before_head = run_git(repo, ["rev-parse", "HEAD"])
+
+    result = run_pr_assist(run_dir=run_dir, prepare_branch=True, commit=True, overwrite=True)
+
+    assert result.status == "manifest_invalid"
+    assert result.branch_name is None
+    assert result.commit_sha is None
+    assert run_git(repo, ["rev-parse", "HEAD"]) == before_head

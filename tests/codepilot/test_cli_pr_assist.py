@@ -135,6 +135,18 @@ def test_cli_pr_assist_safety_fail_returns_non_zero(tmp_path: Path) -> None:
     assert "blocked by safety gate" in result.stdout
 
 
+def test_cli_pr_assist_no_strict_safety_returns_zero_for_review_only(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    run_dir = _write_run_dir(tmp_path, repo=repo, safety_decision="deny", status="repo_safety_denied")
+
+    result = runner.invoke(app, ["pr-assist", "--run-dir", str(run_dir), "--no-strict-safety", "--overwrite"])
+
+    assert result.exit_code == 0
+    assert "Status: generated" in result.stdout
+    assert "Push executed: no" in result.stdout
+    assert "PR created: no" in result.stdout
+
+
 def test_cli_pr_assist_include_gh_pr_command_is_comment_only(tmp_path: Path) -> None:
     repo = _init_repo(tmp_path)
     run_dir = _write_run_dir(tmp_path, repo=repo)
@@ -166,6 +178,21 @@ def test_cli_pr_assist_commit_does_not_push(tmp_path: Path) -> None:
     assert result.exit_code == 0
     assert "Push executed: no" in result.stdout
     assert "PR created: no" in result.stdout
+
+
+def test_cli_pr_assist_commit_warn_returns_non_zero(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    (repo / "src" / "calc.py").write_text("def add(a, b):\n    return a + b\n", encoding="utf-8")
+    run_dir = _write_run_dir(tmp_path, repo=repo, safety_decision="warn", status="success")
+    manifest = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+    manifest["safety_summary"]["baseline_dirty"] = True
+    (run_dir / "artifact_manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    result = runner.invoke(app, ["pr-assist", "--run-dir", str(run_dir), "--commit", "--overwrite"])
+
+    assert result.exit_code == 1
+    assert "local side-effect failure" in result.stdout
+    assert "safety_gate=warn" in result.stderr
 
 
 def test_cli_pr_assist_no_github_action_template(tmp_path: Path) -> None:
@@ -209,3 +236,16 @@ def test_cli_issue_overwrite_removes_old_pr_assist_artifacts(tmp_path: Path) -> 
     assert result.exit_code == 0
     assert not (run_dir / "pr_body.md").exists()
     assert not (run_dir / "pr_assist_manifest.json").exists()
+
+
+def test_cli_pr_assist_manifest_invalid_message_is_clear(tmp_path: Path) -> None:
+    repo = _init_repo(tmp_path)
+    run_dir = _write_run_dir(tmp_path, repo=repo)
+    manifest = json.loads((run_dir / "artifact_manifest.json").read_text(encoding="utf-8"))
+    manifest.pop("schema_version")
+    (run_dir / "artifact_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = runner.invoke(app, ["pr-assist", "--run-dir", str(run_dir), "--overwrite"])
+
+    assert result.exit_code == 1
+    assert "PR assist manifest invalid." in result.stdout

@@ -132,6 +132,19 @@ def write_pr_assist_manifest(
         raise ValueError("token-like string detected in pr_assist_manifest payload")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    final_payload = json.loads(path.read_text(encoding="utf-8"))
+    final_payload["generated_artifacts"].append(
+        {
+            "name": "pr_assist_manifest",
+            "path": "pr_assist_manifest.json",
+            "exists": True,
+            "size_bytes": path.stat().st_size,
+            "sha256": None,
+        }
+    )
+    if scan_token_like_strings(final_payload):
+        raise ValueError("token-like string detected in pr_assist_manifest payload")
+    path.write_text(json.dumps(final_payload, indent=2, ensure_ascii=False), encoding="utf-8")
     _assert_no_token_like_strings_in_path(path)
     return path
 
@@ -244,9 +257,11 @@ def run_pr_assist(
     if safety_gate.status == "fail":
         if prepare_branch or commit:
             warnings.append("Safety gate failed. Branch/commit preparation skipped.")
-        if not strict_safety:
-            warnings.append("strict_safety is disabled, but side effects are still skipped on safety failure.")
-        status = "blocked_by_safety"
+        if strict_safety:
+            status = "blocked_by_safety"
+        else:
+            warnings.append("strict_safety is disabled. Generated review-only materials; side effects remain disabled.")
+            status = "generated"
     else:
         repo_for_side_effect = manifest.get("effective_repo_path") or manifest.get("repo_path")
         if repo_for_side_effect == "[REDACTED_PATH]" or not repo_for_side_effect:
@@ -260,7 +275,10 @@ def run_pr_assist(
                 warnings.append(f"branch preparation failed: {exc}")
                 status = "branch_failed"
         if commit and repo_for_side_effect and repo_for_side_effect != "[REDACTED_PATH]":
-            if prepare_branch and prepared_branch_name is None:
+            if safety_gate.status != "pass":
+                warnings.append(f"commit preparation skipped because safety_gate={safety_gate.status}.")
+                status = "commit_failed"
+            elif prepare_branch and prepared_branch_name is None:
                 warnings.append("commit preparation skipped because branch preparation failed.")
             else:
                 try:

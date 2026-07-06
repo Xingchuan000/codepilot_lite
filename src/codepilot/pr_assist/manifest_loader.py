@@ -120,6 +120,18 @@ def verify_artifact_integrity(path: Path, entry: dict[str, Any]) -> list[str]:
     return errors
 
 
+def verify_manifest_self_artifact(path: Path, entry: dict[str, Any]) -> list[str]:
+    """artifact_manifest 自身只检查路径存在，避免二阶段回填造成 size 漂移误判。"""
+
+    errors: list[str] = []
+    if bool(entry.get("exists")) and not path.exists():
+        errors.append("artifact missing on disk: artifact_manifest")
+        return errors
+    if not path.exists():
+        errors.append("artifact missing on disk: artifact_manifest")
+    return errors
+
+
 def resolve_required_artifacts(run_dir: str | Path, manifest: dict[str, Any]) -> dict[str, Path]:
     """把 manifest 中登记的 artifact 解析成真实绝对路径。"""
 
@@ -139,7 +151,10 @@ def validate_required_artifacts(run_dir: str | Path, manifest: dict[str, Any]) -
             errors.append(f"missing artifact entry: {name}")
             continue
         path = resolve_artifact_path(run_dir, entries[name])
-        errors.extend(verify_artifact_integrity(path, entries[name]))
+        if name == "artifact_manifest":
+            errors.extend(verify_manifest_self_artifact(path, entries[name]))
+        else:
+            errors.extend(verify_artifact_integrity(path, entries[name]))
 
     safety_decision = manifest.get("safety_decision")
     status = manifest.get("status")
@@ -150,12 +165,20 @@ def validate_required_artifacts(run_dir: str | Path, manifest: dict[str, Any]) -
     }
 
     if not safety_failed:
-        for name in ["patch", "report_json"]:
-            if name not in entries:
-                errors.append(f"missing artifact entry: {name}")
-                continue
-            path = resolve_artifact_path(run_dir, entries[name])
-            errors.extend(verify_artifact_integrity(path, entries[name]))
+        if "patch" not in entries:
+            errors.append("missing artifact entry: patch")
+        else:
+            errors.extend(verify_artifact_integrity(resolve_artifact_path(run_dir, entries["patch"]), entries["patch"]))
+        has_report_json = "report_json" in entries
+        has_report_md = "report_md" in entries
+        if not has_report_json and not has_report_md:
+            errors.append("missing report artifact entry: report_json or report_md")
+        else:
+            for name in ["report_json", "report_md"]:
+                if name in entries:
+                    errors.extend(
+                        verify_artifact_integrity(resolve_artifact_path(run_dir, entries[name]), entries[name])
+                    )
         if manifest.get("patch") is None:
             errors.append("missing patch metadata for safety-passed run")
     elif "patch" in entries:
