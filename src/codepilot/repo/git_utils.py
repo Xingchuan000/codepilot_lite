@@ -132,6 +132,58 @@ def get_porcelain_status(repo: str | Path) -> list[GitFileStatus]:
     return files
 
 
+def get_worktree_clean(repo: str | Path) -> bool:
+    """返回当前工作区是否完全干净。"""
+
+    return len(get_porcelain_status(repo)) == 0
+
+
+def get_remote_url(repo: str | Path, remote_name: str = "origin") -> str:
+    """读取指定 remote 的 URL。"""
+
+    return run_git(repo, ["remote", "get-url", remote_name])
+
+
+def ls_remote(repo: str | Path, remote_name: str, ref: str) -> str:
+    """读取远端指定引用，失败时把原始 stdout 交给上层判定。"""
+
+    return run_git(repo, ["ls-remote", "--heads", remote_name, ref], timeout=30, check=False)
+
+
+def get_remote_head_branch(repo: str | Path, remote_name: str = "origin") -> str | None:
+    """尽量解析 remote HEAD 指向的默认分支；失败时返回 None。"""
+
+    try:
+        symbolic = run_git(repo, ["symbolic-ref", f"refs/remotes/{remote_name}/HEAD"])
+    except GitCommandError:
+        symbolic = ""
+    if symbolic.startswith(f"refs/remotes/{remote_name}/"):
+        return symbolic.removeprefix(f"refs/remotes/{remote_name}/")
+    try:
+        output = run_git(repo, ["remote", "show", remote_name], check=False)
+    except GitCommandError:
+        return None
+    for line in output.splitlines():
+        if "HEAD branch:" not in line:
+            continue
+        branch = line.split("HEAD branch:", maxsplit=1)[1].strip()
+        return branch or None
+    return None
+
+
+def get_remote_branch_sha(repo: str | Path, remote_name: str, remote_branch: str) -> str | None:
+    """读取 remote 上某个分支当前指向的 sha，不存在时返回 None。"""
+
+    output = ls_remote(repo, remote_name, remote_branch)
+    if not output:
+        return None
+    first_line = output.splitlines()[0].strip()
+    if not first_line:
+        return None
+    parts = first_line.split()
+    return parts[0] if parts else None
+
+
 def sha256_file(path: str | Path) -> str | None:
     file_path = Path(path)
     if not file_path.exists():

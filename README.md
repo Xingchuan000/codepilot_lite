@@ -259,6 +259,129 @@ codepilot report --trace runs/<run_id>/trace.jsonl --json --overwrite
 如果希望写到别的位置，可以加 `--output <path>`。  
 如果目标 `report.md` 已存在，需要显式加 `--overwrite` 才会覆盖。
 
+### Controlled Auto PR 使用说明
+
+第十三步新增了 `codepilot auto-pr` 命令，用来消费第十二步生成的 `pr_assist_manifest.json`，产出受控的 Auto PR 计划、manifest 和 GitHub Action 模板。
+这个命令默认是 **dry-run**，不会直接 push，也不会直接创建 PR。
+
+```bash
+# 1. 先完成 issue workflow
+codepilot issue --issue-file issue.md --repo . --run-id issue-test --overwrite
+
+# 2. 再生成 pr-assist 产物
+codepilot pr-assist --run-id issue-test --prepare-branch --commit --overwrite
+
+# 3. 默认 dry-run，只生成计划与 manifest
+codepilot auto-pr --run-id issue-test --repo-slug owner/repo --overwrite
+```
+
+运行完成后会在 `runs/<run_id>/` 下新增：
+
+- `auto_pr_plan.md`
+- `auto_pr_manifest.json`
+- `controlled_auto_pr_workflow.yml`
+
+默认 dry-run 行为：
+
+- 不 push
+- 不 create PR
+- 不 comment
+- 只生成计划文件和受控 workflow 模板
+
+如果要真正执行远端副作用，必须显式打开执行开关：
+
+```bash
+codepilot auto-pr \
+  --run-id issue-test \
+  --repo-slug owner/repo \
+  --execute \
+  --allow-push \
+  --allow-create-pr \
+  --token-env GITHUB_TOKEN \
+  --overwrite
+```
+
+执行模式的关键规则：
+
+- 只允许 push 到 `codepilot/<safe-run-id>`
+- 不使用 `--force`
+- 不使用 `--mirror`
+- 不使用 `--all`
+- 只有 push 成功且 remote ref 校验通过后才会创建 PR
+- `--allow-comment` 默认关闭，只有显式打开才会尝试 issue comment
+- `--no-dry-run` 单独传入无效，必须搭配 `--execute`
+
+如果只想生成 workflow 模板给 GitHub Actions 使用，可以直接查看：
+
+- `runs/<run_id>/controlled_auto_pr_workflow.yml`
+
+这个模板默认：
+
+- 顶层 `permissions: {}`
+- plan job 只读
+- execute job 只有在 `dry_run=false` 且 `create_pr=true` 时才执行
+- 不自动写入 `.github/workflows/`
+
+### CI Feedback / PR Review Loop 使用说明
+
+第十四步新增了 `codepilot pr-feedback` 命令，用来消费第十三步生成的 `auto_pr_manifest.json`，读取 PR 的 checks、CI 日志和 review comments，并生成 follow-up 任务、更新计划和反馈报告。
+默认也是 **dry-run**，只生成本地产物，不会运行 follow-up agent，也不会更新 PR 分支。
+
+```bash
+# 1. 先完成 issue workflow
+codepilot issue --issue-file issue.md --repo . --run-id issue-test --overwrite
+
+# 2. 再生成 pr-assist 产物
+codepilot pr-assist --run-id issue-test --prepare-branch --commit --overwrite
+
+# 3. 生成 auto-pr 产物
+codepilot auto-pr --run-id issue-test --repo-slug owner/repo --overwrite
+
+# 4. 读取 PR feedback，默认 dry-run
+codepilot pr-feedback --run-id issue-test --overwrite
+```
+
+运行完成后会在 `runs/<run_id>/` 下新增：
+
+- `ci_status.json`
+- `review_feedback.json`
+- `ci_feedback_report.md`
+- `followup_task.md`
+- `pr_update_plan.md`
+- `ci_feedback_manifest.json`
+- `pr_feedback_workflow.yml`
+
+如果要真正执行 follow-up agent 和 PR 分支更新，需要显式打开执行开关：
+
+```bash
+codepilot pr-feedback \
+  --run-id issue-test \
+  --execute \
+  --allow-run-agent \
+  --allow-push-update \
+  --allow-comment \
+  --overwrite
+```
+
+执行模式的关键规则：
+
+- 只允许在 `codepilot/` 开头的受控 PR 分支上工作
+- `--allow-push-update` 必须搭配 `--allow-run-agent`
+- `--no-dry-run` 单独传入无效，必须搭配 `--execute`
+- 默认不会写完整 CI 日志到 `followup_task.md` 或 `ci_feedback_report.md`
+- 默认不会把 token、secret 或 Authorization 原文写入产物
+
+如果只想查看 GitHub Actions 模板，可以直接看：
+
+- `runs/<run_id>/pr_feedback_workflow.yml`
+
+这个模板默认：
+
+- 顶层 `permissions: {}`
+- `feedback-plan` job 只读
+- `execute-update` job 只有在 `follow_up=true` 且 `update_pr=true` 时才执行
+- 不自动写入 `.github/workflows/`
+
 ### Manual PR Assist 使用说明
 
 第十二步新增了 `codepilot pr-assist` 命令。它只读取第十一步 `codepilot issue` 已经生成的 artifacts，再补出人工提 PR 所需材料：

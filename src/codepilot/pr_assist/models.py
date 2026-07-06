@@ -8,6 +8,13 @@ from typing import Any, Literal
 
 
 SafetyGateStatus = Literal["pass", "warn", "fail"]
+PRAssistSideEffectKey = Literal[
+    "branch_prepared",
+    "commit_prepared",
+    "push_executed",
+    "pr_created",
+    "github_api_called",
+]
 PRAssistStatus = Literal[
     "generated",
     "blocked_by_safety",

@@ -5,7 +5,18 @@ from pathlib import Path
 
 import pytest
 
-from codepilot.repo.git_utils import GitCommandError, get_current_branch, get_git_root, get_head_sha, get_porcelain_status, is_git_repo, run_git
+from codepilot.repo.git_utils import (
+    GitCommandError,
+    get_current_branch,
+    get_git_root,
+    get_head_sha,
+    get_porcelain_status,
+    get_remote_branch_sha,
+    get_remote_url,
+    get_worktree_clean,
+    is_git_repo,
+    run_git,
+)
 
 
 def _init_git_repo(tmp_path: Path) -> Path:
@@ -132,3 +143,54 @@ def test_run_git_cleans_askpass_related_env(tmp_path: Path, monkeypatch: pytest.
     assert "GIT_ASKPASS" not in env
     assert "SSH_ASKPASS" not in env
     assert "GIT_SSH_COMMAND" not in env
+
+
+def test_get_remote_url_reads_remote(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+
+    assert get_remote_url(repo) == str(remote)
+
+
+def test_get_worktree_clean_true_for_clean_repo(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    _commit_file(repo, "src/calc.py", "print('x')\n")
+
+    assert get_worktree_clean(repo) is True
+
+
+def test_get_worktree_clean_false_for_dirty_repo(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    _commit_file(repo, "src/calc.py", "print('x')\n")
+    (repo / "src" / "calc.py").write_text("print('y')\n", encoding="utf-8")
+
+    assert get_worktree_clean(repo) is False
+
+
+def test_get_remote_branch_sha_returns_none_for_missing_branch(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+
+    assert get_remote_branch_sha(repo, "origin", "missing") is None
+
+
+def test_get_remote_branch_sha_reads_existing_branch(tmp_path: Path) -> None:
+    repo = _init_git_repo(tmp_path)
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=repo, check=True)
+    _commit_file(repo, "src/calc.py", "print('x')\n")
+    subprocess.run(["git", "push", "origin", "HEAD:refs/heads/codepilot/test"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    assert get_remote_branch_sha(repo, "origin", "codepilot/test") == subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=repo,
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.strip()

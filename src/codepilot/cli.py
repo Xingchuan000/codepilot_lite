@@ -8,9 +8,13 @@ from typing import Literal
 import typer
 from pydantic import ValidationError
 
+from codepilot.auto_pr.models import AutoPRError, AutoPRManifestInvalidError, AutoPRSafetyError
+from codepilot.auto_pr.workflow import run_auto_pr
 from codepilot.agent.runner import run_agent_task
 from codepilot.github.workflow import run_issue_workflow
 from codepilot.policy import PolicyChecker, PolicyContext
+from codepilot.pr_feedback.models import PRFeedbackError, PRFeedbackManifestInvalidError
+from codepilot.pr_feedback.workflow import run_pr_feedback_loop
 from codepilot.pr_assist.models import ManifestInvalidError, PRAssistError
 from codepilot.pr_assist.workflow import run_pr_assist
 from codepilot.report.generator import ReportExistsError, generate_report
@@ -377,6 +381,206 @@ def pr_assist_command(
     for warning in result.warnings:
         typer.echo(f"Warning: {warning}", err=True)
     if result.status in {"manifest_invalid", "blocked_by_safety", "branch_failed", "commit_failed"}:
+        raise typer.Exit(1)
+
+
+@app.command("auto-pr")
+def auto_pr_command(
+    run_dir: str | None = typer.Option(None, "--run-dir", help="Run directory containing pr_assist_manifest.json."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run id under --runs-dir."),
+    runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory containing run folders."),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
+    execute: bool = typer.Option(False, "--execute"),
+    allow_push: bool = typer.Option(False, "--allow-push"),
+    allow_create_pr: bool = typer.Option(False, "--allow-create-pr"),
+    allow_comment: bool = typer.Option(False, "--allow-comment"),
+    allow_empty_pr: bool = typer.Option(False, "--allow-empty-pr"),
+    remote_name: str = typer.Option("origin", "--remote-name"),
+    base_branch: str | None = typer.Option(None, "--base-branch"),
+    head_branch: str | None = typer.Option(None, "--head-branch"),
+    repo_slug: str | None = typer.Option(None, "--repo-slug"),
+    token_env: str = typer.Option("GITHUB_TOKEN", "--token-env"),
+    draft: bool = typer.Option(True, "--draft/--ready-for-review"),
+    controlled_action_template: bool = typer.Option(
+        True,
+        "--controlled-action-template/--no-controlled-action-template",
+    ),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+) -> None:
+    """执行第十三步 Controlled Auto PR workflow。"""
+
+    if (run_dir is None) == (run_id is None):
+        typer.echo("Provide exactly one of --run-dir or --run-id.", err=True)
+        raise typer.Exit(1)
+    if not execute and not dry_run:
+        typer.echo("--no-dry-run requires --execute.", err=True)
+        raise typer.Exit(1)
+    resolved_run_dir = (
+        Path(run_dir).expanduser().resolve()
+        if run_dir
+        else Path(runs_dir).expanduser().resolve() / str(run_id)
+    )
+    try:
+        result = run_auto_pr(
+            run_dir=resolved_run_dir,
+            dry_run=False if execute else dry_run,
+            execute=execute,
+            allow_push=allow_push,
+            allow_create_pr=allow_create_pr,
+            allow_comment=allow_comment,
+            allow_empty_pr=allow_empty_pr,
+            remote_name=remote_name,
+            base_branch=base_branch,
+            head_branch=head_branch,
+            repo_slug=repo_slug,
+            token_env=token_env,
+            draft=draft,
+            generate_workflow_template=controlled_action_template,
+            overwrite=overwrite,
+        )
+    except (FileNotFoundError, FileExistsError, ValueError, AutoPRManifestInvalidError, AutoPRSafetyError, AutoPRError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    if execute and result.status == "pr_created":
+        typer.echo("Controlled Auto PR completed.")
+    else:
+        typer.echo("Controlled Auto PR plan generated.")
+    typer.echo(f"Run ID: {result.run_id}")
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Mode: {'execute' if execute else 'dry-run'}")
+    typer.echo(f"Safety gate: {result.safety_gate.status}")
+    typer.echo(f"Head branch: {result.branch_push_plan.remote_branch if result.branch_push_plan else 'unknown'}")
+    typer.echo(f"Base branch: {result.branch_push_plan.base_branch if result.branch_push_plan else 'unknown'}")
+    if result.branch_push_plan and result.push_executed:
+        typer.echo(f"Pushed branch: {result.branch_push_plan.remote_branch}")
+    if result.branch_push_plan:
+        typer.echo(f"Commit: {result.branch_push_plan.commit_sha}")
+    if result.pr_result and result.pr_result.url:
+        typer.echo(f"PR created: {result.pr_result.url}")
+    else:
+        typer.echo(f"PR created: {'yes' if result.pr_created else 'no'}")
+    typer.echo(f"Push executed: {'yes' if result.push_executed else 'no'}")
+    typer.echo(f"GitHub API called: {'yes' if result.github_api_called else 'no'}")
+    typer.echo(f"Comment posted: {'yes' if result.comment_posted else 'no'}")
+    typer.echo(f"Plan: {result.auto_pr_plan_path}")
+    typer.echo(f"Manifest: {result.auto_pr_manifest_path}")
+    typer.echo(f"Controlled workflow: {result.controlled_workflow_path}")
+    for warning in result.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+    if result.status in {"manifest_invalid", "failed"}:
+        raise typer.Exit(1)
+    if execute and result.status == "blocked_by_safety":
+        raise typer.Exit(1)
+    if execute and not allow_push:
+        raise typer.Exit(1)
+
+
+@app.command("pr-feedback")
+def pr_feedback_command(
+    run_dir: str | None = typer.Option(None, "--run-dir", help="Run directory containing auto_pr_manifest.json."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run id under --runs-dir."),
+    runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory containing run folders."),
+    auto_pr_manifest: str | None = typer.Option(None, "--auto-pr-manifest", help="Path to auto_pr_manifest.json."),
+    dry_run: bool = typer.Option(True, "--dry-run/--no-dry-run"),
+    execute: bool = typer.Option(False, "--execute"),
+    wait_ci: bool = typer.Option(False, "--wait-ci"),
+    poll_interval_seconds: int = typer.Option(30, "--poll-interval-seconds"),
+    timeout_seconds: int = typer.Option(900, "--timeout-seconds"),
+    include_logs: bool = typer.Option(True, "--include-logs/--no-include-logs"),
+    include_success_logs: bool = typer.Option(False, "--include-success-logs"),
+    max_log_bytes: int = typer.Option(200_000, "--max-log-bytes"),
+    max_feedback_items: int = typer.Option(20, "--max-feedback-items"),
+    max_followup_rounds: int = typer.Option(1, "--max-followup-rounds"),
+    allow_run_agent: bool = typer.Option(False, "--allow-run-agent"),
+    allow_push_update: bool = typer.Option(False, "--allow-push-update"),
+    allow_comment: bool = typer.Option(False, "--allow-comment"),
+    repo_slug: str | None = typer.Option(None, "--repo-slug"),
+    pull_number: int | None = typer.Option(None, "--pull-number"),
+    head_branch: str | None = typer.Option(None, "--head-branch"),
+    token_env: str = typer.Option("GITHUB_TOKEN", "--token-env"),
+    feedback_action_template: bool = typer.Option(True, "--feedback-action-template/--no-feedback-action-template"),
+    overwrite: bool = typer.Option(False, "--overwrite"),
+) -> None:
+    """执行第十四步 PR feedback / PR review loop。"""
+
+    if (run_dir is None) == (run_id is None):
+        typer.echo("Provide exactly one of --run-dir or --run-id.", err=True)
+        raise typer.Exit(1)
+    if not execute and not dry_run:
+        typer.echo("--no-dry-run requires --execute.", err=True)
+        raise typer.Exit(1)
+    if allow_push_update and not allow_run_agent:
+        typer.echo("--allow-push-update requires --allow-run-agent.", err=True)
+        raise typer.Exit(1)
+    if allow_run_agent and not execute:
+        typer.echo("Warning: --allow-run-agent has no effect without --execute.", err=True)
+    if allow_push_update and not execute:
+        typer.echo("Warning: --allow-push-update has no effect without --execute.", err=True)
+    resolved_run_dir = (
+        Path(run_dir).expanduser().resolve()
+        if run_dir
+        else Path(runs_dir).expanduser().resolve() / str(run_id)
+    )
+    try:
+        result = run_pr_feedback_loop(
+            run_dir=resolved_run_dir,
+            auto_pr_manifest_path=auto_pr_manifest,
+            dry_run=dry_run,
+            execute=execute,
+            wait_ci=wait_ci,
+            include_logs=include_logs,
+            include_success_logs=include_success_logs,
+            allow_run_agent=allow_run_agent,
+            allow_push_update=allow_push_update,
+            allow_comment=allow_comment,
+            max_feedback_items=max_feedback_items,
+            max_log_bytes=max_log_bytes,
+            max_followup_rounds=max_followup_rounds,
+            poll_interval_seconds=poll_interval_seconds,
+            timeout_seconds=timeout_seconds,
+            token_env=token_env,
+            repo_slug=repo_slug,
+            pull_number=pull_number,
+            head_branch=head_branch,
+            feedback_action_template=feedback_action_template,
+            overwrite=overwrite,
+        )
+    except (FileNotFoundError, FileExistsError, ValueError, PRFeedbackManifestInvalidError, PRFeedbackError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    checks_summary = {
+        "success": sum(1 for check in result.checks if check.conclusion == "success"),
+        "failure": sum(1 for check in result.checks if check.conclusion == "failure"),
+        "pending": sum(1 for check in result.checks if check.conclusion == "pending"),
+    }
+    typer.echo("PR feedback loop completed.")
+    typer.echo(f"Run ID: {result.run_id}")
+    typer.echo(f"Status: {result.status}")
+    typer.echo(f"Mode: {'execute' if execute else 'dry-run'}")
+    typer.echo(f"PR: {result.pr.url if result.pr else 'n/a'}")
+    typer.echo(
+        "Checks: "
+        f"{checks_summary['failure']} failed, {checks_summary['success']} passed, {checks_summary['pending']} pending"
+    )
+    typer.echo(f"Feedback items: {len(result.feedback_items)}")
+    typer.echo(f"Head stale: {'yes' if result.feedback_freshness.is_stale else 'no' if result.feedback_freshness else 'unknown'}")
+    typer.echo(f"Agent ran: {'yes' if result.agent_ran else 'no'}")
+    typer.echo(f"Follow-up patch generated: {'yes' if result.patch_generated else 'no'}")
+    typer.echo(f"Commit created: {'yes' if result.commit_created else 'no'}")
+    typer.echo(f"PR branch updated: {'yes' if result.push_update_executed else 'no'}")
+    typer.echo(f"Comment posted: {'yes' if result.comment_posted else 'no'}")
+    typer.echo(f"Report: {result.ci_feedback_report_path}")
+    typer.echo(f"Follow-up task: {result.followup_task_path}")
+    typer.echo(f"Update plan: {result.pr_update_plan_path}")
+    typer.echo(f"Manifest: {result.ci_feedback_manifest_path}")
+    typer.echo(f"Feedback workflow: {result.feedback_workflow_path}")
+    for warning in result.warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+    if result.status in {"blocked", "failed"}:
+        raise typer.Exit(1)
+    if execute and result.api_degraded:
         raise typer.Exit(1)
 
 
