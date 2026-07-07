@@ -1,0 +1,3 @@
+{"type":"tool_call","tool_name":"mcp.filesystem.read_file","arguments":{"path":"README.md"},"short_rationale":"Read README through MCP."}
+{"type":"tool_call","tool_name":"run_tests","arguments":{"command":"python -m pytest tests/codepilot/test_mcp_models.py","timeout":30},"short_rationale":"Record a passing test before finish."}
+{"type":"finish","status":"success","summary":"MCP read completed.","tests":"python -m pytest tests/codepilot/test_mcp_models.py","changed_files":[]}

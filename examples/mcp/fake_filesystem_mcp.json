@@ -1,0 +1,23 @@
+{
+  "schema_version": "codepilot.mcp.config.v1",
+  "servers": [
+    {
+      "name": "filesystem",
+      "transport": "fake",
+      "enabled": true,
+      "trust_level": "fake",
+      "expose_to_agent": true,
+      "require_tool_allowlist": true,
+      "trusted_annotations": true,
+      "server_instructions_policy": "record_summary",
+      "tool_allowlist": ["read_file", "search"],
+      "tool_denylist": [],
+      "startup_timeout_seconds": 10,
+      "tool_timeout_seconds": 30,
+      "timeout_seconds": 30,
+      "max_output_chars": 12000,
+      "max_tools_to_expose": 20,
+      "max_description_chars": 500
+    }
+  ]
+}

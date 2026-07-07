@@ -12,6 +12,7 @@ from codepilot.auto_pr.models import AutoPRError, AutoPRManifestInvalidError, Au
 from codepilot.auto_pr.workflow import run_auto_pr
 from codepilot.agent.runner import run_agent_task
 from codepilot.github.workflow import run_issue_workflow
+from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.post_pr.controller import run_post_pr_automation
 from codepilot.pr_feedback.models import PRFeedbackError, PRFeedbackManifestInvalidError
@@ -19,9 +20,9 @@ from codepilot.pr_feedback.workflow import run_pr_feedback_loop
 from codepilot.pr_assist.models import ManifestInvalidError, PRAssistError
 from codepilot.pr_assist.workflow import run_pr_assist
 from codepilot.report.generator import ReportExistsError, generate_report
-from codepilot.router import ToolRouter
+from codepilot.router import ToolAction, ToolRouter
 from codepilot.tools.base import ToolSideEffect
-from codepilot.tools.registry import call_tool, call_tool_traced, find_tool_spec, list_tool_specs
+from codepilot.tools.registry import call_external_tool_traced, call_tool, call_tool_traced, find_tool_spec, list_tool_specs
 from codepilot.trace.logger import TraceLogger
 
 app = typer.Typer(add_completion=False, help="CodePilot Lite structured tools CLI.")
@@ -118,6 +119,141 @@ def tools() -> None:
         typer.echo(f"{spec.name}\t{spec.risk.value}\t{spec.default_permission.value}")
 
 
+@app.command("mcp-tools")
+def mcp_tools(
+    mcp_config: str = typer.Option(..., "--mcp-config", help="MCP config JSON path."),
+    json_output: bool = typer.Option(False, "--json", help="Output JSON."),
+) -> None:
+    try:
+        registry = MCPToolRegistry.from_config(mcp_config)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    rows = []
+    for binding in registry.list_bindings():
+        spec = registry.find_spec(binding.codepilot_tool_name)
+        rows.append(
+            {
+                "name": binding.codepilot_tool_name,
+                "server": binding.server_name,
+                "original_tool": binding.mcp_tool_name,
+                "risk": spec.risk.value if spec else None,
+                "side_effect": spec.side_effect.value if spec else None,
+                "default_permission": spec.default_permission.value if spec else None,
+                "status": binding.status,
+                "exposed_to_agent": binding.exposed_to_agent,
+                "reason": binding.reason,
+                "trust_level": binding.trust_level,
+                "descriptor_hash": binding.descriptor_hash,
+                "config_hash": binding.config_hash,
+            }
+        )
+
+    if json_output:
+        typer.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+
+    for row in rows:
+        typer.echo(
+            f"{row['name']}\t{row['risk']}\t{row['side_effect']}\t{row['default_permission']}\t{row['status']}\t"
+            f"exposed={'true' if row['exposed_to_agent'] else 'false'}\treason={row['reason'] or ''}"
+        )
+
+
+@app.command("mcp-call")
+def mcp_call(
+    tool_name: str = typer.Argument(...),
+    args_json: str = typer.Argument(...),
+    mcp_config: str = typer.Option(..., "--mcp-config"),
+    runs_dir: str = typer.Option("runs", "--runs-dir"),
+    run_id: str | None = typer.Option(None, "--run-id"),
+    policy: bool = typer.Option(True, "--policy/--no-policy"),
+    unsafe_no_policy: bool = typer.Option(False, "--unsafe-no-policy"),
+    policy_mode: Literal["read_only", "build", "danger"] = typer.Option("build", "--policy-mode"),
+    approve: bool = typer.Option(False, "--approve"),
+    output_preview_chars: int = typer.Option(1000, "--output-preview-chars"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    try:
+        args = json.loads(args_json)
+    except json.JSONDecodeError as exc:
+        typer.echo(f"JSON 解析失败: {exc}", err=True)
+        raise typer.Exit(1) from exc
+    if not isinstance(args, dict):
+        typer.echo("args_json must decode to an object", err=True)
+        raise typer.Exit(1)
+
+    try:
+        registry = MCPToolRegistry.from_config(mcp_config)
+    except (FileNotFoundError, ValueError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+    if not registry.has_tool(tool_name):
+        typer.echo(f"Unknown MCP tool: {tool_name}", err=True)
+        raise typer.Exit(1)
+
+    spec = registry.find_spec(tool_name)
+    if not policy:
+        if unsafe_no_policy is False and any(server.transport != "fake" for server in registry.servers.values()):
+            typer.echo("--no-policy is only allowed for fake MCP transport unless --unsafe-no-policy is set.", err=True)
+            raise typer.Exit(1)
+        typer.echo("Warning: policy disabled; fake MCP transport only.", err=True)
+        logger = TraceLogger(runs_dir=runs_dir, run_id=run_id)
+        result = call_external_tool_traced(tool_name, external_registry=registry, trace_logger=logger, output_preview_chars=output_preview_chars, **args)
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "success": result.success,
+                        "output": result.output,
+                        "error": result.error,
+                        "metadata": result.metadata,
+                        "trace_path": str(logger.trace_path),
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+            return
+        typer.echo(f"Success: {str(result.success).lower()}")
+        if spec is not None:
+            typer.echo(f"Descriptor hash: {spec.metadata.get('descriptor_hash')}")
+        typer.echo("Policy decision: none")
+        typer.echo(f"Trace path: {logger.trace_path}")
+        typer.echo(f"Output: {result.output}")
+        if result.error:
+            typer.echo(f"Error: {result.error}")
+        if not result.success:
+            raise typer.Exit(1)
+        return
+
+    router = ToolRouter.from_runs_dir(
+        runs_dir=runs_dir,
+        run_id=run_id,
+        output_preview_chars=output_preview_chars,
+        policy_checker=PolicyChecker.default(extra_tool_specs={item.name: item for item in registry.list_specs()}),
+        policy_context=PolicyContext(mode=policy_mode, approved=approve, interactive=False),
+        external_tool_registry=registry,
+    )
+    routed = router.route(ToolAction(tool_name=tool_name, arguments=args))
+    if json_output:
+        typer.echo(routed.model_dump_json(indent=2))
+        return
+
+    typer.echo(f"Success: {str(routed.success).lower()}")
+    typer.echo(f"Policy decision: {routed.metadata.get('policy_decision')}")
+    if spec is not None:
+        typer.echo(f"Descriptor hash: {spec.metadata.get('descriptor_hash')}")
+    typer.echo(f"Trace path: {routed.trace_path}")
+    typer.echo(f"Output: {routed.result.output}")
+    if routed.error:
+        typer.echo(f"Error: {routed.error}")
+    if not routed.success:
+        raise typer.Exit(1)
+
+
 @app.command("report")
 def report_command(
     trace: str | None = typer.Option(None, "--trace", help="Path to trace.jsonl."),
@@ -175,6 +311,7 @@ def agent_run(
         "--model-config",
         help="mini-SWE-agent config spec. Can be path/name/key=value.",
     ),
+    mcp_config: str | None = typer.Option(None, "--mcp-config", help="Optional MCP config JSON path."),
     runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory for trace runs."),
     run_id: str | None = typer.Option(None, "--run-id", help="Trace run id."),
 ) -> None:
@@ -189,6 +326,7 @@ def agent_run(
         fake_actions=fake_actions,
         model=model,
         model_config=model_config,
+        mcp_config=mcp_config,
         runs_dir=runs_dir,
         run_id=run_id,
     )
@@ -202,6 +340,7 @@ def agent_run(
     typer.echo(f"Tests: {result.last_test_status or 'unknown'}")
     typer.echo(f"Policy violations: {result.policy_violations}")
     typer.echo(f"Trace: {result.trace_path}")
+    typer.echo(f"MCP config: {mcp_config or 'none'}")
     if not result.success:
         raise typer.Exit(1)
 

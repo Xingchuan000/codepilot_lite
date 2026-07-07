@@ -17,6 +17,7 @@ from codepilot.agent.state import create_initial_state, mark_finished_from_actio
 from codepilot.llm.fake import FakeLLMExhaustedError
 from codepilot.llm.types import ChatMessage, CodePilotLLMClient
 from codepilot.router import ToolAction, ToolRouter
+from codepilot.tools.base import ToolSpec
 from codepilot.trace.logger import TraceLogger
 
 
@@ -59,6 +60,7 @@ class MinimalAgentLoop:
         router: ToolRouter,
         trace_logger: TraceLogger | None = None,
         max_steps: int = 12,
+        prompt_extra_tool_specs: list[ToolSpec] | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be greater than 0")
@@ -73,6 +75,7 @@ class MinimalAgentLoop:
         self.router = router
         self.max_steps = max_steps
         self.trace_logger = router.trace_logger
+        self.prompt_extra_tool_specs = list(prompt_extra_tool_specs or [])
 
     def _result(
         self,
@@ -104,7 +107,7 @@ class MinimalAgentLoop:
         """执行最小 LLM loop。"""
 
         state = create_initial_state(task, repo, max_steps=self.max_steps)
-        state.messages = build_initial_messages(task, state.repo)
+        state.messages = build_initial_messages(task, state.repo, extra_tool_specs=self.prompt_extra_tool_specs)
         self.trace_logger.record_run_start(
             task=task,
             metadata={"source": "minimal_agent_loop", "repo": str(state.repo), "max_steps": self.max_steps},

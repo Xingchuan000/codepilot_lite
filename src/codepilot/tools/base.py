@@ -75,6 +75,7 @@ class ToolSpec(BaseModel):
     side_effect: ToolSideEffect
     default_permission: DefaultPermission
     parameters: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 def elapsed_ms(start: float) -> int:

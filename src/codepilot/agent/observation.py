@@ -35,6 +35,20 @@ IMPORTANT_METADATA_KEYS = {
     "char_truncated",
     "has_secret_like_content",
     "suggestion",
+    "mcp",
+    "source",
+    "server_name",
+    "mcp_tool_name",
+    "codepilot_tool_name",
+    "transport",
+    "trust_level",
+    "descriptor_hash",
+    "config_hash",
+    "exposed_to_agent",
+    "exposure_reason",
+    "risk_source",
+    "output_schema_validation_failed",
+    "structured_content_present",
 }
 
 

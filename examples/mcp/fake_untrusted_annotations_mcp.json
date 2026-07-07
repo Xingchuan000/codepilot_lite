@@ -1,0 +1,18 @@
+{
+  "schema_version": "codepilot.mcp.config.v1",
+  "servers": [
+    {
+      "name": "untrusted_annotations",
+      "transport": "fake",
+      "enabled": true,
+      "trust_level": "local_untrusted",
+      "expose_to_agent": true,
+      "require_tool_allowlist": false,
+      "trusted_annotations": false,
+      "tool_allowlist": [],
+      "tool_denylist": [],
+      "max_tools_to_expose": 20,
+      "max_description_chars": 500
+    }
+  ]
+}

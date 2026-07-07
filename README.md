@@ -259,6 +259,35 @@ codepilot report --trace runs/<run_id>/trace.jsonl --json --overwrite
 如果希望写到别的位置，可以加 `--output <path>`。  
 如果目标 `report.md` 已存在，需要显式加 `--overwrite` 才会覆盖。
 
+### MCP 工具接入使用说明
+
+第十六步新增了 MCP 工具接入能力，默认使用 `fake` 传输，不依赖真实 MCP server。
+
+```bash
+# 列出 MCP 工具
+codepilot mcp-tools --mcp-config examples/mcp/fake_filesystem_mcp.json
+
+# 以受控方式调用 MCP 工具
+codepilot mcp-call mcp.filesystem.read_file '{"path":"README.md"}' \
+  --mcp-config examples/mcp/fake_filesystem_mcp.json
+
+# 允许 ask 型工具执行 fake 调用
+codepilot mcp-call mcp.filesystem.write_file '{"path":"demo.txt","content":"hello"}' \
+  --mcp-config examples/mcp/fake_filesystem_mcp.json \
+  --approve
+
+# 在 agent-run 中注入 MCP 暴露工具
+codepilot agent-run "Use MCP to read README and summarize it" \
+  --repo . \
+  --fake-actions examples/mcp/fake_actions_mcp_read_file.jsonl \
+  --mcp-config examples/mcp/fake_filesystem_mcp.json \
+  --approve
+```
+
+`examples/mcp/fake_filesystem_mcp.json` 提供了一个可直接运行的 fake 配置，适合本地测试和单元测试。
+MCP 工具目录只会向 agent 暴露 `exposed_to_agent=true` 的工具，未暴露工具仍然可以通过 `mcp-call` 在策略允许时单独调用。
+所有 MCP 调用都会写入 `trace.jsonl`，并记录 `mcp=true`、`server_name`、`mcp_tool_name`、`codepilot_tool_name` 和 `descriptor_hash` 等关键信息。
+
 ### CodePilot Lite 第十五步 - Post-PR Automation 使用说明
 
 第十五步新增了 `codepilot post-pr` 命令，用来在 `auto-pr` 完成后继续做受控的 PR 后续处理。  

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,12 +21,20 @@ PROTECTED_COMMAND_TOKENS = [".env", ".github/workflows", ".codepilot", "secrets/
 class PolicyChecker:
     """用一组简单、可解释的规则判断工具动作是否可以执行。"""
 
-    def __init__(self, config: PolicyConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: PolicyConfig | None = None,
+        extra_tool_specs: Mapping[str, ToolSpec] | None = None,
+    ) -> None:
         self.config = config or default_policy_config()
+        self.extra_tool_specs = dict(extra_tool_specs or {})
 
     @classmethod
-    def default(cls) -> "PolicyChecker":
-        return cls(default_policy_config())
+    def default(cls, extra_tool_specs: Mapping[str, ToolSpec] | None = None) -> "PolicyChecker":
+        return cls(default_policy_config(), extra_tool_specs=extra_tool_specs)
+
+    def _find_tool_spec(self, name: str) -> ToolSpec | None:
+        return self.extra_tool_specs.get(name) or find_tool_spec(name)
 
     def check(self, action: ToolAction, context: PolicyContext | None = None) -> PolicyDecision:
         """判断一次结构化工具动作是否可以放行。"""
@@ -33,7 +42,7 @@ class PolicyChecker:
         context = context or PolicyContext()
         tool_name = action.tool_name
         arguments = dict(action.arguments or {})
-        spec = find_tool_spec(tool_name)
+        spec = self._find_tool_spec(tool_name)
 
         if spec is None:
             return self._decision(
@@ -61,6 +70,7 @@ class PolicyChecker:
         command_decision = self._check_command(
             tool_name=tool_name,
             arguments=arguments,
+            spec=spec,
             context=context,
             metadata=metadata,
         )
@@ -166,7 +176,7 @@ class PolicyChecker:
         return str(getattr(value, "value", value))
 
     def _base_metadata(self, spec: ToolSpec, context: PolicyContext) -> dict[str, Any]:
-        return {
+        metadata = {
             "risk": self._enum_value(spec.risk),
             "side_effect": self._enum_value(spec.side_effect),
             "default_permission": self._enum_value(spec.default_permission),
@@ -174,6 +184,19 @@ class PolicyChecker:
             "approved": context.approved,
             "interactive": context.interactive,
         }
+        metadata.update(spec.metadata or {})
+        return metadata
+
+    def _extract_command_values(self, arguments: dict[str, Any]) -> list[tuple[str, str]]:
+        command_values: list[tuple[str, str]] = []
+        for field in ("command", "cmd", "shell"):
+            value = arguments.get(field)
+            if isinstance(value, str) and value.strip():
+                command_values.append((field, value))
+                continue
+            if isinstance(value, list) and all(isinstance(item, str) for item in value):
+                command_values.append((field, " ".join(value)))
+        return command_values
 
     def _decision(
         self,
@@ -359,6 +382,7 @@ class PolicyChecker:
         *,
         tool_name: str,
         arguments: dict[str, Any],
+        spec: ToolSpec,
         context: PolicyContext,
         metadata: dict[str, Any],
     ) -> PolicyDecision | None:
@@ -371,39 +395,37 @@ class PolicyChecker:
                 context=context,
                 metadata=dict(metadata),
             )
-        if tool_name not in COMMAND_TOOLS:
+        command_values = self._extract_command_values(arguments)
+        if tool_name not in COMMAND_TOOLS and self._enum_value(spec.side_effect) != self._enum_value(ToolSideEffect.LOCAL_EXEC) and not command_values:
             return None
-        raw_command = arguments.get("command")
-        if not isinstance(raw_command, str):
-            return None
+        for field, raw_command in command_values:
+            normalized_command = self._normalize_command(raw_command)
+            command_metadata = dict(metadata)
+            command_metadata.update({"command_field": field, "raw_command": raw_command, "normalized_command": normalized_command})
+            if tool_name == "run_shell":
+                for token in PROTECTED_COMMAND_TOKENS:
+                    if token in normalized_command:
+                        command_metadata["command_rule"] = token
+                        return self._decision(
+                            "deny",
+                            f"Command references protected path token '{token}'.",
+                            tool_name=tool_name,
+                            matched_rule="command.protected_path_token.deny",
+                            context=context,
+                            metadata=command_metadata,
+                        )
 
-        normalized_command = self._normalize_command(raw_command)
-        command_metadata = dict(metadata)
-        command_metadata.update({"raw_command": raw_command, "normalized_command": normalized_command})
-        if tool_name == "run_shell":
-            for token in PROTECTED_COMMAND_TOKENS:
-                if token in normalized_command:
-                    command_metadata["command_rule"] = token
-                    return self._decision(
-                        "deny",
-                        f"Command references protected path token '{token}'.",
-                        tool_name=tool_name,
-                        matched_rule="command.protected_path_token.deny",
-                        context=context,
-                        metadata=command_metadata,
-                    )
-
-        denied = self._matches_denied_command(normalized_command, self.config.commands.deny_substrings)
-        if denied is not None:
-            command_metadata["command_rule"] = denied
-            return self._decision(
-                "deny",
-                f"Command is denied by policy rule '{denied}'.",
-                tool_name=tool_name,
-                matched_rule=f"command.deny_substrings.{denied}",
-                context=context,
-                metadata=command_metadata,
-            )
+            denied = self._matches_denied_command(normalized_command, self.config.commands.deny_substrings)
+            if denied is not None:
+                command_metadata["command_rule"] = denied
+                return self._decision(
+                    "deny",
+                    f"Command is denied by policy rule '{denied}'.",
+                    tool_name=tool_name,
+                    matched_rule=f"command.deny_substrings.{denied}",
+                    context=context,
+                    metadata=command_metadata,
+                )
         return None
 
     def _allow_safe_command_prefix(

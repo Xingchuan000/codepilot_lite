@@ -7,7 +7,7 @@ from typing import Any
 from codepilot.policy import PolicyChecker, PolicyContext, PolicyDecision
 from codepilot.router.actions import ToolAction, ToolRouteResult
 from codepilot.tools.base import ToolResult
-from codepilot.tools.registry import call_tool_traced
+from codepilot.tools.registry import call_external_tool_traced, call_tool_traced
 from codepilot.trace.logger import TraceLogger
 
 
@@ -20,11 +20,13 @@ class ToolRouter:
         output_preview_chars: int = 1000,
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
+        external_tool_registry: Any | None = None,
     ) -> None:
         self.trace_logger = trace_logger
         self.output_preview_chars = output_preview_chars
         self.policy_checker = policy_checker
         self.policy_context = policy_context or PolicyContext()
+        self.external_tool_registry = external_tool_registry
 
     @classmethod
     def from_runs_dir(
@@ -34,6 +36,7 @@ class ToolRouter:
         output_preview_chars: int = 1000,
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
+        external_tool_registry: Any | None = None,
     ) -> "ToolRouter":
         logger = TraceLogger(runs_dir=runs_dir, run_id=run_id)
         return cls(
@@ -41,6 +44,7 @@ class ToolRouter:
             output_preview_chars=output_preview_chars,
             policy_checker=policy_checker,
             policy_context=policy_context,
+            external_tool_registry=external_tool_registry,
         )
 
     def _base_route_metadata(self, parsed: ToolAction) -> dict[str, Any]:
@@ -129,12 +133,21 @@ class ToolRouter:
                     metadata=route_metadata,
                 )
 
-        result = call_tool_traced(
-            parsed.tool_name,
-            trace_logger=self.trace_logger,
-            output_preview_chars=self.output_preview_chars,
-            **parsed.arguments,
-        )
+        if self.external_tool_registry is not None and self.external_tool_registry.has_tool(parsed.tool_name):
+            result = call_external_tool_traced(
+                parsed.tool_name,
+                external_registry=self.external_tool_registry,
+                trace_logger=self.trace_logger,
+                output_preview_chars=self.output_preview_chars,
+                **parsed.arguments,
+            )
+        else:
+            result = call_tool_traced(
+                parsed.tool_name,
+                trace_logger=self.trace_logger,
+                output_preview_chars=self.output_preview_chars,
+                **parsed.arguments,
+            )
 
         if policy_metadata is not None:
             merged_result_metadata = {

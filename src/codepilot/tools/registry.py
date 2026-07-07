@@ -14,6 +14,7 @@ from codepilot.tools.git_tools import git_diff, git_status
 from codepilot.tools.search_tools import search_code
 from codepilot.tools.shell_tools import run_shell
 from codepilot.tools.test_tools import run_tests
+from codepilot.mcp.trace import redact_mcp_mapping, redact_mcp_text
 from codepilot.trace.events import TraceEvent
 from codepilot.trace.logger import TraceLogger
 
@@ -286,3 +287,37 @@ def call_tool_traced(
     )
     trace_logger.record(event)
     return result
+
+
+def call_external_tool_traced(
+    name: str,
+    external_registry: Any,
+    trace_logger: TraceLogger,
+    output_preview_chars: int = 1000,
+    **kwargs: Any,
+) -> ToolResult:
+    spec = external_registry.find_spec(name)
+    result = external_registry.call_tool(name, kwargs)
+    redacted_input = redact_mcp_mapping(kwargs)
+    output_preview, preview_truncated = _preview_output(redact_mcp_text(result.output), output_preview_chars)
+    metadata = dict(spec.metadata if spec else {})
+    metadata["mcp_result_metadata"] = redact_mcp_mapping(result.metadata)
+    metadata["output_chars"] = len(result.output)
+    metadata["output_preview_truncated"] = preview_truncated
+    event = TraceEvent(
+        run_id=trace_logger.run_id,
+        step=trace_logger.next_step,
+        event_type="tool_call",
+        tool_name=name,
+        risk=spec.risk.value if spec else None,
+        side_effect=spec.side_effect.value if spec else None,
+        default_permission=spec.default_permission.value if spec else None,
+        input=redacted_input,
+        success=result.success,
+        output_summary=result.output_summary,
+        output_preview=output_preview,
+        error=redact_mcp_text(result.error) if result.error else None,
+        metadata=metadata,
+    )
+    trace_logger.record(event)
+    return result.model_copy(update={"metadata": metadata})

@@ -6,6 +6,7 @@ from typing import Literal
 from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop
 from codepilot.llm.fake import FakeLLMClient
 from codepilot.llm.swe_agent_adapter import SweAgentModelAdapter
+from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
 from minisweagent.config import get_config_from_spec
@@ -48,6 +49,7 @@ def run_agent_task(
     fake_actions: str | Path | None = None,
     model: str | None = None,
     model_config: list[str] | None = None,
+    mcp_config: str | Path | None = None,
     runs_dir: str | Path = "runs",
     run_id: str | None = None,
 ) -> AgentRunResult:
@@ -56,12 +58,20 @@ def run_agent_task(
     repo_path = Path(repo).expanduser().resolve()
     llm = build_codepilot_llm(fake_actions=fake_actions, model=model, model_config=model_config)
     policy_context = PolicyContext(repo=repo_path, mode=policy_mode, approved=approve, interactive=False)
+    mcp_registry = MCPToolRegistry.from_config(mcp_config) if mcp_config else None
+    extra_specs = {spec.name: spec for spec in mcp_registry.list_specs()} if mcp_registry else {}
     # 这里必须通过 ToolRouter.from_runs_dir(...) 统一创建 TraceLogger，
     # 这样 ToolRouter 与 MinimalAgentLoop 才会共享同一份 trace.jsonl。
     router = ToolRouter.from_runs_dir(
         runs_dir=runs_dir,
         run_id=run_id,
-        policy_checker=PolicyChecker.default(),
+        policy_checker=PolicyChecker.default(extra_tool_specs=extra_specs),
         policy_context=policy_context,
+        external_tool_registry=mcp_registry,
     )
-    return MinimalAgentLoop(llm=llm, router=router, max_steps=max_steps).run(task=task, repo=repo_path)
+    return MinimalAgentLoop(
+        llm=llm,
+        router=router,
+        max_steps=max_steps,
+        prompt_extra_tool_specs=mcp_registry.list_exposed_specs() if mcp_registry else None,
+    ).run(task=task, repo=repo_path)
