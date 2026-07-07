@@ -2,10 +2,15 @@
 
 import json
 import os
+import time
+os.environ.setdefault("MSWEA_SILENT_STARTUP", "1")
+import io
 from pathlib import Path
 from typing import Literal
 
 import typer
+from dataclasses import replace
+from rich.console import Console
 from pydantic import ValidationError
 
 from codepilot.auto_pr.models import AutoPRError, AutoPRManifestInvalidError, AutoPRSafetyError
@@ -19,6 +24,12 @@ from codepilot.pr_feedback.models import PRFeedbackError, PRFeedbackManifestInva
 from codepilot.pr_feedback.workflow import run_pr_feedback_loop
 from codepilot.pr_assist.models import ManifestInvalidError, PRAssistError
 from codepilot.pr_assist.workflow import run_pr_assist
+from codepilot.tui.indexer import build_run_index
+from codepilot.tui.json_output import detail_to_json_dict, dumps_dashboard_json, index_to_json_dict
+from codepilot.tui.projector import build_dashboard_model
+from codepilot.tui.models import RunDashboardModel, RunIndexEntry
+from codepilot.tui.redaction import relative_path_for_display, relative_paths_in_text
+from codepilot.tui.render import render_run_detail, render_run_index
 from codepilot.report.generator import ReportExistsError, generate_report
 from codepilot.router import ToolAction, ToolRouter
 from codepilot.tools.base import ToolSideEffect
@@ -26,6 +37,71 @@ from codepilot.tools.registry import call_external_tool_traced, call_tool, call_
 from codepilot.trace.logger import TraceLogger
 
 app = typer.Typer(add_completion=False, help="CodePilot Lite structured tools CLI.")
+
+
+def _recorded_console() -> Console:
+    return Console(file=io.StringIO(), record=True, color_system=None)
+
+
+def _display_object(value: object, runs_dir: Path) -> object:
+    if isinstance(value, dict):
+        return {key: _display_object(item, runs_dir) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_display_object(item, runs_dir) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_display_object(item, runs_dir) for item in value)
+    if isinstance(value, set):
+        return sorted((_display_object(item, runs_dir) for item in value), key=str)
+    if isinstance(value, Path):
+        return Path(relative_path_for_display(value, base_dir=runs_dir))
+    if isinstance(value, str):
+        return relative_paths_in_text(value, base_dir=runs_dir)
+    return value
+
+
+def _display_run_index_entry(entry: RunIndexEntry, runs_dir: Path) -> RunIndexEntry:
+    return replace(
+        entry,
+        run_dir=Path(relative_path_for_display(entry.run_dir, base_dir=runs_dir)),
+        task=_display_object(entry.task, runs_dir),
+        changed_files=tuple(relative_path_for_display(path, base_dir=runs_dir) for path in entry.changed_files),
+        source_provenance=_display_object(entry.source_provenance, runs_dir),
+        warnings=tuple(_display_object(warning, runs_dir) for warning in entry.warnings),
+        artifacts=tuple(
+            replace(
+                artifact,
+                path=Path(relative_path_for_display(artifact.path, base_dir=runs_dir)),
+            )
+            for artifact in entry.artifacts
+        ),
+    )
+
+
+def _display_dashboard_model(model: RunDashboardModel, runs_dir: Path) -> RunDashboardModel:
+    return replace(
+        model,
+        entry=_display_run_index_entry(model.entry, runs_dir),
+        timeline=tuple(
+            replace(
+                row,
+                output_summary=_display_object(row.output_summary, runs_dir) if row.output_summary is not None else None,
+                metadata=_display_object(row.metadata, runs_dir),
+            )
+            for row in model.timeline
+        ),
+        test_summary=_display_object(model.test_summary, runs_dir),
+        diff_summary=_display_object(model.diff_summary, runs_dir),
+        workflow_summary=_display_object(model.workflow_summary, runs_dir),
+        mcp_summary=_display_object(model.mcp_summary, runs_dir),
+        warnings=tuple(_display_object(warning, runs_dir) for warning in model.warnings),
+        artifact_summary=tuple(
+            replace(
+                artifact,
+                path=Path(relative_path_for_display(artifact.path, base_dir=runs_dir)),
+            )
+            for artifact in model.artifact_summary
+        ),
+    )
 
 
 @app.command()
@@ -291,6 +367,98 @@ def report_command(
     typer.echo(f"Policy violations: {len(report.policy.violations)}")
     if write_json:
         typer.echo(f"Report JSON written: {report_path.with_suffix('.json')}")
+
+
+@app.command("dashboard")
+def dashboard_command(
+    runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory containing run artifacts."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Run id to inspect."),
+    limit: int = typer.Option(20, "--limit", help="Maximum runs to show."),
+    status: str | None = typer.Option(None, "--status", help="Optional status filter."),
+    run_type: str | None = typer.Option(None, "--run-type", help="Optional run type filter."),
+    json_output: bool = typer.Option(False, "--json", help="Output dashboard JSON."),
+    static: bool = typer.Option(True, "--static/--tui", help="Render static Rich dashboard or interactive Textual TUI."),
+    watch: bool = typer.Option(False, "--watch", help="Refresh static dashboard in the foreground."),
+    watch_interval: float = typer.Option(2.0, "--watch-interval", help="Refresh interval in seconds."),
+    max_timeline_rows: int = typer.Option(200, "--max-timeline-rows", help="Maximum timeline rows for detail view."),
+    max_text_chars: int = typer.Option(500, "--max-text-chars", help="Maximum text chars per displayed field."),
+) -> None:
+    """查看 runs 目录里的只读仪表盘。"""
+
+    runs_path = Path(runs_dir)
+    if not runs_path.exists():
+        typer.echo(f"runs_dir does not exist: {runs_path}", err=True)
+        raise typer.Exit(1)
+    if not runs_path.is_dir():
+        typer.echo(f"runs_dir is not a directory: {runs_path}", err=True)
+        raise typer.Exit(1)
+    if watch and not static:
+        typer.echo("--watch is only allowed with --static.", err=True)
+        raise typer.Exit(1)
+    if watch and watch_interval < 1.0:
+        typer.echo("--watch-interval must be at least 1.0 seconds.", err=True)
+        raise typer.Exit(1)
+
+    def _render_once() -> None:
+        if run_id is None:
+            entries = tuple(_display_run_index_entry(entry, runs_path) for entry in build_run_index(runs_path, limit=limit, status=status, run_type=run_type))
+            if json_output:
+                typer.echo(dumps_dashboard_json(index_to_json_dict(list(entries))))
+                return
+            if static:
+                console = _recorded_console()
+                render_run_index(console, list(entries))
+                typer.echo(console.export_text())
+                return
+            try:
+                from codepilot.tui.app import create_dashboard_app
+            except RuntimeError as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(1) from exc
+            try:
+                create_dashboard_app(runs_dir=runs_path, limit=limit, status=status, run_type=run_type).run()
+            except RuntimeError as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(1) from exc
+            return
+
+        run_path = runs_path / run_id
+        if not run_path.exists() or not run_path.is_dir():
+            typer.echo(f"Run not found: {run_id}", err=True)
+            raise typer.Exit(1)
+        model = _display_dashboard_model(
+            build_dashboard_model(run_path, max_timeline_rows=max_timeline_rows, max_text_chars=max_text_chars),
+            runs_path,
+        )
+        if json_output:
+            typer.echo(dumps_dashboard_json(detail_to_json_dict(model)))
+            return
+        if static:
+            console = _recorded_console()
+            render_run_detail(console, model)
+            typer.echo(console.export_text())
+            return
+        try:
+            from codepilot.tui.app import create_dashboard_app
+        except RuntimeError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from exc
+        try:
+            create_dashboard_app(runs_dir=runs_path, limit=limit, status=status, run_type=run_type).run()
+        except RuntimeError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1) from exc
+
+    if not watch:
+        _render_once()
+        return
+
+    while True:
+        try:
+            _render_once()
+            time.sleep(watch_interval)
+        except KeyboardInterrupt:
+            return
 
 
 @app.command("agent-run")

@@ -872,6 +872,46 @@ PYTHONPATH=src python -m codepilot.cli agent-run \
 
 不会新增计划外参数，例如 `--llm-api-key`、`--llm-base-url`。
 
+## CodePilot Lite 第十七步 - Terminal Dashboard 使用说明
+
+第十七步新增了只读的 `codepilot dashboard` 命令。它只读取 `runs/<run_id>/` 里的现有产物，不会执行 agent、LLM 或 tool，也不会修改任何文件。
+
+### 常用命令
+
+```bash
+# 静态总览
+codepilot dashboard --runs-dir runs --limit 10 --static
+
+# 查看单个 run 的详情
+codepilot dashboard --runs-dir runs --run-id mcp-agent-demo-test --static
+
+# 输出 JSON 索引
+codepilot dashboard --runs-dir runs --limit 5 --json
+
+# 输出 JSON 详情
+codepilot dashboard --runs-dir runs --run-id mcp-agent-demo-test --json
+
+# 交互式 TUI（需要安装 textual）
+codepilot dashboard --runs-dir runs --limit 20 --tui
+```
+
+### 参数说明
+
+- `--runs-dir`：run 产物根目录，默认是 `runs`
+- `--run-id`：查看单个 run；不传则展示 run 列表
+- `--json`：输出稳定 JSON，方便脚本处理
+- `--static / --tui`：选择静态 Rich 输出或交互式 Textual 界面
+- `--status`：按状态过滤索引
+- `--run-type`：按 run 类型过滤索引
+- `--watch`：静态模式下持续刷新只读视图
+
+### 使用边界
+
+- 不会执行 agent 或 tool
+- 不会调用 LLM
+- 不会写 trace、report、patch 或 manifest
+- 不会修改 `runs/` 目录里的任何文件
+
 ## Attribution
 
 If you found this work helpful, please consider citing the [SWE-agent paper](https://arxiv.org/abs/2405.15793) in your work:
