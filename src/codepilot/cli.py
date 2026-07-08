@@ -36,7 +36,36 @@ from codepilot.tools.base import ToolSideEffect
 from codepilot.tools.registry import call_external_tool_traced, call_tool, call_tool_traced, find_tool_spec, list_tool_specs
 from codepilot.trace.logger import TraceLogger
 
-app = typer.Typer(add_completion=False, help="CodePilot Lite structured tools CLI.")
+app = typer.Typer(
+    add_completion=False,
+    help="CodePilot Lite structured tools CLI.",
+    invoke_without_command=True,
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+
+
+@app.callback(invoke_without_command=True)
+def main_callback(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand is not None:
+        return
+    project = ctx.args[0] if len(ctx.args) == 1 else None
+    if len(ctx.args) > 1:
+        typer.echo("Too many arguments. Use `codepilot tui <project>` for the interactive TUI.", err=True)
+        raise typer.Exit(1)
+    if project is not None:
+        project_path = Path(project)
+        if not project_path.exists():
+            typer.echo("project path does not exist. Use `codepilot tui <project>` to start the interactive TUI.", err=True)
+            raise typer.Exit(1)
+        if not project_path.is_dir():
+            typer.echo("project path must be a directory", err=True)
+            raise typer.Exit(1)
+    try:
+        from codepilot.tui_agent.app import create_tui_agent_app
+        create_tui_agent_app(project=project).run()
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
 
 
 def _recorded_console() -> Console:
@@ -102,6 +131,36 @@ def _display_dashboard_model(model: RunDashboardModel, runs_dir: Path) -> RunDas
             for artifact in model.artifact_summary
         ),
     )
+
+
+@app.command()
+def tui(
+    project: str | None = typer.Argument(None, help="Project directory. Defaults to cwd."),
+    model: str | None = typer.Option(None, "--model"),
+    model_config: list[str] = typer.Option([], "--model-config"),
+    permission_mode: Literal["manual", "read_only", "accept_edits", "unsafe_auto"] | None = typer.Option(None, "--permission-mode"),
+    mcp_config: str | None = typer.Option(None, "--mcp-config"),
+    runs_dir: str | None = typer.Option(None, "--runs-dir"),
+    fake_actions: str | None = typer.Option(None, "--fake-actions"),
+    max_steps: int | None = typer.Option(None, "--max-steps"),
+) -> None:
+    """启动交互式 Agent TUI。"""
+
+    try:
+        from codepilot.tui_agent.app import create_tui_agent_app
+        create_tui_agent_app(
+            project=project,
+            model=model,
+            model_config=model_config,
+            permission_mode=permission_mode,
+            mcp_config=mcp_config,
+            runs_dir=runs_dir,
+            fake_actions=fake_actions,
+            max_steps=max_steps,
+        ).run()
+    except RuntimeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
 
 
 @app.command()

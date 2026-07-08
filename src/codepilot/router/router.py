@@ -9,6 +9,9 @@ from codepilot.router.actions import ToolAction, ToolRouteResult
 from codepilot.tools.base import ToolResult
 from codepilot.tools.registry import call_external_tool_traced, call_tool_traced
 from codepilot.trace.logger import TraceLogger
+from codepilot.tui_agent.permission_broker import PermissionBroker, make_permission_request_id
+from codepilot.tui_agent.models import PermissionRequest
+from codepilot.tui_agent.session_store import now_iso
 
 
 class ToolRouter:
@@ -21,12 +24,14 @@ class ToolRouter:
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
         external_tool_registry: Any | None = None,
+        permission_broker: PermissionBroker | None = None,
     ) -> None:
         self.trace_logger = trace_logger
         self.output_preview_chars = output_preview_chars
         self.policy_checker = policy_checker
         self.policy_context = policy_context or PolicyContext()
         self.external_tool_registry = external_tool_registry
+        self.permission_broker = permission_broker
 
     @classmethod
     def from_runs_dir(
@@ -37,14 +42,17 @@ class ToolRouter:
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
         external_tool_registry: Any | None = None,
+        trace_logger: TraceLogger | None = None,
+        permission_broker: PermissionBroker | None = None,
     ) -> "ToolRouter":
-        logger = TraceLogger(runs_dir=runs_dir, run_id=run_id)
+        logger = trace_logger or TraceLogger(runs_dir=runs_dir, run_id=run_id)
         return cls(
             trace_logger=logger,
             output_preview_chars=output_preview_chars,
             policy_checker=policy_checker,
             policy_context=policy_context,
             external_tool_registry=external_tool_registry,
+            permission_broker=permission_broker,
         )
 
     def _base_route_metadata(self, parsed: ToolAction) -> dict[str, Any]:
@@ -111,27 +119,86 @@ class ToolRouter:
                 )
 
             if decision.asks and not self.policy_context.approved:
-                result = ToolResult(
-                    success=False,
-                    output="",
-                    error=decision.reason,
-                    metadata={
-                        **policy_metadata,
-                        "requires_approval": True,
-                        "approved": False,
-                        "executed": False,
-                    },
-                )
-                route_metadata.update(result.metadata)
-                return ToolRouteResult(
-                    action_id=parsed.action_id,
-                    tool_name=parsed.tool_name,
-                    success=False,
-                    result=result,
-                    trace_path=str(self.trace_logger.trace_path),
-                    error=result.error,
-                    metadata=route_metadata,
-                )
+                if self.permission_broker is not None and self.policy_context.interactive:
+                    request_id = make_permission_request_id()
+                    request = PermissionRequest(
+                        request_id=request_id,
+                        run_id=self.trace_logger.run_id,
+                        action_id=parsed.action_id,
+                        tool_name=parsed.tool_name,
+                        arguments_preview=parsed.arguments,
+                        reason=decision.reason,
+                        risk=policy_metadata.get("risk") if isinstance(policy_metadata.get("risk"), str) else None,
+                        side_effect=policy_metadata.get("side_effect") if isinstance(policy_metadata.get("side_effect"), str) else None,
+                        matched_rule=decision.matched_rule,
+                        created_at=now_iso(),
+                    )
+                    self.permission_broker.request(request)
+                    self.trace_logger.record_permission_request(
+                        request_id=request_id,
+                        tool_name=parsed.tool_name,
+                        reason=decision.reason,
+                        metadata={
+                            "action_id": parsed.action_id,
+                            "arguments_preview": parsed.arguments,
+                            "risk": policy_metadata.get("risk"),
+                            "side_effect": policy_metadata.get("side_effect"),
+                            "matched_rule": decision.matched_rule,
+                        },
+                    )
+                    response = getattr(self.permission_broker, "wait", lambda _request_id: None)(request.request_id)
+                    decision_value = "approve_once" if response is not None and response.decision == "approve_once" else "deny"
+                    self.trace_logger.record_permission_response(
+                        request_id=request.request_id,
+                        decision=decision_value,
+                        reason=response.reason if response is not None else decision.reason,
+                        metadata={"action_id": parsed.action_id},
+                    )
+                    if decision_value != "approve_once":
+                        result = ToolResult(
+                            success=False,
+                            output="",
+                            error=response.reason if response is not None else decision.reason,
+                            metadata={
+                                **policy_metadata,
+                                "requires_approval": True,
+                                "approved": False,
+                                "executed": False,
+                            },
+                        )
+                        route_metadata.update(result.metadata)
+                        return ToolRouteResult(
+                            action_id=parsed.action_id,
+                            tool_name=parsed.tool_name,
+                            success=False,
+                            result=result,
+                            trace_path=str(self.trace_logger.trace_path),
+                            error=result.error,
+                            metadata=route_metadata,
+                        )
+                    policy_metadata["approved"] = True
+                else:
+                    result = ToolResult(
+                        success=False,
+                        output="",
+                        error=decision.reason,
+                        metadata={
+                            **policy_metadata,
+                            "requires_approval": True,
+                            "approved": False,
+                            "executed": False,
+                        },
+                    )
+                    route_metadata.update(result.metadata)
+                    return ToolRouteResult(
+                        action_id=parsed.action_id,
+                        tool_name=parsed.tool_name,
+                        success=False,
+                        result=result,
+                        trace_path=str(self.trace_logger.trace_path),
+                        error=result.error,
+                        metadata=route_metadata,
+                    )
 
         if self.external_tool_registry is not None and self.external_tool_registry.has_tool(parsed.tool_name):
             result = call_external_tool_traced(

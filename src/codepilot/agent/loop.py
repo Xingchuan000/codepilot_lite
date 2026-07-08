@@ -61,6 +61,7 @@ class MinimalAgentLoop:
         trace_logger: TraceLogger | None = None,
         max_steps: int = 12,
         prompt_extra_tool_specs: list[ToolSpec] | None = None,
+        cancellation_token: Any | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be greater than 0")
@@ -76,6 +77,10 @@ class MinimalAgentLoop:
         self.max_steps = max_steps
         self.trace_logger = router.trace_logger
         self.prompt_extra_tool_specs = list(prompt_extra_tool_specs or [])
+        self.cancellation_token = cancellation_token
+
+    def _cancel_requested(self) -> bool:
+        return bool(self.cancellation_token and self.cancellation_token.is_cancelled())
 
     def _result(
         self,
@@ -114,8 +119,44 @@ class MinimalAgentLoop:
         )
         try:
             while state.step < state.max_steps and not state.finished:
+                if self._cancel_requested():
+                    self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
+                    return self._result(
+                        status="cancelled",
+                        summary="cancelled",
+                        steps=state.step,
+                        changed_files=state.changed_files,
+                        last_test_status=state.last_test_status,
+                        success=False,
+                        error="cancelled",
+                        policy_violations=state.policy_violations,
+                    )
                 state.step += 1
+                if self._cancel_requested():
+                    self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
+                    return self._result(
+                        status="cancelled",
+                        summary="cancelled",
+                        steps=state.step,
+                        changed_files=state.changed_files,
+                        last_test_status=state.last_test_status,
+                        success=False,
+                        error="cancelled",
+                        policy_violations=state.policy_violations,
+                    )
                 response = self.llm.complete(state.messages)
+                if self._cancel_requested():
+                    self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
+                    return self._result(
+                        status="cancelled",
+                        summary="cancelled",
+                        steps=state.step,
+                        changed_files=state.changed_files,
+                        last_test_status=state.last_test_status,
+                        success=False,
+                        error="cancelled",
+                        policy_violations=state.policy_violations,
+                    )
                 self.trace_logger.record_llm_call(
                     model=response.model,
                     message_count=len(state.messages),
@@ -201,11 +242,10 @@ class MinimalAgentLoop:
                         summary=action.summary,
                         metadata={"tests": action.tests, "changed_files": action.changed_files},
                     )
-                    run_end_metadata: dict[str, Any] = {}
                     self.trace_logger.record_run_end(
                         success=action.status == "success",
                         summary=action.summary,
-                        metadata=run_end_metadata,
+                        metadata={"status": action.status},
                     )
                     return self._result(
                         status=action.status,
@@ -227,6 +267,18 @@ class MinimalAgentLoop:
                             "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
                         },
                     )
+                    if self._cancel_requested():
+                        self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
+                        return self._result(
+                            status="cancelled",
+                            summary="cancelled",
+                            steps=state.step,
+                            changed_files=state.changed_files,
+                            last_test_status=state.last_test_status,
+                            success=False,
+                            error="cancelled",
+                            policy_violations=state.policy_violations,
+                        )
                     route_result = self.router.route(tool_action)
                 except Exception as exc:
                     observation = (
@@ -239,6 +291,18 @@ class MinimalAgentLoop:
                     self.trace_logger.record_agent_observation(tool_name=action.tool_name, observation=observation)
                     continue
                 update_state_from_route_result(state, route_result)
+                if self._cancel_requested():
+                    self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
+                    return self._result(
+                        status="cancelled",
+                        summary="cancelled",
+                        steps=state.step,
+                        changed_files=state.changed_files,
+                        last_test_status=state.last_test_status,
+                        success=False,
+                        error="cancelled",
+                        policy_violations=state.policy_violations,
+                    )
                 observation = format_observation(route_result)
                 state.messages.append(ChatMessage(role="assistant", content=response.content))
                 state.messages.append(ChatMessage(role="user", content=observation))
@@ -248,7 +312,7 @@ class MinimalAgentLoop:
                     metadata={"success": route_result.success},
                 )
         except FakeLLMExhaustedError as exc:
-            self.trace_logger.record_run_end(success=False, summary="llm_exhausted", metadata={"error": str(exc)})
+            self.trace_logger.record_run_end(success=False, summary="llm_exhausted", metadata={"status": "llm_exhausted", "error": str(exc)})
             return self._result(
                 status="llm_exhausted",
                 summary="llm_exhausted",
@@ -262,7 +326,7 @@ class MinimalAgentLoop:
         except KeyboardInterrupt:
             raise
         except Exception as exc:
-            self.trace_logger.record_run_end(success=False, summary="llm_error", metadata={"error": str(exc)})
+            self.trace_logger.record_run_end(success=False, summary="llm_error", metadata={"status": "llm_error", "error": str(exc)})
             return self._result(
                 status="llm_error",
                 summary="llm_error",
@@ -273,7 +337,7 @@ class MinimalAgentLoop:
                 error=str(exc),
                 policy_violations=state.policy_violations,
             )
-        self.trace_logger.record_run_end(success=False, summary="max_steps_exceeded")
+        self.trace_logger.record_run_end(success=False, summary="max_steps_exceeded", metadata={"status": "max_steps_exceeded"})
         return self._result(
             status="max_steps_exceeded",
             summary="max_steps_exceeded",

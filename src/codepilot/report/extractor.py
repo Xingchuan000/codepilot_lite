@@ -286,11 +286,14 @@ def build_run_report(
             "llm_call",
             "agent_action",
             "policy_decision",
+            "permission_request",
+            "permission_response",
             "tool_call",
             "tool_result",
             "agent_observation",
             "agent_finish",
             "run_end",
+            "run_cancelled",
         }:
             _append_warning(report.warnings, f"Unknown event_type at step {step if step is not None else 'unknown'}: {event_type}")
             continue

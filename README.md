@@ -912,6 +912,39 @@ codepilot dashboard --runs-dir runs --limit 20 --tui
 - 不会写 trace、report、patch 或 manifest
 - 不会修改 `runs/` 目录里的任何文件
 
+## Interactive Agent TUI
+
+新增 `codepilot tui` 用于启动交互式 Agent TUI，也支持直接运行 `codepilot` 进入同一界面。
+
+### 启动方式
+
+```bash
+codepilot tui /path/to/project
+codepilot tui /path/to/project --permission-mode manual
+codepilot tui /path/to/project --model gpt-4.1-mini --max-steps 12
+```
+
+### 常用命令
+
+- `/help`：查看命令列表
+- `/status`：查看项目、Git、模型和权限状态
+- `/permissions`：查看或切换权限模式
+- `/diff`：查看变更摘要
+- `/report`：查看 trace / report 路径
+- `/new`：准备下一条任务
+- `/cancel`：取消当前运行
+- `/exit`：退出 TUI
+
+### 会话文件
+
+TUI 会把会话写入 `<workspace_root>/.codepilot/sessions/<session_id>/`，其中包含：
+
+- `session.json`
+- `messages.jsonl`
+- `runs.jsonl`
+
+每次运行的 trace 和 report 仍然写入 `runs/<run_id>/`，以兼容现有 dashboard。
+
 ## Attribution
 
 If you found this work helpful, please consider citing the [SWE-agent paper](https://arxiv.org/abs/2405.15793) in your work:

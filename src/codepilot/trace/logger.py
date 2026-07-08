@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Callable
 from uuid import uuid4
 
 from codepilot.trace.events import TraceEvent
@@ -29,11 +30,17 @@ def _preview_text(text: str | None, max_chars: int = MAX_TRACE_PREVIEW_CHARS) ->
 class TraceLogger:
     """把结构化 TraceEvent 追加写入 trace.jsonl。"""
 
-    def __init__(self, runs_dir: str | Path = "runs", run_id: str | None = None) -> None:
+    def __init__(
+        self,
+        runs_dir: str | Path = "runs",
+        run_id: str | None = None,
+        record_hook: Callable[[TraceEvent], None] | None = None,
+    ) -> None:
         self.runs_dir = Path(runs_dir)
         self.run_id = run_id or make_run_id()
         self.run_dir = self.runs_dir / self.run_id
         self.trace_path = self.run_dir / "trace.jsonl"
+        self.record_hook = record_hook
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self._step = self._load_existing_step()
@@ -67,6 +74,11 @@ class TraceLogger:
 
         with self.trace_path.open("a", encoding="utf-8") as file:
             file.write(event.model_dump_json() + "\n")
+        if self.record_hook is not None:
+            try:
+                self.record_hook(event)
+            except Exception:
+                pass
         return event
 
     def record_policy_decision(
@@ -217,5 +229,52 @@ class TraceLogger:
             success=success,
             output_summary=summary,
             metadata=metadata or {},
+        )
+        return self.record(event)
+
+    def record_permission_request(
+        self,
+        *,
+        request_id: str,
+        tool_name: str,
+        reason: str,
+        metadata: dict | None = None,
+    ) -> TraceEvent:
+        event = TraceEvent(
+            run_id=self.run_id,
+            step=self.next_step,
+            event_type="permission_request",
+            tool_name=tool_name,
+            permission_request_id=request_id,
+            metadata={"reason": reason, **(metadata or {})},
+        )
+        return self.record(event)
+
+    def record_permission_response(
+        self,
+        *,
+        request_id: str,
+        decision: str,
+        reason: str | None,
+        metadata: dict | None = None,
+    ) -> TraceEvent:
+        event = TraceEvent(
+            run_id=self.run_id,
+            step=self.next_step,
+            event_type="permission_response",
+            permission_request_id=request_id,
+            permission_decision=decision,
+            metadata={"reason": reason, **(metadata or {})},
+        )
+        return self.record(event)
+
+    def record_run_cancelled(self, summary: str = "cancelled", metadata: dict | None = None) -> TraceEvent:
+        event = TraceEvent(
+            run_id=self.run_id,
+            step=self.next_step,
+            event_type="run_cancelled",
+            success=False,
+            output_summary=summary,
+            metadata={"status": "cancelled", **(metadata or {})},
         )
         return self.record(event)

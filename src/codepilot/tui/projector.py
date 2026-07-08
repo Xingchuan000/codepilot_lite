@@ -35,11 +35,11 @@ def event_category(event: dict[str, Any]) -> str:
     metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
     if (isinstance(tool_name, str) and tool_name.startswith("mcp.")) or metadata.get("mcp") is True:
         return "mcp"
-    if event_type in {"run_start", "run_end", "agent_finish"}:
+    if event_type in {"run_start", "run_end", "agent_finish", "run_cancelled"}:
         return "lifecycle"
     if event_type in {"llm_call", "agent_action", "agent_observation"}:
         return "model"
-    if event_type == "policy_decision":
+    if event_type in {"policy_decision", "permission_request", "permission_response"}:
         return "policy"
     if event_type == "tool_call":
         return "tool"
@@ -76,6 +76,8 @@ def event_to_timeline_row(event: dict[str, Any], *, max_text_chars: int = 500) -
         "llm_call": "LLM call",
         "agent_action": "Agent action",
         "policy_decision": "Policy decision",
+        "permission_request": "Permission request",
+        "permission_response": "Permission response",
         "tool_call": "Tool call",
         "agent_observation": "Agent observation",
         "agent_finish": "Agent finish",

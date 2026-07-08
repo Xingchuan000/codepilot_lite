@@ -11,11 +11,14 @@ TraceEventType = Literal[
     "llm_call",
     "agent_action",
     "policy_decision",
+    "permission_request",
+    "permission_response",
     "tool_call",
     "tool_result",
     "agent_observation",
     "agent_finish",
     "run_end",
+    "run_cancelled",
 ]
 
 
@@ -37,6 +40,8 @@ class TraceEvent(BaseModel):
     policy_reason: str | None = None
     policy_rule: str | None = None
     policy_mode: str | None = None
+    permission_request_id: str | None = None
+    permission_decision: str | None = None
 
     # 输入输出保持机器可读，方便后续审计和检索。
     input: dict[str, Any] = Field(default_factory=dict)
