@@ -1,0 +1,3 @@
+{"type":"tool_call","tool_name":"list_files","arguments":{"path":".","max_depth":2},"short_rationale":"先查看项目结构"}
+{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/codepilot/tui_agent/models.py","start_line":1,"end_line":80},"short_rationale":"确认 TUI 数据结构"}
+{"type":"finish","status":"success","summary":"已列出项目结构，未修改文件。","tests":"not run","changed_files":[]}

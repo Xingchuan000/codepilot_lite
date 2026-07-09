@@ -21,6 +21,7 @@ def test_system_prompt_contains_required_rules() -> None:
     assert '"tool_name"' in prompt
     assert '"arguments"' in prompt
     assert "necessary trailing newline" in prompt
+    assert "short_rationale" in prompt
     assert '"parameters"' in prompt
     assert '"action"' in prompt
     assert "GOOD:" in prompt

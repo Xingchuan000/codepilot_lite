@@ -21,7 +21,7 @@ If a policy deny happens, do not repeat the same unsafe action.
 The repo argument may be omitted because the loop will inject the current repo.
 IMPORTANT JSON FIELD RULES:
 For tool calls, use exactly these standard keys:
-{"type":"tool_call","tool_name":"<one registered tool name>","arguments":{}}
+{"type":"tool_call","tool_name":"<one registered tool name>","arguments":{},"short_rationale":"one short visible reason, not hidden chain-of-thought"}
 When replacement text spans multiple lines, keep the necessary trailing newline in "replacement".
 Do NOT use these non-standard keys in your final answer:
 - "tool"

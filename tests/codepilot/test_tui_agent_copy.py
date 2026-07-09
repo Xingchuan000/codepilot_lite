@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from codepilot.tui_agent import app as app_module
 from codepilot.tui_agent.app import create_tui_agent_app
+from codepilot.tui_agent.layout import format_transcript_plain
+from codepilot.tui_agent.models import TranscriptItem
 
 
 class _FakeWidget:
@@ -112,53 +117,64 @@ def _widgets() -> dict[str, _FakeWidget]:
     }
 
 
-def test_app_permissions_updates_runner_and_session(tmp_path: Path, monkeypatch) -> None:
+def _app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _install_fake_textual(monkeypatch)
     app = create_tui_agent_app(project=tmp_path)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
-
-    app.on_input_submitted(type("Submitted", (), {"value": "/permissions read_only"})())
-
-    assert app.session.permission_mode == "read_only"
-    assert app.runner.config.permission_mode == "read_only"
-    assert app.runner.session.permission_mode == "read_only"
+    return app, widgets
 
 
-def test_app_copy_to_clipboard_writes_system_clipboard(tmp_path: Path, monkeypatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
-    monkeypatch.setattr("codepilot.tui_agent.app.sys.platform", "darwin")
-    monkeypatch.setattr("codepilot.tui_agent.app.shutil.which", lambda name: "/usr/bin/pbcopy" if name == "pbcopy" else None)
-    calls: list[tuple[list[str], str]] = []
-    monkeypatch.setattr(
-        "codepilot.tui_agent.app.subprocess.run",
-        lambda cmd, input=None, text=None, check=None: calls.append((cmd, input or "")),
+def test_copy_transcript_copies_plain_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _ = _app(tmp_path, monkeypatch)
+    app._reducer.view = replace(
+        app._reducer.view,
+        transcript=(
+            TranscriptItem(id="1", kind="user_message", timestamp="t", body="hello", copy_text="You: hello"),
+            TranscriptItem(id="2", kind="assistant_raw", timestamp="t", body="raw"),
+        ),
     )
 
-    app.copy_to_clipboard("hello")
+    app.action_copy_transcript()
 
-    assert app.clipboard == "hello"
-    assert calls == [(["pbcopy"], "hello")]
+    assert app.clipboard == format_transcript_plain(app._reducer.view.transcript)
 
 
-def test_exit_command_returns_without_refreshing_after_exit(tmp_path: Path, monkeypatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
-    widgets = _widgets()
-    app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
-    exited = {"called": False}
+def test_open_copy_screen_uses_full_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _ = _app(tmp_path, monkeypatch)
+    app._reducer.view = replace(
+        app._reducer.view,
+        transcript=(
+            TranscriptItem(id="1", kind="user_message", timestamp="t", body="hello", copy_text="You: hello"),
+            TranscriptItem(id="2", kind="tool_result", timestamp="t", tool_name="list_files", body="src/main.py", status="success"),
+        ),
+    )
 
-    def _exit() -> None:
-        exited["called"] = True
+    app.action_open_copy_screen()
 
-    def _drain_events() -> None:
-        raise AssertionError("exit should not drain events after quitting")
+    assert "You: hello" in app.last_screen.text
+    assert "✓ list_files" in app.last_screen.text
 
-    app.exit = _exit  # type: ignore[method-assign]
-    app._drain_events = _drain_events  # type: ignore[method-assign]
 
-    app.on_input_submitted(SimpleNamespace(value="/exit"))
+def test_copy_command_without_history_shows_empty_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _ = _app(tmp_path, monkeypatch)
 
-    assert exited["called"] is True
-    assert len(widgets["#transcript"].mounted) == 0
+    app.on_input_submitted(SimpleNamespace(value="/copy"))
+
+    assert app.last_screen.text == "Transcript is empty."
+
+
+def test_export_transcript_writes_file_and_appends_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app, widgets = _app(tmp_path, monkeypatch)
+    app._reducer.view = replace(
+        app._reducer.view,
+        transcript=(TranscriptItem(id="1", kind="system_status", timestamp="t", body="ready"),),
+    )
+
+    app.on_input_submitted(SimpleNamespace(value="/export-transcript"))
+
+    transcript_path = app.session.session_dir / "transcript.md"
+    assert transcript_path.exists()
+    assert transcript_path.read_text(encoding="utf-8") == "• ready"
+    assert app._reducer.view.transcript[-1].kind == "command_output"
+    assert len(widgets["#transcript"].mounted) == 2

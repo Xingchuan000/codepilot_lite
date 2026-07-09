@@ -20,6 +20,22 @@ RunStatus = Literal[
     "unknown",
 ]
 
+TranscriptItemKind = Literal[
+    "user_message",
+    "assistant_raw",
+    "assistant_plan",
+    "assistant_action",
+    "tool_call",
+    "tool_result",
+    "observation",
+    "permission_request",
+    "permission_response",
+    "final_summary",
+    "command_output",
+    "system_status",
+    "error",
+]
+
 TUIEventType = Literal[
     "session_started",
     "run_started",
@@ -27,6 +43,8 @@ TUIEventType = Literal[
     "llm_call_started",
     "llm_call_finished",
     "agent_action",
+    "agent_observation",
+    "agent_finished",
     "tool_started",
     "tool_finished",
     "policy_decision",
@@ -36,6 +54,8 @@ TUIEventType = Literal[
     "file_changed",
     "run_finished",
     "run_cancelled",
+    "command_output",
+    "user_message",
     "error",
 ]
 
@@ -137,12 +157,33 @@ class TimelineItem:
 
 
 @dataclass(frozen=True)
+class TranscriptItem:
+    id: str
+    kind: TranscriptItemKind
+    timestamp: str
+    run_id: str | None = None
+    step: int | None = None
+    title: str = ""
+    body: str = ""
+    tool_name: str | None = None
+    status: str | None = None
+    input_preview: dict[str, Any] | None = None
+    output_preview: str | None = None
+    copy_text: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
 class AgentRunView:
     run_id: str | None = None
     task: str = ""
     status: RunStatus = "idle"
     current_step: int | None = None
     current_tool: str | None = None
+    active_tool: str | None = None
+    last_assistant_message: str | None = None
+    last_tool_output: str | None = None
+    transcript: tuple[TranscriptItem, ...] = ()
     timeline: tuple[TimelineItem, ...] = ()
     changed_files: tuple[str, ...] = ()
     test_status: str | None = None

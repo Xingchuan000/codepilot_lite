@@ -1,0 +1,2 @@
+{"type":"tool_call","tool_name":"run_shell","arguments":{"command":"python -c \"raise SystemExit(1)\"","timeout":30},"short_rationale":"验证失败处理"}
+{"type":"finish","status":"failed","summary":"命令失败，无法继续。","tests":"not run","changed_files":[]}

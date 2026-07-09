@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from codepilot.tui_agent.diff_view import format_diff_summary
+from codepilot.tui_agent.layout import format_side_status
 from codepilot.tui_agent.models import AgentRunView, PermissionMode, ProjectContext, TUISession
 
 
@@ -14,6 +15,9 @@ class CommandResult:
     new_task_requested: bool = False
     cancel_requested: bool = False
     permission_mode: PermissionMode | None = None
+    open_copy_mode: bool = False
+    copy_target: str | None = None
+    export_transcript_requested: bool = False
 
 
 def parse_slash_command(text: str) -> tuple[str, list[str]]:
@@ -35,20 +39,9 @@ def handle_command(
     if not command:
         return CommandResult(handled=False)
     if command == "help":
-        return CommandResult(handled=True, output="/help /status /permissions /diff /report /new /cancel /exit")
+        return CommandResult(handled=True, output="/help /status /permissions /diff /report /trace /copy /export-transcript /new /cancel /exit")
     if command == "status":
-        return CommandResult(
-            handled=True,
-            output="\n".join(
-                [
-                    f"Project: {project.resolved_project}",
-                    f"Git: {project.git_root or 'non-git'} ({project.git_dirty_status})",
-                    f"Model: {session.model or 'default'}",
-                    f"Permission: {permission_mode}",
-                    f"Run: {view.status}",
-                ]
-            ),
-        )
+        return CommandResult(handled=True, output=format_side_status(project, session, view, permission_mode))
     if command == "permissions":
         if not args:
             return CommandResult(handled=True, output=f"Permission mode: {permission_mode}")
@@ -69,6 +62,24 @@ def handle_command(
                 ]
             ),
         )
+    if command == "trace":
+        return CommandResult(
+            handled=True,
+            output="\n".join(
+                [
+                    f"Trace: {view.trace_path or 'none'}",
+                    f"Report: {view.report_path or 'none'}",
+                    f"Report JSON: {view.report_json_path or 'none'}",
+                ]
+            ),
+        )
+    if command == "copy":
+        target = args[0].lower() if args else "all"
+        if target not in {"all", "last", "errors"}:
+            return CommandResult(handled=True, output=f"Unknown copy target: {target}")
+        return CommandResult(handled=True, output=f"Copy mode opened: {target}", open_copy_mode=True, copy_target=target)
+    if command == "export-transcript":
+        return CommandResult(handled=True, output="Transcript export requested", export_transcript_requested=True)
     if command == "new":
         return CommandResult(handled=True, output="Ready for new task", new_task_requested=True)
     if command == "cancel":
@@ -76,4 +87,3 @@ def handle_command(
     if command == "exit":
         return CommandResult(handled=True, output="Exit requested", exit_requested=True)
     return CommandResult(handled=True, output=f"Unknown command: {text.strip()}")
-

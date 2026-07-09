@@ -227,6 +227,41 @@ codepilot tool run_shell '{"repo":".","command":"python --version"}'
 `search_code` 在结果截断时会在 output 末尾追加 `... truncated after N results` 提示。  
 `list_files` 严格按 `max_depth` 控制返回层级深度，不会越界。
 
+### Chat-style TUI transcript helpers
+
+这一阶段新增了聊天式 TUI 用到的 transcript 数据结构和格式化函数，方便把 trace 投影成可复制的纯文本消息流。
+
+```python
+from codepilot.tui_agent.layout import format_side_status, format_transcript_item, format_transcript_plain
+from codepilot.tui_agent.models import TranscriptItem
+
+item = TranscriptItem(
+    id="msg-1",
+    kind="user_message",
+    timestamp="2024-01-01T00:00:00Z",
+    title="You",
+    body="请列出项目结构",
+    copy_text="You: 请列出项目结构",
+)
+
+print(format_transcript_item(item))
+print(format_transcript_plain((item,)))
+```
+
+可用的 transcript kind 包括 `user_message`、`assistant_plan`、`assistant_action`、`assistant_raw`、`tool_result`、`permission_request`、`permission_response`、`final_summary`、`command_output`、`system_status` 和 `error`。
+如果需要显示右侧状态摘要，可以直接调用 `format_side_status(...)`，它默认不会展示完整的 `report.json`、`report.md` 或 `trace.jsonl` 路径。
+
+TUI 里现在还支持两种复制方式：
+
+```text
+/copy
+/copy last
+/copy errors
+/export-transcript
+```
+
+`/copy` 会打开纯文本复制视图，`Ctrl+A` 可全选，`Esc` 可关闭。`/export-transcript` 会把当前 transcript 导出到会话目录下的 `transcript.md`。
+
 ### TraceLogger 使用说明
 
 第三步新增了结构化 trace 记录能力。默认 trace 文件会写到 `runs/<run_id>/trace.jsonl`，每一行都是一条 JSON 事件。

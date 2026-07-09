@@ -1,0 +1,2 @@
+{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\n"},"short_rationale":"修复加法实现"}
+{"type":"finish","status":"success","summary":"已完成修改。","tests":"not run","changed_files":["src/calc.py"]}

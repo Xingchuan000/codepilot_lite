@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +11,8 @@ from codepilot.tui_agent.commands import handle_command
 from codepilot.tui_agent.config import merge_config
 from codepilot.tui_agent.event_reducer import EventReducer
 from codepilot.tui_agent.event_stream import MemoryEventStream
-from codepilot.tui_agent.layout import format_header, format_main_log, format_result_panel, format_timeline
-from codepilot.tui_agent.models import PermissionMode, PermissionResponse, ProjectContext
+from codepilot.tui_agent.layout import format_header, format_side_status, format_transcript_item, format_transcript_plain
+from codepilot.tui_agent.models import PermissionMode, PermissionResponse, ProjectContext, TUIEvent
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
@@ -22,12 +23,12 @@ def _load_textual():
     try:
         from textual.app import App, ComposeResult
         from textual.binding import Binding
-        from textual.containers import Horizontal, Vertical
+        from textual.containers import Horizontal, Vertical, VerticalScroll
         from textual.screen import ModalScreen
-        from textual.widgets import Footer, Header, Input, RichLog, Static
+        from textual.widgets import Footer, Header, Input, Static, TextArea
     except ImportError as exc:
         raise RuntimeError("Textual is not installed. Install textual or use codepilot agent-run.") from exc
-    return App, ComposeResult, Horizontal, Vertical, Footer, Header, Input, RichLog, Static, ModalScreen, Binding
+    return App, ComposeResult, Horizontal, Vertical, VerticalScroll, Footer, Header, Input, Static, TextArea, ModalScreen, Binding
 
 
 def create_tui_agent_app(
@@ -41,7 +42,7 @@ def create_tui_agent_app(
     fake_actions: str | Path | None = None,
     max_steps: int | None = None,
 ):
-    App, ComposeResult, Horizontal, Vertical, Footer, Header, Input, RichLog, Static, ModalScreen, Binding = _load_textual()
+    App, ComposeResult, Horizontal, Vertical, VerticalScroll, Footer, Header, Input, Static, TextArea, ModalScreen, Binding = _load_textual()
 
     project_context = resolve_project(project)
     merged = merge_config(
@@ -85,23 +86,35 @@ def create_tui_agent_app(
     )
     reducer = EventReducer()
 
-    class CopyingRichLog(RichLog):
+    class SelectableStatic(Static):
+        can_focus = True
+
         def selection_updated(self, selection) -> None:
             super().selection_updated(selection)
             if selection is None:
                 return
-            selected_text = self.screen.get_selected_text()
+            selected_text = self.screen.get_selected_text() if hasattr(self.screen, "get_selected_text") else ""
             if selected_text:
                 self.app.copy_to_clipboard(selected_text)
 
-    class CopyingStatic(Static):
-        def selection_updated(self, selection) -> None:
-            super().selection_updated(selection)
-            if selection is None:
-                return
-            selected_text = self.screen.get_selected_text()
-            if selected_text:
-                self.app.copy_to_clipboard(selected_text)
+    class TranscriptCopyScreen(ModalScreen[None]):
+        BINDINGS = [Binding("escape", "dismiss", "Close"), Binding("ctrl+a", "select_all", "Select all")]
+
+        def __init__(self, text: str) -> None:
+            super().__init__()
+            self.text = text
+
+        def compose(self) -> ComposeResult:
+            yield TextArea(self.text, read_only=True, id="copy-text")
+
+        def on_mount(self) -> None:
+            self.query_one("#copy-text", TextArea).focus()
+
+        def action_select_all(self) -> None:
+            self.query_one("#copy-text", TextArea).select_all()
+
+        def action_dismiss(self) -> None:
+            self.dismiss()
 
     class PermissionModal(ModalScreen[None]):
         BINDINGS = [Binding("y", "approve", "Approve once"), Binding("n", "deny", "Deny"), Binding("escape", "deny", "Deny")]
@@ -126,7 +139,7 @@ def create_tui_agent_app(
         def action_approve(self) -> None:
             request_id = self.request.get("request_id") or self.request.get("permission_request_id")
             if not request_id:
-                self.app.query_one("#main-log", Static).update("permission request missing request_id")
+                event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "permission request missing request_id"}))
                 self.dismiss()
                 return
             broker.resolve(
@@ -142,7 +155,7 @@ def create_tui_agent_app(
         def action_deny(self) -> None:
             request_id = self.request.get("request_id") or self.request.get("permission_request_id")
             if not request_id:
-                self.app.query_one("#main-log", Static).update("permission request missing request_id")
+                event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "permission request missing request_id"}))
                 self.dismiss()
                 return
             broker.resolve(
@@ -157,26 +170,48 @@ def create_tui_agent_app(
 
     class CodePilotTUIAgentApp(App):
         permission_mode = merged.permission_mode
-        BINDINGS = [Binding("q", "quit", "Quit"), Binding("r", "refresh", "Refresh")]
+        CSS = """
+        #body {
+            height: 1fr;
+        }
+        #transcript {
+            width: 1fr;
+            min-width: 0;
+        }
+        #side-status {
+            width: 40;
+            min-width: 40;
+        }
+        """
+        BINDINGS = [
+            Binding("q", "quit", "Quit"),
+            Binding("r", "refresh", "Refresh"),
+            Binding("ctrl+y", "copy_transcript", "Copy transcript"),
+            Binding("ctrl+o", "open_copy_screen", "Copy mode"),
+        ]
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             super().__init__(*args, **kwargs)
             self.session = session
             self.runner = runner
+            self._reducer = reducer
+            self._event_stream = event_stream
+            self._project_context = project_context
+            self._session_store = session_store
             self._shown_permission_request_ids: set[str] = set()
-            self._last_header_text: str | None = None
-            self._last_main_log_text: str | None = None
-            self._last_timeline_text: str | None = None
-            self._last_result_text: str | None = None
+            self._rendered_transcript_ids: set[str] = set()
+            self._auto_scroll = True
+            self._last_top_status_text: str | None = None
+            self._last_side_status_text: str | None = None
 
         def compose(self) -> ComposeResult:
             yield Header()
-            with Vertical():
-                yield CopyingStatic(id="header")
-                with Horizontal():
-                    yield CopyingStatic(id="main-log")
-                    yield CopyingStatic(id="timeline")
-                yield CopyingStatic(id="result")
+            with Vertical(id="root"):
+                yield SelectableStatic(id="top-status")
+                with Horizontal(id="body"):
+                    with VerticalScroll(id="transcript"):
+                        pass
+                    yield SelectableStatic(id="side-status")
                 yield Input(placeholder="输入任务或 /help", id="task-input")
             yield Footer()
 
@@ -184,35 +219,68 @@ def create_tui_agent_app(
             self.set_interval(0.2, self._drain_events)
             self._refresh()
 
+        def _top_status_text(self) -> str:
+            return format_header(self._project_context, self.session, self._reducer.view, self.permission_mode).replace("\n", " | ")
+
+        def _refresh_top_status(self) -> None:
+            text = self._top_status_text()
+            if text == self._last_top_status_text:
+                return
+            self.query_one("#top-status", SelectableStatic).update(text)
+            self._last_top_status_text = text
+
+        def _refresh_side_status(self) -> None:
+            text = format_side_status(self._project_context, self.session, self._reducer.view, self.permission_mode)
+            if text == self._last_side_status_text:
+                return
+            self.query_one("#side-status", SelectableStatic).update(text)
+            self._last_side_status_text = text
+
+        def _append_new_transcript_items(self) -> None:
+            panel = self.query_one("#transcript", VerticalScroll)
+            should_auto_scroll = self._auto_scroll and getattr(panel, "is_vertical_scroll_end", True)
+            for item in self._reducer.view.transcript:
+                if item.id in self._rendered_transcript_ids:
+                    continue
+                panel.mount(SelectableStatic(format_transcript_item(item), markup=False, id=f"msg-{item.id}"))
+                self._rendered_transcript_ids.add(item.id)
+            if should_auto_scroll and hasattr(panel, "scroll_end"):
+                panel.scroll_end(animate=False)
+
         def _refresh(self) -> None:
-            header_text = format_header(project_context, self.session, reducer.view, self.permission_mode)
-            main_log = self.query_one("#main-log", CopyingStatic)
-            timeline = self.query_one("#timeline", CopyingStatic)
-            result_text = format_result_panel(reducer.view)
-            main_log_text = format_main_log(reducer.view)
-            timeline_text = format_timeline(reducer.view)
-            if header_text != self._last_header_text:
-                header = self.query_one("#header", CopyingStatic)
-                if hasattr(header, "clear"):
-                    header.clear()
-                header.update(header_text)
-                self._last_header_text = header_text
-            if main_log_text != self._last_main_log_text:
-                if hasattr(main_log, "clear"):
-                    main_log.clear()
-                main_log.update(main_log_text)
-                self._last_main_log_text = main_log_text
-            if timeline_text != self._last_timeline_text:
-                if hasattr(timeline, "clear"):
-                    timeline.clear()
-                timeline.update(timeline_text)
-                self._last_timeline_text = timeline_text
-            if result_text != self._last_result_text:
-                result = self.query_one("#result", CopyingStatic)
-                if hasattr(result, "clear"):
-                    result.clear()
-                result.update(result_text)
-                self._last_result_text = result_text
+            self._append_new_transcript_items()
+            self._refresh_top_status()
+            self._refresh_side_status()
+
+        def _transcript_items_for_target(self, target: str | None) -> tuple:
+            items = self._reducer.view.transcript
+            if target == "last":
+                for item in reversed(items):
+                    if item.kind in {"assistant_raw", "assistant_plan", "assistant_action", "tool_result", "final_summary"}:
+                        return (item,)
+                return ()
+            if target == "errors":
+                return tuple(item for item in items if item.kind == "error" or (item.kind == "tool_result" and item.status == "failed"))
+            return items
+
+        def _transcript_copy_text(self, target: str | None = None) -> str:
+            items = self._transcript_items_for_target(target)
+            if not items:
+                if target == "errors":
+                    return "No error transcript items yet."
+                if target == "last":
+                    return "No assistant or tool output yet."
+                return "Transcript is empty."
+            return format_transcript_plain(items)
+
+        def _publish_command_output(self, command: str, output: str) -> None:
+            if output:
+                self._event_stream.publish(TUIEvent(type="command_output", timestamp=now_iso(), payload={"command": command, "output": output}))
+
+        def _export_transcript(self) -> Path:
+            transcript_path = self.session.session_dir / "transcript.md"
+            transcript_path.write_text(format_transcript_plain(self._reducer.view.transcript), encoding="utf-8")
+            return transcript_path
 
         def copy_to_clipboard(self, text: str) -> None:
             super().copy_to_clipboard(text)
@@ -220,12 +288,12 @@ def create_tui_agent_app(
                 subprocess.run(["pbcopy"], input=text, text=True, check=False)
 
         def _drain_events(self) -> None:
-            events = event_stream.drain()
+            events = self._event_stream.drain()
             for event in events:
-                reducer.reduce(event)
+                self._reducer.reduce(event)
             pending_permission_ids = {
                 request.request_id
-                for request in reducer.view.permission_requests
+                for request in self._reducer.view.permission_requests
                 if request.status == "pending"
             }
             for event in events:
@@ -243,6 +311,12 @@ def create_tui_agent_app(
                 self.push_screen(PermissionModal(event.payload))
             self._refresh()
 
+        def action_copy_transcript(self) -> None:
+            self.copy_to_clipboard(self._transcript_copy_text("all"))
+
+        def action_open_copy_screen(self) -> None:
+            self.push_screen(TranscriptCopyScreen(self._transcript_copy_text("all")))
+
         def on_input_submitted(self, event: Input.Submitted) -> None:
             text = event.value.strip()
             if not text:
@@ -250,32 +324,42 @@ def create_tui_agent_app(
             if text.startswith("/"):
                 result = handle_command(
                     text,
-                    view=reducer.view,
-                    project=project_context,
+                    view=self._reducer.view,
+                    project=self._project_context,
                     session=self.session,
                     permission_mode=self.permission_mode,
                 )
                 if result.permission_mode is not None:
                     self.permission_mode = result.permission_mode
                     runner.set_permission_mode(result.permission_mode)
-                    self.session = session_store.update_session(self.session, permission_mode=result.permission_mode)
+                    self.session = self._session_store.update_session(self.session, permission_mode=result.permission_mode)
                     runner.session = self.session
-                    self._refresh()
                 if result.cancel_requested:
                     runner.cancel_current()
                 if result.exit_requested:
                     self.exit()
-                self.query_one("#main-log", Static).update(result.output)
+                    return
+                if result.open_copy_mode:
+                    self.push_screen(TranscriptCopyScreen(self._transcript_copy_text(result.copy_target)))
+                if result.export_transcript_requested:
+                    transcript_path = self._export_transcript()
+                    result = replace(result, output=f"Transcript exported: {transcript_path}")
+                self._publish_command_output(text, result.output)
+                self._drain_events()
                 self.query_one("#task-input", Input).value = ""
                 return
             if runner.is_running():
-                self.query_one("#main-log", Static).update("已有任务正在运行")
+                self._event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "已有任务正在运行"}))
+                self._drain_events()
                 return
+            self._event_stream.publish(TUIEvent(type="user_message", timestamp=now_iso(), payload={"text": text}))
             try:
                 run_id = runner.start_task(text)
-                reducer.view = reducer.view.__class__(run_id=run_id, task=text, status="running")
+                self._reducer.view = replace(self._reducer.view, run_id=run_id, task=text, status="running")
                 self.query_one("#task-input", Input).value = ""
+                self._drain_events()
             except RuntimeError as exc:
-                self.query_one("#main-log", Static).update(str(exc))
+                self._event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": str(exc)}))
+                self._drain_events()
 
     return CodePilotTUIAgentApp()

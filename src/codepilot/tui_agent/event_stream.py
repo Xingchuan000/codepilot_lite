@@ -52,13 +52,14 @@ def _normalize_permission_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def trace_event_to_tui_event(trace_event: TraceEvent) -> TUIEvent:
     mapping = {
         "run_start": "run_started",
-        "llm_call": "trace_event",
+        "llm_call": "llm_call_finished",
         "agent_action": "agent_action",
+        "agent_observation": "agent_observation",
+        "agent_finish": "agent_finished",
         "policy_decision": "policy_decision",
         "permission_request": "permission_requested",
         "permission_response": "permission_resolved",
         "tool_call": "tool_finished",
-        "agent_finish": "trace_event",
         "run_end": "run_finished",
         "run_cancelled": "run_cancelled",
     }
