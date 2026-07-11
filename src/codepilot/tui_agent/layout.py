@@ -95,7 +95,7 @@ def format_side_status(project: ProjectContext, session: TUISession, view: Agent
             f"Tool: {view.active_tool or view.current_tool or 'none'}",
             f"Changed: {len(view.changed_files)}",
             f"Tests: {view.test_status or 'unknown'}",
-            "Commands: /help /status /permissions /diff /report /trace /copy /export-transcript /cancel /exit",
+            "Commands: /help /status /permissions /diff /report /trace /copy /move /export-transcript /cancel /exit",
         ]
     )
 

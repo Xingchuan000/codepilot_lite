@@ -277,6 +277,40 @@ def create_tui_agent_app(
             if output:
                 self._event_stream.publish(TUIEvent(type="command_output", timestamp=now_iso(), payload={"command": command, "output": output}))
 
+        def _switch_project(self, project_path: Path) -> None:
+            self._project_context = resolve_project(project_path)
+            self._session_store = SessionStore(self._project_context)
+            self.session = self._session_store.create_session(
+                model=self.session.model,
+                permission_mode=self.permission_mode,
+                metadata=self.session.metadata,
+            )
+            self.runner.project = self._project_context
+            self.runner.session_store = self._session_store
+            self.runner.session = self.session
+            self._reducer.view = replace(
+                self._reducer.view,
+                run_id=None,
+                task="",
+                status="idle",
+                current_step=None,
+                current_tool=None,
+                active_tool=None,
+                last_assistant_message=None,
+                last_tool_output=None,
+                transcript=(),
+                timeline=(),
+                changed_files=(),
+                test_status=None,
+                permission_requests=(),
+                report_path=None,
+                report_json_path=None,
+                trace_path=None,
+                warnings=(),
+            )
+            self._shown_permission_request_ids.clear()
+            self._rendered_transcript_ids.clear()
+
         def _export_transcript(self) -> Path:
             transcript_path = self.session.session_dir / "transcript.md"
             transcript_path.write_text(format_transcript_plain(self._reducer.view.transcript), encoding="utf-8")
@@ -344,6 +378,8 @@ def create_tui_agent_app(
                 if result.export_transcript_requested:
                     transcript_path = self._export_transcript()
                     result = replace(result, output=f"Transcript exported: {transcript_path}")
+                if result.project_path is not None:
+                    self._switch_project(result.project_path)
                 self._publish_command_output(text, result.output)
                 self._drain_events()
                 self.query_one("#task-input", Input).value = ""

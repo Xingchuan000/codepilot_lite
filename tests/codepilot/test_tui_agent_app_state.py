@@ -125,6 +125,22 @@ def test_app_permissions_updates_runner_and_session(tmp_path: Path, monkeypatch)
     assert app.runner.session.permission_mode == "read_only"
 
 
+def test_app_move_updates_project_context_and_runner(tmp_path: Path, monkeypatch) -> None:
+    _install_fake_textual(monkeypatch)
+    other = tmp_path / "other"
+    other.mkdir()
+    app = create_tui_agent_app(project=tmp_path)
+    widgets = _widgets()
+    app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+
+    app.on_input_submitted(SimpleNamespace(value="/move other"))
+
+    assert app._project_context.resolved_project == other.resolve()
+    assert app.runner.project.resolved_project == other.resolve()
+    assert app.session.project_path == other.resolve()
+    assert other.resolve().name in widgets["#top-status"].text
+
+
 def test_app_copy_to_clipboard_writes_system_clipboard(tmp_path: Path, monkeypatch) -> None:
     _install_fake_textual(monkeypatch)
     app = create_tui_agent_app(project=tmp_path)

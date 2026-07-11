@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 from codepilot.tui_agent.diff_view import format_diff_summary
 from codepilot.tui_agent.layout import format_side_status
@@ -18,6 +19,7 @@ class CommandResult:
     open_copy_mode: bool = False
     copy_target: str | None = None
     export_transcript_requested: bool = False
+    project_path: Path | None = None
 
 
 def parse_slash_command(text: str) -> tuple[str, list[str]]:
@@ -78,6 +80,19 @@ def handle_command(
         if target not in {"all", "last", "errors"}:
             return CommandResult(handled=True, output=f"Unknown copy target: {target}")
         return CommandResult(handled=True, output=f"Copy mode opened: {target}", open_copy_mode=True, copy_target=target)
+    if command == "move":
+        if not args:
+            return CommandResult(handled=True, output="Usage: /move <path>")
+        path = Path(" ".join(args)).expanduser()
+        if not path.is_absolute():
+            path = (project.resolved_project / path).resolve()
+        else:
+            path = path.resolve()
+        if not path.exists():
+            return CommandResult(handled=True, output=f"Project directory does not exist: {path}")
+        if not path.is_dir():
+            return CommandResult(handled=True, output=f"Project path is not a directory: {path}")
+        return CommandResult(handled=True, output=f"Project directory switched to {path}", project_path=path)
     if command == "export-transcript":
         return CommandResult(handled=True, output="Transcript export requested", export_transcript_requested=True)
     if command == "new":

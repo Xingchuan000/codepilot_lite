@@ -414,6 +414,38 @@ def test_human_mode_basic_functionality(model_factory):
         assert agent.n_calls == 0  # LM should not be called
 
 
+def test_human_mode_move_project_dir(tmp_path, model_factory):
+    """Test that /move switches the working directory for later commands."""
+    factory, config = model_factory
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with mock_prompts(
+        [
+            "/move",
+            str(project_dir),
+            "pwd",
+            "echo 'COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT'\necho 'done'",
+            "",
+        ]
+    ):
+        agent = InteractiveAgent(
+            model=factory([]),
+            env=LocalEnvironment(),
+            **{
+                **config,
+                "mode": "human",
+            },
+        )
+
+        info = agent.run("Test move project dir")
+
+    assert info["exit_status"] == "Submitted"
+    assert info["submission"] == "done\n"
+    assert agent.project_dir == project_dir.resolve()
+    assert any(str(project_dir) in get_text(msg) for msg in agent.messages)
+    assert agent.n_calls == 0
+
+
 def test_human_mode_switch_to_yolo(model_factory):
     """Test switching from human mode to yolo mode."""
     factory, config = model_factory

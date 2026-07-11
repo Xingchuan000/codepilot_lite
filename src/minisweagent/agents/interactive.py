@@ -8,6 +8,7 @@ There are three modes:
 
 import re
 import sys
+from pathlib import Path
 from typing import Literal, NoReturn
 
 from rich.console import Console
@@ -35,6 +36,8 @@ class InteractiveAgent(DefaultAgent):
 
     def __init__(self, *args, config_class=InteractiveAgentConfig, **kwargs):
         super().__init__(*args, config_class=config_class, **kwargs)
+        self.project_dir = Path(getattr(self.env.config, "cwd", "") or Path.cwd()).expanduser().resolve()
+        self.extra_template_vars |= {"cwd": str(self.project_dir), "project_dir": str(self.project_dir)}
         self.cost_last_confirmed = 0.0
 
     def _interrupt(self, content: str, *, itype: str = "UserInterruption") -> NoReturn:
@@ -129,7 +132,7 @@ class InteractiveAgent(DefaultAgent):
         try:
             self._ask_confirmation_or_interrupt(commands)
             for action in actions:
-                outputs.append(self.env.execute(action))
+                outputs.append(self.env.execute(action, cwd=str(self.project_dir)))
         except Submitted as e:
             self._check_for_new_task_or_submit(e)
         finally:
@@ -162,6 +165,22 @@ class InteractiveAgent(DefaultAgent):
     def _should_ask_confirmation(self, action: str) -> bool:
         return self.config.mode == "confirm" and not any(re.match(r, action) for r in self.config.whitelist_actions)
 
+    def _move_project_dir(self, value: str) -> bool:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = self.project_dir / path
+        path = path.resolve()
+        if not path.exists():
+            console.print(f"[bold red]Project directory does not exist:[/bold red] {path}")
+            return False
+        if not path.is_dir():
+            console.print(f"[bold red]Project directory is not a directory:[/bold red] {path}")
+            return False
+        self.project_dir = path
+        self.extra_template_vars |= {"cwd": str(path), "project_dir": str(path)}
+        console.print(f"Switched project directory to [bold green]{path}[/bold green].")
+        return True
+
     def _ask_confirmation_or_interrupt(self, commands: list[str]) -> None:
         if not any(self._should_ask_confirmation(c) for c in commands):
             return
@@ -189,12 +208,21 @@ class InteractiveAgent(DefaultAgent):
         user_input = prompt_session.prompt("")
         if user_input == "/m":
             return self._prompt_and_handle_slash_commands(prompt, _multiline=True)
+        if user_input.startswith("/move") and (len(user_input) == 5 or user_input[5].isspace()):
+            target = user_input[5:].strip() or prompt_session.prompt(
+                f"[bold yellow]Move to directory[/bold yellow] [bold green]({self.project_dir})[/bold green]: "
+            )
+            if target:
+                self._move_project_dir(target)
+            return self._prompt_and_handle_slash_commands(prompt)
         if user_input == "/h":
             console.print(
                 f"Current mode: [bold green]{self.config.mode}[/bold green]\n"
+                f"Current project directory: [bold green]{self.project_dir}[/bold green]\n"
                 f"[bold green]/y[/bold green] to switch to [bold yellow]yolo[/bold yellow] mode (execute LM commands without confirmation)\n"
                 f"[bold green]/c[/bold green] to switch to [bold yellow]confirmation[/bold yellow] mode (ask for confirmation before executing LM commands)\n"
                 f"[bold green]/u[/bold green] to switch to [bold yellow]human[/bold yellow] mode (execute commands issued by the user)\n"
+                f"[bold green]/move <path>[/bold green] to switch project directory\n"
                 f"[bold green]/m[/bold green] to enter multiline comment",
             )
             return self._prompt_and_handle_slash_commands(prompt)

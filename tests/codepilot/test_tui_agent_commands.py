@@ -88,6 +88,23 @@ def test_export_transcript_command_requests_export(tmp_path: Path) -> None:
     assert result.export_transcript_requested is True
 
 
+def test_move_command_switches_project_directory(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    moved = tmp_path / "moved"
+    moved.mkdir()
+
+    result = handle_command(
+        "/move moved",
+        view=AgentRunView(),
+        project=project,
+        session=_session(tmp_path),
+        permission_mode="manual",
+    )
+
+    assert result.project_path == moved.resolve()
+    assert "switched" in result.output.lower()
+
+
 def test_exit_command_requests_exit(tmp_path: Path) -> None:
     result = handle_command(
         "/exit",
