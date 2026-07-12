@@ -197,6 +197,10 @@ def _policy_decision_value(event: dict[str, Any]) -> str | None:
     return _as_str(_get(event, "policy_decision")) or _as_str(_get_metadata(event).get("policy_decision"))
 
 
+def _delivery_kind_value(event: dict[str, Any]) -> str | None:
+    return _as_str(_get_metadata(event).get("delivery_kind"))
+
+
 def _policy_approved_value(event: dict[str, Any]) -> bool | None:
     value = _get_nested(event, "metadata.approved")
     if isinstance(value, bool):
@@ -304,6 +308,10 @@ def build_run_report(
             report.repo = report.repo or _as_str(metadata.get("repo"))
             report.max_steps = report.max_steps or _as_int(metadata.get("max_steps"))
             report.policy_mode = report.policy_mode or _as_str(metadata.get("policy_mode"))
+            report.task_intent = report.task_intent or _as_str(metadata.get("task_intent"))
+            if report.requires_evidence is None:
+                report.requires_evidence = _as_bool(metadata.get("requires_evidence"))
+            _ordered_extend(report.evidence_reasons, _as_str_list(metadata.get("initial_evidence_reasons")))
             continue
 
         if event_type == "llm_call":
@@ -313,14 +321,12 @@ def build_run_report(
             continue
 
         if event_type == "agent_action":
-            if _as_bool(event.get("success")) is False:
+            if _as_bool(metadata.get("finish_blocked_by_evidence")) is True:
+                _append_warning(report.warnings, f"Step {step}: finish success blocked by evidence gate.")
+            elif _as_bool(event.get("success")) is False or _as_bool(metadata.get("parse_success")) is False:
                 _append_warning(report.warnings, f"Step {step}: agent_action parse/validation failed: {_as_str(event.get('error')) or 'unknown error'}")
-            if _as_bool(metadata.get("parse_success")) is False:
-                _append_warning(report.warnings, f"Step {step}: agent_action parse/validation failed: {_as_str(event.get('error')) or 'parse failed'}")
-            if event.get("error"):
+            if event.get("error") and _as_bool(metadata.get("finish_blocked_by_evidence")) is not True:
                 _append_warning(report.warnings, f"Step {step}: agent_action parse/validation failed: {_as_str(event.get('error'))}")
-            if _as_bool(metadata.get("finish_blocked_without_passed_tests")) is True:
-                _append_warning(report.warnings, "Step {step}: finish success blocked because no passed run_tests result was found.".format(step=step))
             continue
 
         if event_type == "policy_decision":
@@ -448,6 +454,25 @@ def build_run_report(
             report.success = _as_bool(event.get("success")) if report.success is None else report.success
             report.final_summary = report.final_summary or _as_str(_get(event, "output_summary"))
             _update_changed_files(report, _as_str_list(metadata.get("changed_files")))
+            report.completion_kind = report.completion_kind or _as_str(metadata.get("completion_kind"))
+            report.assistant_stop_reason = report.assistant_stop_reason or _as_str(metadata.get("assistant_stop_reason"))
+            report.delivery_kind = report.delivery_kind or _delivery_kind_value(event)
+            report.task_intent = report.task_intent or _as_str(metadata.get("task_intent"))
+            if report.requires_evidence is None:
+                report.requires_evidence = _as_bool(metadata.get("requires_evidence"))
+            _ordered_extend(report.evidence_reasons, _as_str_list(metadata.get("evidence_reasons")))
+            if report.write_attempted is None:
+                report.write_attempted = _as_bool(metadata.get("write_attempted"))
+            if report.write_executed is None:
+                report.write_executed = _as_bool(metadata.get("write_executed"))
+            _ordered_extend(report.written_files, _as_str_list(metadata.get("written_files")))
+            _ordered_extend(report.observed_changed_files, _as_str_list(metadata.get("observed_changed_files")))
+            _ordered_extend(report.claimed_changed_files, _as_str_list(metadata.get("claimed_changed_files")))
+            if report.tests_required is None:
+                report.tests_required = _as_bool(metadata.get("tests_required"))
+            if report.diff_required is None:
+                report.diff_required = _as_bool(metadata.get("diff_required"))
+            _ordered_extend(report.missing_evidence, _as_str_list(metadata.get("missing_evidence")))
             if report.tests.summary is None:
                 report.tests.summary = _as_str(metadata.get("tests")) or report.tests.summary
             continue
@@ -469,6 +494,17 @@ def build_run_report(
                 report.success = _as_bool(event.get("success"))
             if report.final_summary is None:
                 report.final_summary = _as_str(_get(event, "output_summary"))
+            report.completion_kind = report.completion_kind or _as_str(metadata.get("completion_kind"))
+            report.assistant_stop_reason = report.assistant_stop_reason or _as_str(metadata.get("assistant_stop_reason"))
+            report.delivery_kind = report.delivery_kind or _delivery_kind_value(event)
+            report.task_intent = report.task_intent or _as_str(metadata.get("task_intent"))
+            if report.requires_evidence is None:
+                report.requires_evidence = _as_bool(metadata.get("requires_evidence"))
+            _ordered_extend(report.missing_evidence, _as_str_list(metadata.get("missing_evidence")))
+            if report.tests_required is None:
+                report.tests_required = _as_bool(metadata.get("tests_required"))
+            if report.diff_required is None:
+                report.diff_required = _as_bool(metadata.get("diff_required"))
             continue
 
     for pending in pending_policies:
@@ -484,9 +520,9 @@ def build_run_report(
         _append_warning(report.warnings, "Missing agent_finish event.")
     if report.status == "max_steps_exceeded":
         _append_warning(report.warnings, "Run ended because max_steps was exceeded.")
-    if report.status == "success" and report.tests.status != "passed":
+    if report.tests_required is True and report.tests.status != "passed":
         _append_warning(report.warnings, "Final status is success but no passed run_tests result was found.")
-    if not report.diff.checked:
+    if report.diff_required is True and not report.diff.checked:
         _append_warning(report.warnings, "git_diff was not checked before report generation.")
 
     return report

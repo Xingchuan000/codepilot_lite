@@ -46,7 +46,16 @@ def handle_command(
         return CommandResult(handled=True, output=format_side_status(project, session, view, permission_mode))
     if command == "permissions":
         if not args:
-            return CommandResult(handled=True, output=f"Permission mode: {permission_mode}")
+            return CommandResult(
+                handled=True,
+                output="\n".join(
+                    [
+                        f"Permission mode: {permission_mode}",
+                        "manual 表示写操作和有风险的 shell/MCP 动作仍然需要确认。",
+                        "只读读取工具可以自动执行，不需要每次都弹确认。",
+                    ]
+                ),
+            )
         mode = args[0]
         if mode in {"manual", "read_only", "accept_edits", "unsafe_auto"}:
             return CommandResult(handled=True, output=f"Permission mode set to {mode}", permission_mode=mode)

@@ -13,8 +13,11 @@ VALID_RUN_STATUSES = {
     "idle",
     "running",
     "waiting_permission",
+    "message_complete",
     "success",
+    "partial",
     "failed",
+    "task_incomplete",
     "cancelled",
     "interrupted",
     "max_steps_exceeded",
@@ -31,6 +34,15 @@ def _metadata(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _payload_value(payload: dict[str, Any], key: str, fallback: Any) -> Any:
     return payload[key] if key in payload else fallback
+
+
+def _event_value(payload: dict[str, Any], key: str, fallback: Any) -> Any:
+    if key in payload:
+        return payload[key]
+    metadata = _metadata(payload)
+    if key in metadata:
+        return metadata[key]
+    return fallback
 
 
 def _truncate_text(text: str, limit: int = 1200) -> str:
@@ -121,15 +133,51 @@ def _append_transcript(view: AgentRunView, item: TranscriptItem) -> AgentRunView
     return replace(view, transcript=view.transcript + (item,))
 
 
+def _has_transcript_body(view: AgentRunView, kind: str, body: str) -> bool:
+    return any(item.kind == kind and item.body == body for item in view.transcript)
+
+
+def _canonical_action_input(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """提取工具动作里真正应该展示的 arguments，而不是整块 action 对象。"""
+
+    action_input = payload.get("input")
+    if not isinstance(action_input, dict):
+        return None
+    arguments = action_input.get("arguments")
+    if isinstance(arguments, dict):
+        return _safe_dict_preview(arguments)
+    if {"type", "tool_name", "arguments", "short_rationale"} & action_input.keys():
+        return None
+    return _safe_dict_preview(action_input)
+
+
+def _canonical_tool_name(payload: dict[str, Any]) -> str | None:
+    """从真实 trace 结构和旧版简化结构里都拿到一致的工具名。"""
+
+    tool_name = payload.get("tool_name")
+    if isinstance(tool_name, str) and tool_name.strip():
+        return tool_name.strip()
+    action_input = payload.get("input")
+    if isinstance(action_input, dict):
+        nested = action_input.get("tool_name")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+    return None
+
+
 def _tool_input_preview(payload: dict[str, Any]) -> dict[str, Any] | None:
-    metadata = _metadata(payload)
-    preview = _safe_dict_preview(payload.get("input"))
+    preview = _canonical_action_input(payload)
     if preview is not None:
         return preview
+    metadata = _metadata(payload)
     if isinstance(metadata.get("normalized_action_preview"), dict):
-        return _safe_dict_preview(metadata.get("normalized_action_preview"))
+        normalized_preview = _safe_dict_preview(metadata.get("normalized_action_preview"))
+        if isinstance(normalized_preview, dict):
+            return _canonical_action_input({"input": normalized_preview}) or normalized_preview
     if isinstance(metadata.get("raw_action_preview"), dict):
-        return _safe_dict_preview(metadata.get("raw_action_preview"))
+        raw_preview = _safe_dict_preview(metadata.get("raw_action_preview"))
+        if isinstance(raw_preview, dict):
+            return _canonical_action_input({"input": raw_preview}) or raw_preview
     return None
 
 
@@ -169,6 +217,17 @@ def _finish_status_text(payload: dict[str, Any]) -> str:
     return str(status)
 
 
+def _is_tool_call_action(payload: dict[str, Any]) -> bool:
+    metadata = _metadata(payload)
+    if metadata.get("action_type") != "tool_call":
+        return False
+    if metadata.get("parse_success") is False:
+        return False
+    if metadata.get("finish_blocked_by_evidence") is True:
+        return False
+    return _canonical_tool_name(payload) is not None
+
+
 def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
     payload = event.payload
     metadata = _metadata(payload)
@@ -196,29 +255,10 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         text = _llm_output_text(payload)
         parsed = _parse_json_output(text)
         if parsed is None:
-            item = TranscriptItem(
-                id=_make_item_id(event, "assistant_raw"),
-                kind="assistant_raw",
-                timestamp=event.timestamp,
-                run_id=event.run_id or view.run_id,
-                title="Assistant",
-                body=_truncate_text(text),
-                copy_text=f"Assistant: {text}",
-            )
-            return _append_transcript(replace(view, last_assistant_message=text or view.last_assistant_message), item)
+            # 这里只保留模型原始预览，真正的自然回复正文要等 agent_finished 再落到 transcript。
+            return replace(view, last_assistant_message=text or view.last_assistant_message)
         if parsed.get("type") == "finish" or "summary" in parsed:
-            summary = str(parsed.get("summary") or parsed.get("short_rationale") or text)
-            item = TranscriptItem(
-                id=_make_item_id(event, "final_summary"),
-                kind="final_summary",
-                timestamp=event.timestamp,
-                run_id=event.run_id or view.run_id,
-                title="Final",
-                body=_truncate_text(summary),
-                copy_text=f"Final: {summary}",
-                status=str(parsed.get("status")) if isinstance(parsed.get("status"), str) else None,
-            )
-            return _append_transcript(replace(view, last_assistant_message=summary), item)
+            return replace(view, last_assistant_message=text or view.last_assistant_message)
         if isinstance(parsed.get("short_rationale"), str) and parsed["short_rationale"].strip():
             item = TranscriptItem(
                 id=_make_item_id(event, "assistant_plan"),
@@ -230,24 +270,7 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
                 copy_text=f"+ Plan: {parsed['short_rationale']}",
             )
             view = _append_transcript(replace(view, last_assistant_message=parsed["short_rationale"]), item)
-        tool_name = parsed.get("tool_name")
-        arguments = parsed.get("arguments")
-        if isinstance(tool_name, str) and isinstance(arguments, dict):
-            preview = _safe_dict_preview(arguments)
-            signature = json.dumps({"tool_name": tool_name, "arguments": preview or {}}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            item = TranscriptItem(
-                id=_make_action_item_id(event, signature),
-                kind="assistant_action",
-                timestamp=event.timestamp,
-                run_id=event.run_id or view.run_id,
-                title="→",
-                body=_truncate_text(f"{tool_name} {json.dumps(preview or {}, ensure_ascii=False, sort_keys=True)}"),
-                tool_name=tool_name,
-                input_preview=preview,
-                copy_text=f"→ {tool_name} {json.dumps(preview or {}, ensure_ascii=False, sort_keys=True)}",
-            )
-            view = _append_transcript(view, item)
-        return view
+        return replace(view, last_assistant_message=text or view.last_assistant_message)
     if event.type == "agent_observation":
         item = TranscriptItem(
             id=_make_item_id(event, "observation"),
@@ -260,9 +283,11 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         )
         return _append_transcript(view, item)
     if event.type == "agent_action":
+        if not _is_tool_call_action(payload):
+            return view
         item = trace_payload_to_timeline_item(payload)
         preview = _tool_input_preview(payload)
-        tool_name = item.tool_name or ""
+        tool_name = _canonical_tool_name(payload) or item.tool_name or ""
         signature = json.dumps({"tool_name": tool_name, "arguments": preview or {}}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         transcript_item = TranscriptItem(
             id=_make_action_item_id(event, signature),
@@ -272,7 +297,7 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
             step=item.step,
             title="→",
             body=_truncate_text(f"{tool_name} {json.dumps(preview or {}, ensure_ascii=False, sort_keys=True)}"),
-            tool_name=item.tool_name,
+            tool_name=tool_name,
             input_preview=preview,
             copy_text=f"→ {tool_name} {json.dumps(preview or {}, ensure_ascii=False, sort_keys=True)}",
         )
@@ -409,22 +434,98 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
             transcript_item,
         )
     if event.type == "agent_finished":
+        status_text = _finish_status_text(payload)
         summary = str(payload.get("output_summary") or metadata.get("summary") or payload.get("summary") or "")
+        updated_view = replace(
+            view,
+            status=status_text,
+            last_assistant_message=summary or view.last_assistant_message,
+            completion_kind=_event_value(payload, "completion_kind", view.completion_kind) if isinstance(_event_value(payload, "completion_kind", view.completion_kind), str) else view.completion_kind,
+            assistant_stop_reason=_event_value(payload, "assistant_stop_reason", view.assistant_stop_reason)
+            if isinstance(_event_value(payload, "assistant_stop_reason", view.assistant_stop_reason), str)
+            else view.assistant_stop_reason,
+            delivery_kind=_event_value(payload, "delivery_kind", view.delivery_kind) if isinstance(_event_value(payload, "delivery_kind", view.delivery_kind), str) else view.delivery_kind,
+            requires_evidence=_event_value(payload, "requires_evidence", view.requires_evidence) if isinstance(_event_value(payload, "requires_evidence", view.requires_evidence), bool) else view.requires_evidence,
+            evidence_reasons=tuple(item for item in _event_value(payload, "evidence_reasons", view.evidence_reasons) if isinstance(item, str))
+            if isinstance(_event_value(payload, "evidence_reasons", view.evidence_reasons), list)
+            else view.evidence_reasons,
+            write_attempted=_event_value(payload, "write_attempted", view.write_attempted) if isinstance(_event_value(payload, "write_attempted", view.write_attempted), bool) else view.write_attempted,
+            write_executed=_event_value(payload, "write_executed", view.write_executed) if isinstance(_event_value(payload, "write_executed", view.write_executed), bool) else view.write_executed,
+            written_files=tuple(item for item in _event_value(payload, "written_files", view.written_files) if isinstance(item, str))
+            if isinstance(_event_value(payload, "written_files", view.written_files), list)
+            else view.written_files,
+            observed_changed_files=tuple(item for item in _event_value(payload, "observed_changed_files", view.observed_changed_files) if isinstance(item, str))
+            if isinstance(_event_value(payload, "observed_changed_files", view.observed_changed_files), list)
+            else view.observed_changed_files,
+            claimed_changed_files=tuple(item for item in _event_value(payload, "claimed_changed_files", view.claimed_changed_files) if isinstance(item, str))
+            if isinstance(_event_value(payload, "claimed_changed_files", view.claimed_changed_files), list)
+            else view.claimed_changed_files,
+            tests_required=_event_value(payload, "tests_required", view.tests_required) if isinstance(_event_value(payload, "tests_required", view.tests_required), bool) else view.tests_required,
+            diff_required=_event_value(payload, "diff_required", view.diff_required) if isinstance(_event_value(payload, "diff_required", view.diff_required), bool) else view.diff_required,
+            diff_checked=_event_value(payload, "diff_checked", view.diff_checked) if isinstance(_event_value(payload, "diff_checked", view.diff_checked), bool) else view.diff_checked,
+            missing_evidence=tuple(item for item in _event_value(payload, "missing_evidence", view.missing_evidence) if isinstance(item, str))
+            if isinstance(_event_value(payload, "missing_evidence", view.missing_evidence), list)
+            else view.missing_evidence,
+        )
+        if status_text == "message_complete":
+            # message_complete 只应该生成一次完整的 Assistant 正文，避免把预览和最终正文重复展示。
+            if not summary:
+                return updated_view
+            if _has_transcript_body(updated_view, "assistant_raw", summary):
+                return replace(updated_view, last_assistant_message=summary)
+            return _append_transcript(
+                replace(updated_view, last_assistant_message=summary),
+                TranscriptItem(
+                    id=_make_item_id(event, "assistant_raw"),
+                    kind="assistant_raw",
+                    timestamp=event.timestamp,
+                    run_id=event.run_id or view.run_id,
+                    title="Assistant",
+                    body=summary,
+                    copy_text=f"Assistant: {summary}",
+                ),
+            )
+        if status_text == "task_incomplete":
+            status_body = "\n".join(
+                filter(
+                    None,
+                    [
+                        "Task incomplete.",
+                        f"Missing evidence: {', '.join(updated_view.missing_evidence) if updated_view.missing_evidence else 'unknown'}",
+                    ],
+                )
+            )
+            if _has_transcript_body(view, "system_status", status_body):
+                return updated_view
+            item = TranscriptItem(
+                id=_make_item_id(event, "final_summary"),
+                kind="system_status",
+                timestamp=event.timestamp,
+                run_id=event.run_id or view.run_id,
+                title="Task incomplete",
+                body=_truncate_text(status_body),
+                copy_text=status_body,
+            )
+            return _append_transcript(updated_view, item)
         item = TranscriptItem(
             id=_make_item_id(event, "final_summary"),
             kind="final_summary",
             timestamp=event.timestamp,
             run_id=event.run_id or view.run_id,
             title="Final",
-            body=_truncate_text(summary),
+            body=summary,
             copy_text=f"Final: {summary}",
-            status=_finish_status_text(payload),
+            status=status_text,
         )
-        return _append_transcript(replace(view, status=_finish_status_text(payload), last_assistant_message=summary), item)
+        return _append_transcript(updated_view, item)
     if event.type == "run_finished":
         status_text = _finish_status_text(payload)
         if status_text not in VALID_RUN_STATUSES:
             status_text = "failed" if payload.get("success") is False else "unknown"
+        metadata_written_files = metadata.get("written_files")
+        metadata_observed_changed_files = metadata.get("observed_changed_files")
+        metadata_claimed_changed_files = metadata.get("claimed_changed_files")
+        metadata_missing_evidence = metadata.get("missing_evidence")
         updated_view = replace(
             view,
             status=status_text,
@@ -433,7 +534,36 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
             report_json_path=_payload_value(payload, "report_json_path", view.report_json_path),
             changed_files=tuple(_payload_value(payload, "changed_files", view.changed_files) or ()),
             test_status=_payload_value(payload, "test_status", view.test_status),
+            completion_kind=_event_value(payload, "completion_kind", view.completion_kind) if isinstance(_event_value(payload, "completion_kind", view.completion_kind), str) else view.completion_kind,
+            assistant_stop_reason=_event_value(payload, "assistant_stop_reason", view.assistant_stop_reason)
+            if isinstance(_event_value(payload, "assistant_stop_reason", view.assistant_stop_reason), str)
+            else view.assistant_stop_reason,
+            delivery_kind=_event_value(payload, "delivery_kind", view.delivery_kind) if isinstance(_event_value(payload, "delivery_kind", view.delivery_kind), str) else view.delivery_kind,
+            requires_evidence=_event_value(payload, "requires_evidence", view.requires_evidence) if isinstance(_event_value(payload, "requires_evidence", view.requires_evidence), bool) else view.requires_evidence,
+            evidence_reasons=tuple(item for item in _event_value(payload, "evidence_reasons", view.evidence_reasons) if isinstance(item, str))
+            if isinstance(_event_value(payload, "evidence_reasons", view.evidence_reasons), list)
+            else view.evidence_reasons,
+            write_attempted=_event_value(payload, "write_attempted", view.write_attempted) if isinstance(_event_value(payload, "write_attempted", view.write_attempted), bool) else view.write_attempted,
+            write_executed=_event_value(payload, "write_executed", view.write_executed) if isinstance(_event_value(payload, "write_executed", view.write_executed), bool) else view.write_executed,
+            written_files=tuple(item for item in _event_value(payload, "written_files", view.written_files) if isinstance(item, str))
+            if isinstance(_event_value(payload, "written_files", view.written_files), list)
+            else view.written_files,
+            observed_changed_files=tuple(item for item in _event_value(payload, "observed_changed_files", view.observed_changed_files) if isinstance(item, str))
+            if isinstance(_event_value(payload, "observed_changed_files", view.observed_changed_files), list)
+            else view.observed_changed_files,
+            claimed_changed_files=tuple(item for item in _event_value(payload, "claimed_changed_files", view.claimed_changed_files) if isinstance(item, str))
+            if isinstance(_event_value(payload, "claimed_changed_files", view.claimed_changed_files), list)
+            else view.claimed_changed_files,
+            tests_required=_event_value(payload, "tests_required", view.tests_required) if isinstance(_event_value(payload, "tests_required", view.tests_required), bool) else view.tests_required,
+            diff_required=_event_value(payload, "diff_required", view.diff_required) if isinstance(_event_value(payload, "diff_required", view.diff_required), bool) else view.diff_required,
+            diff_checked=_event_value(payload, "diff_checked", view.diff_checked) if isinstance(_event_value(payload, "diff_checked", view.diff_checked), bool) else view.diff_checked,
+            missing_evidence=tuple(item for item in _event_value(payload, "missing_evidence", view.missing_evidence) if isinstance(item, str))
+            if isinstance(_event_value(payload, "missing_evidence", view.missing_evidence), list)
+            else view.missing_evidence,
         )
+        status_body = f"Run finished: {status_text}"
+        if _has_transcript_body(view, "system_status", status_body):
+            return updated_view
         if any(item.kind == "final_summary" for item in view.transcript):
             return updated_view
         return _append_transcript(
@@ -444,8 +574,8 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
                 timestamp=event.timestamp,
                 run_id=event.run_id or view.run_id,
                 title="Run finished",
-                body=_truncate_text(f"Run finished: {status_text}"),
-                copy_text=f"Run finished: {status_text}",
+                body=_truncate_text(status_body),
+                copy_text=status_body,
             ),
         )
     if event.type == "run_cancelled":

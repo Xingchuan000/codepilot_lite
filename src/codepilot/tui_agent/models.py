@@ -10,8 +10,11 @@ RunStatus = Literal[
     "idle",
     "running",
     "waiting_permission",
+    "message_complete",
     "success",
+    "partial",
     "failed",
+    "task_incomplete",
     "cancelled",
     "interrupted",
     "max_steps_exceeded",
@@ -87,7 +90,19 @@ class TUISessionRunRef:
     report_json_path: str | None = None
     started_at: str | None = None
     ended_at: str | None = None
+    completion_kind: str | None = None
+    assistant_stop_reason: str | None = None
+    delivery_kind: str | None = None
+    requires_evidence: bool | None = None
+    evidence_reasons: tuple[str, ...] = ()
+    write_attempted: bool | None = None
+    write_executed: bool | None = None
+    written_files: tuple[str, ...] = ()
     changed_files: tuple[str, ...] = ()
+    tests_required: bool | None = None
+    diff_required: bool | None = None
+    diff_checked: bool | None = None
+    missing_evidence: tuple[str, ...] = ()
     tests: str | None = None
 
 
@@ -183,10 +198,24 @@ class AgentRunView:
     active_tool: str | None = None
     last_assistant_message: str | None = None
     last_tool_output: str | None = None
+    completion_kind: str | None = None
+    assistant_stop_reason: str | None = None
+    delivery_kind: str | None = None
+    requires_evidence: bool | None = None
+    evidence_reasons: tuple[str, ...] = ()
+    write_attempted: bool | None = None
+    write_executed: bool | None = None
+    written_files: tuple[str, ...] = ()
+    observed_changed_files: tuple[str, ...] = ()
+    claimed_changed_files: tuple[str, ...] = ()
     transcript: tuple[TranscriptItem, ...] = ()
     timeline: tuple[TimelineItem, ...] = ()
     changed_files: tuple[str, ...] = ()
     test_status: str | None = None
+    tests_required: bool | None = None
+    diff_required: bool | None = None
+    diff_checked: bool | None = None
+    missing_evidence: tuple[str, ...] = ()
     permission_requests: tuple[PermissionRequest, ...] = ()
     report_path: str | None = None
     report_json_path: str | None = None

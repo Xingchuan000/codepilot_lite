@@ -189,6 +189,7 @@ class TraceLogger:
         *,
         status: str,
         summary: str,
+        success: bool | None = None,
         metadata: dict | None = None,
     ) -> TraceEvent:
         """记录 agent 主动结束运行。"""
@@ -197,7 +198,7 @@ class TraceLogger:
             run_id=self.run_id,
             step=self.next_step,
             event_type="agent_finish",
-            success=status == "success",
+            success=success if success is not None else status == "success",
             output_summary=summary,
             metadata={"status": status, **(metadata or {})},
         )

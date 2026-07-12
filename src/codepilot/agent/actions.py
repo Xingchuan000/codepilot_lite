@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -38,12 +39,14 @@ class AgentActionParseError(ValueError):
         self,
         message: str,
         *,
+        code: str,
         raw_text: str | None = None,
         raw_action: dict[str, Any] | None = None,
         normalized_action: dict[str, Any] | None = None,
         normalization_metadata: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
+        self.code = code
         self.raw_text = raw_text
         self.raw_action = raw_action
         self.normalized_action = normalized_action
@@ -77,6 +80,7 @@ class AgentFinishAction(BaseModel):
     type: Literal["finish"]
     status: Literal["success", "failed", "partial"]
     summary: str
+    delivery_kind: Literal["message", "analysis", "code_change"] | None = None
     tests: str | None = None
     changed_files: list[str] = Field(default_factory=list)
 
@@ -90,6 +94,15 @@ class AgentFinishAction(BaseModel):
 
 
 AgentAction = AgentToolCallAction | AgentFinishAction
+AgentTurnKind = Literal["natural_reply", "tool_call", "finish"]
+
+
+@dataclass(frozen=True)
+class ParsedAgentTurn:
+    kind: AgentTurnKind
+    text: str
+    action: AgentAction | None = None
+    parsed_action: ParsedAgentAction | None = None
 
 
 def _truncate_text(text: str, max_chars: int = TRACE_TEXT_MAX_CHARS) -> str:
@@ -148,7 +161,7 @@ def extract_single_json_object(text: str) -> dict[str, Any]:
     """
 
     if not isinstance(text, str) or not text.strip():
-        raise AgentActionParseError("Response must be a non-empty JSON object.", raw_text=text)
+        raise AgentActionParseError("Response must be a non-empty JSON object.", code="empty_response", raw_text=text)
     stripped = text.strip()
     try:
         data = json.loads(stripped)
@@ -157,7 +170,11 @@ def extract_single_json_object(text: str) -> dict[str, Any]:
     else:
         if isinstance(data, dict):
             return data
-        raise AgentActionParseError("Response must be a JSON object, not an array or primitive.", raw_text=text)
+        raise AgentActionParseError(
+            "Response must be a JSON object, not an array or primitive.",
+            code="non_object_json",
+            raw_text=text,
+        )
 
     objects: list[dict[str, Any]] = []
     decoder = json.JSONDecoder()
@@ -197,6 +214,7 @@ def extract_single_json_object(text: str) -> dict[str, Any]:
                 if not isinstance(candidate_data, dict):
                     raise AgentActionParseError(
                         "Response must be a JSON object, not an array or primitive.",
+                        code="non_object_json",
                         raw_text=text,
                     )
                 objects.append(candidate_data)
@@ -209,10 +227,14 @@ def extract_single_json_object(text: str) -> dict[str, Any]:
             bracket_depth -= 1
 
     if len(objects) > 1:
-        raise AgentActionParseError("Return exactly one JSON object, not multiple objects.", raw_text=text)
+        raise AgentActionParseError("Return exactly one JSON object, not multiple objects.", code="multiple_json_objects", raw_text=text)
     if len(objects) == 1:
         return objects[0]
-    raise AgentActionParseError("Invalid JSON object: unable to locate a JSON object in the response.", raw_text=text)
+    raise AgentActionParseError(
+        "Invalid JSON object: unable to locate a JSON object in the response.",
+        code="no_json_object",
+        raw_text=text,
+    )
 
 
 def normalize_agent_action(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -247,6 +269,7 @@ def normalize_agent_action(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[st
         else:
             raise AgentActionParseError(
                 f"Unknown action alias: {action_value}",
+                code="unknown_action_type",
                 raw_action=raw,
                 normalized_action=normalized,
                 normalization_metadata=metadata,
@@ -288,6 +311,22 @@ def normalize_agent_action(raw: dict[str, Any]) -> tuple[dict[str, Any], dict[st
     return normalized, metadata
 
 
+def _looks_like_structured_action_attempt(text: str) -> bool:
+    """判断模型是否明显在尝试输出结构化动作。"""
+
+    stripped = text.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("{") or stripped.startswith("["):
+        return True
+    if stripped.startswith("```"):
+        return "{" in stripped
+    lowered = stripped.lower()
+    if re.search(r'"(?:type|tool_name|arguments|action|parameters)"\s*:\s*"(?:tool_call|finish|[^"]+)"', lowered):
+        return True
+    return False
+
+
 def parse_agent_action_with_metadata(text: str) -> ParsedAgentAction:
     """解析模型输出，并保留原始字段与归一化过程信息。"""
 
@@ -302,6 +341,7 @@ def parse_agent_action_with_metadata(text: str) -> ParsedAgentAction:
         elif action_type is None:
             raise AgentActionParseError(
                 "Missing required field after normalization: type.",
+                code="schema_validation_error",
                 raw_text=text,
                 raw_action=raw_action,
                 normalized_action=normalized_action,
@@ -310,6 +350,7 @@ def parse_agent_action_with_metadata(text: str) -> ParsedAgentAction:
         else:
             raise AgentActionParseError(
                 f"Unknown action type after normalization: {action_type}",
+                code="unknown_action_type",
                 raw_text=text,
                 raw_action=raw_action,
                 normalized_action=normalized_action,
@@ -322,6 +363,7 @@ def parse_agent_action_with_metadata(text: str) -> ParsedAgentAction:
         message = f"Invalid field after normalization: {loc}: {msg}" if loc else msg
         raise AgentActionParseError(
             message,
+            code="schema_validation_error",
             raw_text=text,
             raw_action=raw_action,
             normalized_action=normalized_action,
@@ -339,6 +381,23 @@ def parse_agent_action(text: str) -> AgentAction:
     """保持向后兼容的简洁入口，只返回标准 AgentAction。"""
 
     return parse_agent_action_with_metadata(text).action
+
+
+def parse_agent_turn(text: str) -> ParsedAgentTurn:
+    """把模型输出分类成自然回复、工具调用或结构化 finish。"""
+
+    stripped = text.strip()
+    if not stripped:
+        raise AgentActionParseError("Response must be a non-empty JSON object.", code="empty_response", raw_text=text)
+    try:
+        parsed_action = parse_agent_action_with_metadata(text)
+    except AgentActionParseError as exc:
+        if exc.code == "no_json_object" and not _looks_like_structured_action_attempt(text):
+            return ParsedAgentTurn(kind="natural_reply", text=stripped)
+        raise
+    if isinstance(parsed_action.action, AgentToolCallAction):
+        return ParsedAgentTurn(kind="tool_call", text=stripped, action=parsed_action.action, parsed_action=parsed_action)
+    return ParsedAgentTurn(kind="finish", text=stripped, action=parsed_action.action, parsed_action=parsed_action)
 
 
 def agent_action_dict_to_trace_preview(data: dict[str, Any], *, max_chars: int = TRACE_TEXT_MAX_CHARS) -> dict[str, Any] | str:

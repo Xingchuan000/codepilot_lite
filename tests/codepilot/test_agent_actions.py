@@ -4,9 +4,11 @@ from codepilot.agent.actions import (
     AgentActionParseError,
     AgentFinishAction,
     AgentToolCallAction,
+    ParsedAgentTurn,
     agent_action_to_trace_input,
     parse_agent_action,
     parse_agent_action_with_metadata,
+    parse_agent_turn,
 )
 
 
@@ -110,10 +112,51 @@ def test_parse_agent_action_extracts_fenced_json_object() -> None:
     assert isinstance(action, AgentFinishAction)
 
 
+def test_parse_agent_turn_natural_reply() -> None:
+    turn = parse_agent_turn("Hello")
+
+    assert isinstance(turn, ParsedAgentTurn)
+    assert turn.kind == "natural_reply"
+    assert turn.text == "Hello"
+    assert turn.action is None
+
+
+def test_parse_agent_turn_chinese_natural_reply() -> None:
+    turn = parse_agent_turn("你好，我可以帮你分析项目。")
+
+    assert turn.kind == "natural_reply"
+    assert turn.text == "你好，我可以帮你分析项目。"
+
+
+def test_parse_agent_turn_tool_call() -> None:
+    turn = parse_agent_turn('{"type":"tool_call","tool_name":"read_file","arguments":{"path":"a.py"}}')
+
+    assert turn.kind == "tool_call"
+    assert isinstance(turn.action, AgentToolCallAction)
+
+
+def test_parse_agent_turn_finish() -> None:
+    turn = parse_agent_turn('{"type":"finish","status":"success","summary":"done"}')
+
+    assert turn.kind == "finish"
+    assert isinstance(turn.action, AgentFinishAction)
+
+
+def test_parse_agent_turn_fenced_json_action() -> None:
+    turn = parse_agent_turn('```json\n{"type":"tool_call","tool_name":"read_file","arguments":{"path":"a.py"}}\n```')
+
+    assert turn.kind == "tool_call"
+
+
+def test_parse_agent_turn_text_with_braces_still_allows_natural_reply() -> None:
+    turn = parse_agent_turn("这个例子里的 {花括号} 只是普通文本。")
+
+    assert turn.kind == "natural_reply"
+
+
 @pytest.mark.parametrize(
     ("text",),
     [
-        ("not json",),
         ("[]",),
         ("```json\n{}\n```",),
         ('{"status":"success","summary":"done"}',),

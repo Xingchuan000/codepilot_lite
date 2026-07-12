@@ -162,6 +162,19 @@ def test_build_run_report_handles_max_steps_exceeded() -> None:
     assert "Run ended because max_steps was exceeded." in report.warnings
 
 
+def test_build_run_report_message_complete_does_not_warn_about_tests_or_diff() -> None:
+    events = [
+        _event("run_start", step=1, metadata={"task": "hello", "repo": "/repo", "max_steps": 3, "task_intent": "general"}),
+        _event("agent_finish", step=2, success=True, output_summary="hello there", metadata={"status": "message_complete", "completion_kind": "message_complete"}),
+        _event("run_end", step=3, success=True, output_summary="hello there", metadata={"status": "message_complete", "completion_kind": "message_complete"}),
+    ]
+
+    report = build_run_report(events)
+
+    assert report.status == "message_complete"
+    assert report.warnings == []
+
+
 def test_build_run_report_missing_run_start_uses_trace_path_parent(tmp_path: Path) -> None:
     trace_path = tmp_path / "run-demo" / "trace.jsonl"
     report = build_run_report([_event("run_end", step=1, success=True, output_summary="done")], trace_path=trace_path)

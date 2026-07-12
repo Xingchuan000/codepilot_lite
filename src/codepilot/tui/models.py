@@ -6,7 +6,22 @@ from typing import Any, Literal
 
 from codepilot.tui import DASHBOARD_SCHEMA_VERSION
 
-RunStatus = Literal["success", "failed", "running", "unknown", "partial", "max_steps_exceeded", "repo_safety_denied"]
+RunStatus = Literal[
+    "message_complete",
+    "success",
+    "failed",
+    "task_incomplete",
+    "running",
+    "waiting_permission",
+    "unknown",
+    "partial",
+    "max_steps_exceeded",
+    "cancelled",
+    "interrupted",
+    "llm_error",
+    "llm_exhausted",
+    "repo_safety_denied",
+]
 
 
 @dataclass(frozen=True)

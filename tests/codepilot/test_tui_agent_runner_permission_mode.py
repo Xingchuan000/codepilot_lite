@@ -9,6 +9,7 @@ from codepilot.tui_agent.permission_broker import BlockingTUIBroker, NonInteract
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
 from codepilot.tui_agent.session_store import SessionStore
+from codepilot.tui_agent.models import TUISessionRunRef
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -127,3 +128,39 @@ def test_cancel_current_wakes_pending_permission(tmp_path: Path) -> None:
 
     assert runner.session.runs[-1].status == "cancelled"
     assert runner.cancellation_token.is_cancelled() is True
+
+
+def test_session_round_trip_preserves_validation_state(tmp_path: Path) -> None:
+    project = resolve_project(_make_repo(tmp_path))
+    store = SessionStore(project)
+    session = store.create_session(model=None, permission_mode="manual")
+
+    updated = store.append_run(
+        session,
+        TUISessionRunRef(
+            run_id="run-1",
+            task_preview="fix add",
+            status="success",
+            completion_kind="task_success",
+            assistant_stop_reason="structured_finish",
+            delivery_kind="code_change",
+            requires_evidence=True,
+            evidence_reasons=("task_requires_code_delivery",),
+            write_attempted=True,
+            write_executed=True,
+            written_files=("src/calc.py",),
+            changed_files=("src/calc.py",),
+            tests_required=True,
+            diff_required=True,
+            diff_checked=True,
+            missing_evidence=("missing_diff_check",),
+            tests="passed",
+        ),
+    )
+    loaded = store.load_session(updated.session_id)
+
+    assert loaded.runs[0].delivery_kind == "code_change"
+    assert loaded.runs[0].tests_required is True
+    assert loaded.runs[0].diff_required is True
+    assert loaded.runs[0].diff_checked is True
+    assert loaded.runs[0].missing_evidence == ("missing_diff_check",)

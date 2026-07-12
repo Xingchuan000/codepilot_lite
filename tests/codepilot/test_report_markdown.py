@@ -28,14 +28,17 @@ def test_render_markdown_report_has_all_sections() -> None:
         "## 1. Run Summary",
         "## 2. Task",
         "## 3. Final Result",
-        "## 4. Tool Timeline",
-        "## 5. Files Changed",
-        "## 6. Test Result",
-        "## 7. Diff Summary",
-        "## 8. Policy Summary",
-        "## 9. Failure / Warning Notes",
+        "## 4. Evidence Gate",
+        "## 5. Tool Timeline",
+        "## 6. Files Changed",
+        "## 7. Test Result",
+        "## 8. Diff Summary",
+        "## 9. Policy Summary",
+        "## 10. Failure / Warning Notes",
     ):
         assert title in markdown
+    assert "Delivery Kind" in markdown
+    assert "Evidence Required" in markdown
 
 
 def test_render_markdown_report_escapes_table_cells() -> None:
@@ -78,3 +81,19 @@ def test_render_markdown_report_shows_empty_values() -> None:
 
     assert "None." in markdown
     assert "none" in markdown
+
+
+def test_render_markdown_report_marks_validation_not_required() -> None:
+    report = RunReport(
+        run_id="run-test",
+        status="message_complete",
+        tests_required=False,
+        diff_required=False,
+        tests=TestReport(),
+        diff=DiffReport(),
+    )
+
+    markdown = render_markdown_report(report)
+
+    assert "- Status: not required" in markdown
+    assert "Diff was not required." in markdown

@@ -20,6 +20,27 @@ def test_tool_router_routes_one_action_and_writes_trace(tmp_path: Path) -> None:
     assert json.loads(lines[0])["tool_name"] == "list_files"
 
 
+def test_tool_router_routes_list_files_offset_page(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for index in range(5):
+        (repo / f"file_{index}.txt").write_text("hi\n", encoding="utf-8")
+    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    routed = router.route(
+        ToolAction(
+            tool_name="list_files",
+            arguments={"repo": repo, "path": ".", "max_depth": 1, "max_entries": 2, "offset": 2},
+        )
+    )
+
+    assert routed.success is True
+    assert routed.result.output.splitlines() == ["file_2.txt", "file_3.txt"]
+    assert routed.result.metadata["has_more"] is True
+    assert routed.result.metadata["next_offset"] == 4
+    assert routed.metadata["arguments_keys"] == ["max_depth", "max_entries", "offset", "path", "repo"]
+
+
 def test_tool_router_route_many_records_run_events_and_keeps_going(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("hi\n", encoding="utf-8")
     router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-test")

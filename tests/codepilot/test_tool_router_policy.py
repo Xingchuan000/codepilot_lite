@@ -18,7 +18,7 @@ def test_tool_router_policy_allows_and_traces_decision(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("hi\n", encoding="utf-8")
     router = _router(tmp_path)
 
-    routed = router.route(ToolAction(tool_name="list_files", arguments={"repo": tmp_path, "path": "."}))
+    routed = router.route(ToolAction(tool_name="list_files", arguments={"repo": tmp_path, "path": ".", "offset": 0}))
 
     assert routed.success is True
     assert routed.metadata["policy_decision"] == "allow"

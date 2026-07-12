@@ -84,6 +84,34 @@ def _short_project_path(project: ProjectContext) -> str:
     return name if name else str(project.resolved_project)
 
 
+def _format_requirement(value: bool | None) -> str:
+    if value is True:
+        return "required"
+    if value is False:
+        return "not required"
+    return "unknown"
+
+
+def _format_test_state(view: AgentRunView) -> str:
+    if view.test_status:
+        return view.test_status
+    if view.tests_required is True:
+        return "required (missing)"
+    if view.tests_required is False:
+        return "not required"
+    return "unknown"
+
+
+def _format_diff_state(view: AgentRunView) -> str:
+    if view.diff_checked is True:
+        return "checked"
+    if view.diff_required is True:
+        return "required (missing)"
+    if view.diff_required is False:
+        return "not required"
+    return "unknown"
+
+
 def format_side_status(project: ProjectContext, session: TUISession, view: AgentRunView, permission_mode: PermissionMode) -> str:
     return "\n".join(
         [
@@ -92,9 +120,12 @@ def format_side_status(project: ProjectContext, session: TUISession, view: Agent
             f"Model: {model_label(session.model)}",
             f"Permission: {permission_mode}",
             f"Status: {view.status}",
+            f"Completion: {view.completion_kind or 'unknown'}",
             f"Tool: {view.active_tool or view.current_tool or 'none'}",
             f"Changed: {len(view.changed_files)}",
-            f"Tests: {view.test_status or 'unknown'}",
+            f"Evidence: {_format_requirement(view.requires_evidence)}",
+            f"Tests: {_format_test_state(view)}",
+            f"Diff: {_format_diff_state(view)}",
             "Commands: /help /status /permissions /diff /report /trace /copy /move /export-transcript /cancel /exit",
         ]
     )
@@ -113,8 +144,16 @@ def format_result_panel(view: AgentRunView) -> str:
     return "\n".join(
         [
             f"Status: {view.status}",
+            f"Completion: {view.completion_kind or 'unknown'}",
+            f"Assistant stop: {view.assistant_stop_reason or 'unknown'}",
+            f"Evidence: {_format_requirement(view.requires_evidence)}",
+            f"Write attempted: {_format_requirement(view.write_attempted)}",
+            f"Write executed: {_format_requirement(view.write_executed)}",
+            f"Tests: {_format_test_state(view)}",
+            f"Diff: {_format_diff_state(view)}",
+            f"Missing evidence: {', '.join(view.missing_evidence) if view.missing_evidence else 'none'}",
             f"Changed files: {', '.join(view.changed_files) if view.changed_files else 'none'}",
-            f"Tests: {view.test_status or 'unknown'}",
+            f"Test status: {view.test_status or 'unknown'}",
             f"Report: {view.report_path or 'none'}",
             f"Report JSON: {view.report_json_path or 'none'}",
             f"Trace: {view.trace_path or 'none'}",

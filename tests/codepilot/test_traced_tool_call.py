@@ -25,6 +25,7 @@ def test_call_tool_traced_writes_event(tmp_path: Path) -> None:
         repo=tmp_path,
         path=".",
         max_depth=1,
+        offset=0,
     )
 
     assert result.success is True
@@ -36,6 +37,34 @@ def test_call_tool_traced_writes_event(tmp_path: Path) -> None:
     assert data["side_effect"] == "none"
     assert data["default_permission"] == "allow"
     assert data["metadata"]["output_chars"] == len(result.output)
+    assert data["input"]["offset"] == 0
+    assert data["metadata"]["has_more"] is False
+    assert data["metadata"]["next_offset"] is None
+
+
+def test_call_tool_traced_records_list_files_pagination_metadata(tmp_path: Path) -> None:
+    for index in range(5):
+        (tmp_path / f"file_{index}.txt").write_text("hi\n", encoding="utf-8")
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-test")
+
+    call_tool_traced(
+        "list_files",
+        trace_logger=logger,
+        repo=tmp_path,
+        path=".",
+        max_depth=1,
+        max_entries=2,
+        offset=2,
+    )
+
+    data = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert data["input"]["offset"] == 2
+    assert data["input"]["max_entries"] == 2
+    assert data["metadata"]["entries_returned"] == 2
+    assert data["metadata"]["has_more"] is True
+    assert data["metadata"]["next_offset"] == 4
+    assert data["metadata"]["limit_reason"] == "entry_limit"
 
 
 def test_call_tool_traced_redacts_sensitive_input_and_serializes_paths(tmp_path: Path) -> None:

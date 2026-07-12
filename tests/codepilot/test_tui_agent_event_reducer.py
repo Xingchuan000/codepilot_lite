@@ -51,7 +51,7 @@ def test_user_message_is_not_deduplicated_across_rounds() -> None:
     assert view.transcript[1].kind == "user_message"
 
 
-def test_llm_call_finished_json_creates_plan_and_action_without_duplication() -> None:
+def test_llm_call_finished_json_creates_plan_only_until_real_tool_action_arrives() -> None:
     reducer = EventReducer()
 
     planned = reducer.reduce(
@@ -69,18 +69,29 @@ def test_llm_call_finished_json_creates_plan_and_action_without_duplication() ->
             type="agent_action",
             timestamp="2024-01-01T00:00:02Z",
             run_id="run-1",
-            payload={"tool_name": "list_files", "input": {"path": ".", "max_depth": 2}, "step": 2},
+            payload={
+                "tool_name": "list_files",
+                "input": {
+                    "type": "tool_call",
+                    "tool_name": "list_files",
+                    "arguments": {"path": ".", "max_depth": 2},
+                    "short_rationale": "先检查结构",
+                },
+                "metadata": {"action_type": "tool_call", "parse_success": True},
+                "step": 2,
+            },
         )
     )
 
-    assert _transcript_kinds(planned) == ("assistant_plan", "assistant_action")
-    assert _transcript_kinds(view).count("assistant_action") == 1
+    assert _transcript_kinds(planned) == ("assistant_plan",)
+    assert _transcript_kinds(view) == ("assistant_plan", "assistant_action")
+    assert view.transcript[1].body == 'list_files {"max_depth": 2, "path": "."}'
     assert len(view.timeline) == 1
     assert view.current_tool == "list_files"
     assert view.active_tool == "list_files"
 
 
-def test_llm_call_finished_non_json_creates_raw_assistant_message() -> None:
+def test_llm_call_finished_non_json_waits_for_agent_finish() -> None:
     reducer = EventReducer()
 
     view = reducer.reduce(
@@ -91,7 +102,38 @@ def test_llm_call_finished_non_json_creates_raw_assistant_message() -> None:
         )
     )
 
-    assert _transcript_kinds(view) == ("assistant_raw",)
+    assert _transcript_kinds(view) == ()
+    assert view.last_assistant_message == "not json"
+
+
+def test_long_natural_reply_is_not_truncated_in_transcript_body() -> None:
+    reducer = EventReducer()
+    text = "解释" * 2000
+
+    view = reducer.reduce(
+        TUIEvent(
+            type="llm_call_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={"output_preview": text},
+        )
+    )
+
+    assert _transcript_kinds(view) == ()
+    assert view.last_assistant_message == text
+
+
+def test_llm_call_finished_finish_json_does_not_prematurely_create_final_summary() -> None:
+    reducer = EventReducer()
+
+    view = reducer.reduce(
+        TUIEvent(
+            type="llm_call_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={"output_preview": '{"type":"finish","status":"success","summary":"done"}'},
+        )
+    )
+
+    assert _transcript_kinds(view) == ()
 
 
 def test_llm_call_finished_json_without_short_rationale_skips_empty_plan() -> None:
@@ -105,7 +147,7 @@ def test_llm_call_finished_json_without_short_rationale_skips_empty_plan() -> No
         )
     )
 
-    assert _transcript_kinds(view) == ("assistant_action",)
+    assert _transcript_kinds(view) == ()
 
 
 def test_tool_finished_updates_changed_files_and_test_status() -> None:
@@ -159,6 +201,46 @@ def test_permission_requested_and_resolved_update_state_and_transcript() -> None
     assert resolved.status == "running"
 
 
+def test_agent_finished_message_complete_creates_raw_assistant_message() -> None:
+    reducer = EventReducer()
+
+    reducer.reduce(
+        TUIEvent(
+            type="llm_call_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={"output_preview": "Hello"},
+        )
+    )
+    view = reducer.reduce(
+        TUIEvent(
+            type="agent_finished",
+            timestamp="2024-01-01T00:00:01Z",
+            payload={"output_summary": "Hello", "metadata": {"status": "message_complete", "assistant_stop_reason": "natural_reply"}},
+        )
+    )
+
+    assert view.status == "message_complete"
+    assert _transcript_kinds(view) == ("assistant_raw",)
+    assert view.transcript[0].body == "Hello"
+
+
+def test_long_final_summary_is_not_truncated_in_transcript_body() -> None:
+    reducer = EventReducer()
+    summary = "完成说明" * 2000
+
+    view = reducer.reduce(
+        TUIEvent(
+            type="agent_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={"output_summary": summary, "metadata": {"status": "success"}},
+        )
+    )
+
+    assert view.transcript[0].kind == "final_summary"
+    assert view.transcript[0].body == summary
+    assert "... truncated" not in view.transcript[0].body
+
+
 def test_agent_finished_creates_final_summary() -> None:
     reducer = EventReducer()
 
@@ -172,6 +254,74 @@ def test_agent_finished_creates_final_summary() -> None:
 
     assert view.status == "success"
     assert _transcript_kinds(view) == ("final_summary",)
+
+
+def test_agent_finished_message_complete_does_not_duplicate_assistant_message() -> None:
+    reducer = EventReducer()
+
+    reducer.reduce(
+        TUIEvent(
+            type="llm_call_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={"output_preview": "Hello"},
+        )
+    )
+    view = reducer.reduce(
+        TUIEvent(
+            type="agent_finished",
+            timestamp="2024-01-01T00:00:01Z",
+            payload={"output_summary": "Hello", "metadata": {"status": "message_complete", "assistant_stop_reason": "natural_reply"}},
+        )
+    )
+
+    assert view.status == "message_complete"
+    assert _transcript_kinds(view) == ("assistant_raw",)
+
+
+def test_long_tool_result_is_still_truncated_in_transcript_body() -> None:
+    reducer = EventReducer()
+    output = "x" * 5000
+
+    view = reducer.reduce(
+        TUIEvent(
+            type="tool_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={
+                "tool_name": "run_tests",
+                "success": True,
+                "output_preview": output,
+                "metadata": {"status": "passed"},
+            },
+        )
+    )
+
+    assert view.transcript[0].kind == "tool_result"
+    assert view.transcript[0].body.endswith("... truncated")
+
+
+def test_agent_finished_task_incomplete_uses_system_status() -> None:
+    reducer = EventReducer()
+
+    reducer.reduce(
+        TUIEvent(
+            type="llm_call_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={"output_preview": "Hello"},
+        )
+    )
+    view = reducer.reduce(
+        TUIEvent(
+            type="agent_finished",
+            timestamp="2024-01-01T00:00:01Z",
+            payload={
+                "output_summary": "Hello",
+                "metadata": {"status": "task_incomplete", "assistant_stop_reason": "natural_reply", "missing_evidence": ["missing_changed_files"]},
+            },
+        )
+    )
+
+    assert view.status == "task_incomplete"
+    assert _transcript_kinds(view) == ("system_status",)
 
 
 def test_run_finished_keeps_paths_out_of_transcript() -> None:
@@ -199,6 +349,60 @@ def test_run_finished_keeps_paths_out_of_transcript() -> None:
     assert "trace.jsonl" not in view.transcript[0].body
     assert "report.md" not in view.transcript[0].body
     assert "report.json" not in view.transcript[0].body
+
+
+def test_run_finished_reads_top_level_evidence_fields() -> None:
+    reducer = EventReducer()
+
+    view = reducer.reduce(
+        TUIEvent(
+            type="run_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={
+                "status": "success",
+                "completion_kind": "task_success",
+                "assistant_stop_reason": "structured_finish",
+                "delivery_kind": "code_change",
+                "requires_evidence": True,
+                "tests_required": True,
+                "diff_required": True,
+                "diff_checked": True,
+                "missing_evidence": ["missing_diff_check"],
+            },
+        )
+    )
+
+    assert view.completion_kind == "task_success"
+    assert view.assistant_stop_reason == "structured_finish"
+    assert view.delivery_kind == "code_change"
+    assert view.requires_evidence is True
+    assert view.tests_required is True
+    assert view.diff_required is True
+    assert view.diff_checked is True
+    assert view.missing_evidence == ("missing_diff_check",)
+
+
+def test_duplicate_run_finished_does_not_duplicate_status_notice() -> None:
+    reducer = EventReducer()
+
+    first = reducer.reduce(
+        TUIEvent(
+            type="run_finished",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={"status": "message_complete", "success": True, "metadata": {"status": "message_complete"}},
+        )
+    )
+    view = reducer.reduce(
+        TUIEvent(
+            type="run_finished",
+            timestamp="2024-01-01T00:00:01Z",
+            payload={"status": "message_complete", "success": True, "metadata": {"status": "message_complete"}},
+        )
+    )
+
+    assert _transcript_kinds(first) == ("system_status",)
+    assert _transcript_kinds(view) == ("system_status",)
+    assert len(view.transcript) == 1
 
 
 def test_duplicate_permission_request_does_not_duplicate_transcript() -> None:

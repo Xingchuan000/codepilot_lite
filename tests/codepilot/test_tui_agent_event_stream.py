@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+from codepilot.tui_agent.event_reducer import EventReducer
 from codepilot.trace.events import TraceEvent
+from codepilot.trace.logger import TraceLogger
 from codepilot.tui_agent.event_stream import trace_event_to_tui_event
+
+
+def _transcript_kinds(view) -> tuple[str, ...]:
+    return tuple(item.kind for item in view.transcript)
 
 
 def test_permission_request_trace_event_is_normalized() -> None:
@@ -84,3 +92,32 @@ def test_unknown_trace_event_stays_trace_event() -> None:
     tui_event = trace_event_to_tui_event(event)
 
     assert tui_event.type == "trace_event"
+
+
+def test_long_natural_reply_survives_trace_preview_pipeline(tmp_path: Path) -> None:
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-1")
+    text = "长文本" * 1000
+    reducer = EventReducer()
+
+    llm_event = trace_event_to_tui_event(
+        logger.record_llm_call(
+            message_count=2,
+            response_text=text,
+        )
+    )
+    finish_event = trace_event_to_tui_event(
+        logger.record_agent_finish(
+            status="message_complete",
+            success=True,
+            summary=text,
+            metadata={"assistant_stop_reason": "natural_reply"},
+        )
+    )
+
+    view = reducer.reduce(llm_event)
+    view = reducer.reduce(finish_event)
+
+    assert _transcript_kinds(view) == ("assistant_raw",)
+    assert view.transcript[0].body == text
+    assert "... truncated" not in view.transcript[0].body
+    assert len(view.transcript[0].body) == len(text)

@@ -23,16 +23,21 @@ ToolFn = Callable[..., ToolResult]
 TOOL_SPECS: dict[str, ToolSpec] = {
     "list_files": ToolSpec(
         name="list_files",
-        description="List files and directories under a repository path.",
+        description=(
+            "List one deterministic page of files and directories under a repository path. "
+            "Use next_offset to continue when has_more is true. "
+            "Symbolic links are shown but never recursed into."
+        ),
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
         default_permission=DefaultPermission.ALLOW,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
-            "path": "相对于 repo 的目录路径，默认为当前目录。",
-            "max_depth": "最大递归深度，超过此深度的条目不会被返回。",
-            "include_hidden": "是否包含隐藏文件与目录（以 . 开头）。",
-            "max_entries": "最多返回的条目数，超出则截断。",
+            "path": "相对于 repo 的目录路径，默认为当前目录；翻页时必须保持与上一页相同。",
+            "max_depth": "最大递归深度，超过此深度的条目不会被返回；翻页时必须保持与上一页相同。",
+            "include_hidden": "是否包含隐藏文件与目录（以 . 开头）；翻页时必须保持与上一页相同。",
+            "max_entries": "当前页最多返回的条目数，默认 200，最大 1000；不是整个目录的总上限。",
+            "offset": "分页起始偏移，默认 0；当上一次结果 has_more=true 时使用 next_offset 继续。",
         },
     ),
     "read_file": ToolSpec(

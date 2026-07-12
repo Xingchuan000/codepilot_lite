@@ -21,6 +21,26 @@ def _format_bool(value: bool | None) -> str:
     return "unknown"
 
 
+def _format_test_status(report: RunReport) -> str:
+    if report.tests_required is False:
+        return "not required"
+    return report.tests.status or "unknown"
+
+
+def _format_test_command(report: RunReport) -> str:
+    if report.tests_required is False:
+        return "not required"
+    return report.tests.command or "unknown"
+
+
+def _format_diff_summary(report: RunReport) -> str:
+    if report.diff_required is False:
+        return "Diff was not required."
+    if not report.diff.checked:
+        return "Diff was not checked."
+    return ""
+
+
 def _format_policy(step: ToolStepReport) -> str:
     if step.policy_decision is None:
         return "unknown"
@@ -97,7 +117,22 @@ def render_markdown_report(report: RunReport) -> str:
             "## 3. Final Result",
             report.final_summary or "None.",
             "",
-            "## 4. Tool Timeline",
+            "## 4. Evidence Gate",
+            f"- Completion Kind: {_markdown_escape_table_cell(report.completion_kind or 'unknown')}",
+            f"- Assistant Stop Reason: {_markdown_escape_table_cell(report.assistant_stop_reason or 'unknown')}",
+            f"- Delivery Kind: {_markdown_escape_table_cell(report.delivery_kind or 'unknown')}",
+            f"- Evidence Required: {_format_bool(report.requires_evidence)}",
+            f"- Evidence Reasons: {_markdown_escape_table_cell(', '.join(report.evidence_reasons) if report.evidence_reasons else 'none')}",
+            f"- Missing Evidence: {_markdown_escape_table_cell(', '.join(report.missing_evidence) if report.missing_evidence else 'none')}",
+            f"- Write Attempted: {_format_bool(report.write_attempted)}",
+            f"- Write Executed: {_format_bool(report.write_executed)}",
+            f"- Written Files: {_markdown_escape_table_cell(', '.join(report.written_files) if report.written_files else 'none')}",
+            f"- Observed Changed Files: {_markdown_escape_table_cell(', '.join(report.observed_changed_files) if report.observed_changed_files else 'none')}",
+            f"- Claimed Changed Files: {_markdown_escape_table_cell(', '.join(report.claimed_changed_files) if report.claimed_changed_files else 'none')}",
+            f"- Tests Required: {_format_bool(report.tests_required)}",
+            f"- Diff Required: {_format_bool(report.diff_required)}",
+            "",
+            "## 5. Tool Timeline",
             "| Step | Tool | Policy | Executed | Success | Summary |",
             "|---:|---|---|---:|---:|---|",
         ]
@@ -116,12 +151,12 @@ def render_markdown_report(report: RunReport) -> str:
     lines.extend(
         [
             "",
-            "## 5. Files Changed",
+            "## 6. Files Changed",
             _bullet_list([_code_path(path) for path in report.changed_files]),
             "",
-            "## 6. Test Result",
-            f"- Status: {_markdown_escape_table_cell(report.tests.status or 'unknown')}",
-            f"- Command: {_markdown_escape_table_cell(report.tests.command or 'unknown')}",
+            "## 7. Test Result",
+            f"- Status: {_markdown_escape_table_cell(_format_test_status(report))}",
+            f"- Command: {_markdown_escape_table_cell(_format_test_command(report))}",
             f"- Original command: {_markdown_escape_table_cell(report.tests.original_command or 'unknown')}",
             f"- Executed command: {_markdown_escape_table_cell(report.tests.executed_command or 'unknown')}",
             f"- Return code: {report.tests.returncode if report.tests.returncode is not None else 'unknown'}",
@@ -129,11 +164,12 @@ def render_markdown_report(report: RunReport) -> str:
             f"- Failed tests: {_markdown_escape_table_cell(', '.join(report.tests.failed_tests) if report.tests.failed_tests else 'none')}",
             f"- Summary: {_markdown_escape_table_cell(report.tests.summary or 'None.')}",
             "",
-            "## 7. Diff Summary",
+            "## 8. Diff Summary",
         ]
     )
-    if not report.diff.checked:
-        lines.append("Diff was not checked.")
+    diff_summary = _format_diff_summary(report)
+    if diff_summary:
+        lines.append(diff_summary)
     else:
         lines.extend(
             [
@@ -152,7 +188,7 @@ def render_markdown_report(report: RunReport) -> str:
     lines.extend(
         [
             "",
-            "## 8. Policy Summary",
+            "## 9. Policy Summary",
             f"- Total: {report.policy.total}",
             f"- Allowed: {report.policy.allowed}",
             f"- Asked: {report.policy.asked}",
@@ -176,7 +212,7 @@ def render_markdown_report(report: RunReport) -> str:
     lines.extend(
         [
             "",
-            "## 9. Failure / Warning Notes",
+            "## 10. Failure / Warning Notes",
         ]
     )
     notes = [f"ERROR: {_sanitize_note(item)}" for item in report.errors] + [f"WARNING: {_sanitize_note(item)}" for item in report.warnings]

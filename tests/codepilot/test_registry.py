@@ -76,6 +76,7 @@ def test_tool_specs_include_parameters() -> None:
     assert "command" in get_tool_spec("run_shell").parameters
     assert "repo" in get_tool_spec("list_files").parameters
     assert "max_depth" in get_tool_spec("list_files").parameters
+    assert "offset" in get_tool_spec("list_files").parameters
     assert "patch" in get_tool_spec("apply_patch").parameters
     assert "path" in get_tool_spec("replace_range").parameters
     assert "start_line" in get_tool_spec("replace_range").parameters
@@ -87,6 +88,7 @@ def test_tool_specs_include_parameters() -> None:
     assert "include_content" in get_tool_spec("git_diff").parameters
     assert "path" in get_tool_spec("git_diff").parameters
 
+
 def test_call_tool_success(tmp_path: Path) -> None:
     (tmp_path / "hello.txt").write_text("hello\n", encoding="utf-8")
 
@@ -94,6 +96,8 @@ def test_call_tool_success(tmp_path: Path) -> None:
 
     assert result.success is True
     assert "hello.txt" in result.output
+    assert result.metadata["has_more"] is False
+    assert result.metadata["next_offset"] is None
 
 
 def test_call_tool_unknown_tool() -> None:

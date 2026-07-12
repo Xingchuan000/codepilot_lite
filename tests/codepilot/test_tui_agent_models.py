@@ -20,7 +20,10 @@ def test_transcript_item_can_be_constructed() -> None:
 
 
 def test_agent_run_view_defaults_include_empty_transcript() -> None:
-    assert AgentRunView().transcript == ()
+    view = AgentRunView()
+
+    assert view.transcript == ()
+    assert view.diff_checked is None
 
 
 def test_to_jsonable_serializes_transcript() -> None:

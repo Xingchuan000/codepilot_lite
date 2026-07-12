@@ -1,7 +1,10 @@
+from pathlib import Path
+
 from codepilot.agent.actions import AgentActionParseError
 from codepilot.agent.observation import format_observation, format_parse_error_observation
 from codepilot.router.actions import ToolRouteResult
 from codepilot.tools.base import ToolResult
+from codepilot.tools.file_tools import LIST_FILES_PAGE_MAX_CHARS, list_files
 
 
 def test_format_observation_for_failed_run_tests() -> None:
@@ -64,6 +67,46 @@ def test_format_observation_truncates_long_output() -> None:
     assert observation.endswith("... truncated")
 
 
+def test_format_observation_keeps_list_files_page_complete(tmp_path: Path) -> None:
+    for index in range(5):
+        (tmp_path / f"file_{index}.txt").write_text("x\n", encoding="utf-8")
+
+    tool_result = list_files(tmp_path, path=".", max_depth=1, max_entries=2)
+    route_result = ToolRouteResult(
+        action_id="a1",
+        tool_name="list_files",
+        success=True,
+        result=tool_result,
+    )
+
+    observation = format_observation(route_result)
+
+    assert tool_result.output in observation
+    assert "has_more: True" in observation
+    assert "next_offset: 2" in observation
+    assert "observation_output_truncated" not in observation
+    assert not observation.endswith("... truncated")
+
+
+def test_format_observation_marks_overlong_list_files_output_as_truncated() -> None:
+    route_result = ToolRouteResult(
+        action_id="a1",
+        tool_name="list_files",
+        success=True,
+        result=ToolResult(
+            success=True,
+            output="x" * (LIST_FILES_PAGE_MAX_CHARS + 100),
+            output_summary="Listed one oversized page.",
+            metadata={"has_more": True, "next_offset": 1},
+        ),
+    )
+
+    observation = format_observation(route_result)
+
+    assert "observation_output_truncated: True" in observation
+    assert observation.endswith("... truncated")
+
+
 def test_format_observation_for_policy_deny() -> None:
     route_result = ToolRouteResult(
         action_id="a1",
@@ -98,7 +141,7 @@ def test_format_observation_keeps_only_whitelisted_metadata() -> None:
 
 
 def test_format_parse_error_observation() -> None:
-    observation = format_parse_error_observation(AgentActionParseError("bad json"))
+    observation = format_parse_error_observation(AgentActionParseError("bad json", code="no_json_object"))
 
     assert "Action parse failed" in observation
     assert "tool_name" in observation
@@ -108,6 +151,7 @@ def test_format_parse_error_observation() -> None:
 def test_format_parse_error_observation_mentions_non_standard_fields() -> None:
     error = AgentActionParseError(
         "Missing required field after normalization: tool_name.",
+        code="schema_validation_error",
         raw_action={"type": "tool_call", "tool": "list_files", "parameters": {}},
         normalized_action={"type": "tool_call", "arguments": {}},
         normalization_metadata={

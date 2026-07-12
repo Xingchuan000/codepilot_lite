@@ -75,6 +75,20 @@ class RunReport(BaseModel):
     final_summary: str | None = None
     steps: int = 0
     changed_files: list[str] = Field(default_factory=list)
+    completion_kind: str | None = None
+    assistant_stop_reason: str | None = None
+    delivery_kind: str | None = None
+    task_intent: str | None = None
+    requires_evidence: bool | None = None
+    evidence_reasons: list[str] = Field(default_factory=list)
+    write_attempted: bool | None = None
+    write_executed: bool | None = None
+    written_files: list[str] = Field(default_factory=list)
+    observed_changed_files: list[str] = Field(default_factory=list)
+    claimed_changed_files: list[str] = Field(default_factory=list)
+    tests_required: bool | None = None
+    diff_required: bool | None = None
+    missing_evidence: list[str] = Field(default_factory=list)
     tool_steps: list[ToolStepReport] = Field(default_factory=list)
     tests: TestReport = Field(default_factory=TestReport)
     policy: PolicyReport = Field(default_factory=PolicyReport)

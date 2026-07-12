@@ -4,6 +4,7 @@ from pathlib import Path
 
 from codepilot.tui_agent.layout import (
     format_side_status,
+    format_result_panel,
     format_transcript_item,
     format_transcript_plain,
     transcript_item_to_copy_text,
@@ -83,6 +84,9 @@ def test_side_status_hides_report_paths(tmp_path: Path) -> None:
         active_tool="list_files",
         changed_files=("src/calc.py", "src/app.py"),
         test_status="passed",
+        tests_required=True,
+        diff_required=True,
+        diff_checked=True,
         report_path="runs/run-1/report.md",
         report_json_path="runs/run-1/report.json",
         trace_path="runs/run-1/trace.jsonl",
@@ -95,6 +99,19 @@ def test_side_status_hides_report_paths(tmp_path: Path) -> None:
     assert "report.json" not in text
     assert "Project: " in text
     assert "Tool: list_files" in text
+    assert "Tests: passed" in text
+    assert "Diff: checked" in text
+
+
+def test_side_status_marks_validation_as_not_required_for_chat(tmp_path: Path) -> None:
+    project = _project(tmp_path)
+    session = _session(tmp_path)
+    view = AgentRunView(status="message_complete", tests_required=False, diff_required=False)
+
+    text = format_side_status(project, session, view, "manual")
+
+    assert "Tests: not required" in text
+    assert "Diff: not required" in text
 
 
 def test_tool_result_failure_uses_cross_mark() -> None:
@@ -110,6 +127,33 @@ def test_tool_result_failure_uses_cross_mark() -> None:
     assert format_transcript_item(item).startswith("✗ run_tests")
 
 
+def test_result_panel_shows_validation_states() -> None:
+    view = AgentRunView(
+        status="success",
+        completion_kind="task_success",
+        assistant_stop_reason="structured_finish",
+        tests_required=True,
+        diff_required=True,
+        diff_checked=True,
+        test_status="passed",
+        missing_evidence=(),
+    )
+
+    text = format_result_panel(view)
+
+    assert "Tests: passed" in text
+    assert "Diff: checked" in text
+
+
+def test_result_panel_marks_validation_not_required_for_chat() -> None:
+    view = AgentRunView(status="message_complete", completion_kind="message_complete", tests_required=False, diff_required=False)
+
+    text = format_result_panel(view)
+
+    assert "Tests: not required" in text
+    assert "Diff: not required" in text
+
+
 def test_assistant_action_contains_tool_name_and_preview() -> None:
     item = TranscriptItem(
         id="1",
@@ -123,6 +167,18 @@ def test_assistant_action_contains_tool_name_and_preview() -> None:
 
     assert "list_files" in text
     assert '"path": "."' in text
+
+
+def test_format_transcript_item_renders_complete_assistant_body() -> None:
+    body = "解释" * 2000
+    item = TranscriptItem(
+        id="1",
+        kind="assistant_raw",
+        timestamp="t",
+        body=body,
+    )
+
+    assert format_transcript_item(item) == f"Assistant: {body}"
 
 
 def test_permission_request_uses_copy_text_when_available() -> None:
