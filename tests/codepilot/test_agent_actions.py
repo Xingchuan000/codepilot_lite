@@ -1,5 +1,6 @@
 import pytest
 
+import codepilot.agent.actions as actions_module
 from codepilot.agent.actions import (
     AgentActionParseError,
     AgentFinishAction,
@@ -91,6 +92,18 @@ def test_standard_fields_win_over_alias_fields() -> None:
 def test_unknown_action_alias_is_rejected() -> None:
     with pytest.raises(AgentActionParseError, match="Unknown action alias"):
         parse_agent_action('{"action":"do_magic","parameters":{}}')
+
+
+def test_tool_registry_failure_is_not_reported_as_unknown_alias(monkeypatch) -> None:
+    from codepilot.tools import registry
+
+    def fail_to_list_specs():
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(registry, "list_tool_specs", fail_to_list_specs)
+
+    with pytest.raises(RuntimeError, match="registry unavailable"):
+        actions_module.normalize_agent_action({"action": "list_files", "parameters": {}})
 
 
 def test_type_final_without_status_returns_clear_error() -> None:

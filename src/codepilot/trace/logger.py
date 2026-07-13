@@ -35,23 +35,30 @@ class TraceLogger:
         runs_dir: str | Path = "runs",
         run_id: str | None = None,
         record_hook: Callable[[TraceEvent], None] | None = None,
+        record_hook_error: Callable[[Exception, TraceEvent], None] | None = None,
     ) -> None:
         self.runs_dir = Path(runs_dir)
         self.run_id = run_id or make_run_id()
         self.run_dir = self.runs_dir / self.run_id
         self.trace_path = self.run_dir / "trace.jsonl"
         self.record_hook = record_hook
+        self.record_hook_error = record_hook_error
+        # 即使没有配置错误回调，也保留最近一次观察者失败，避免诊断信息彻底丢失。
+        self.last_record_hook_error: tuple[Exception, TraceEvent] | None = None
+        # 错误回调本身也是次要观察者；单独保存其失败，不能让它反向中断 Agent 主流程。
+        self.last_record_hook_error_callback_error: tuple[Exception, TraceEvent] | None = None
 
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self._step = self._load_existing_step()
+        self._step, self._terminal_recorded = self._load_existing_state()
 
-    def _load_existing_step(self) -> int:
-        """同一个 run_id 再次打开时，继续已有最大 step。"""
+    def _load_existing_state(self) -> tuple[int, bool]:
+        """同一个 run_id 再次打开时，继续已有最大 step，并恢复是否已终止。"""
 
         if not self.trace_path.exists():
-            return 0
+            return 0, False
 
         max_step = 0
+        terminal_recorded = False
         for line in self.trace_path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
@@ -62,7 +69,13 @@ class TraceLogger:
             step = data.get("step")
             if isinstance(step, int):
                 max_step = max(max_step, step)
-        return max_step
+            if data.get("event_type") in {"run_end", "run_cancelled"}:
+                terminal_recorded = True
+        return max_step, terminal_recorded
+
+    @property
+    def terminal_recorded(self) -> bool:
+        return self._terminal_recorded
 
     @property
     def next_step(self) -> int:
@@ -70,15 +83,26 @@ class TraceLogger:
         return self._step
 
     def record(self, event: TraceEvent) -> TraceEvent:
-        """把单条 trace 事件追加到 jsonl 文件。"""
+        """先可靠写入 Trace，再通知次要观察者。
+
+        record_hook 只负责 TUI 等观察用途，不得破坏主 Trace 写入。Hook 失败时
+        通过 record_hook_error 暴露原异常和对应事件，不再无痕吞掉诊断信息。
+        """
 
         with self.trace_path.open("a", encoding="utf-8") as file:
             file.write(event.model_dump_json() + "\n")
+        if event.event_type in {"run_end", "run_cancelled"}:
+            self._terminal_recorded = True
         if self.record_hook is not None:
             try:
                 self.record_hook(event)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.last_record_hook_error = (exc, event)
+                if self.record_hook_error is not None:
+                    try:
+                        self.record_hook_error(exc, event)
+                    except Exception as callback_exc:
+                        self.last_record_hook_error_callback_error = (callback_exc, event)
         return event
 
     def record_policy_decision(

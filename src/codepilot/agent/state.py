@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
-import shlex
 
 from codepilot.agent.actions import AgentFinishAction
-from codepilot.agent.evidence import AssistantStopReason, CompletionKind, EvidenceDecision, TaskIntent, evaluate_evidence, shell_command_may_write
+from codepilot.agent.evidence import (
+    AssistantStopReason,
+    CompletionKind,
+    EvidenceDecision,
+    EvidenceSnapshot,
+    TaskIntent,
+    evaluate_evidence,
+    shell_command_may_write,
+)
 from codepilot.llm.types import ChatMessage
 from codepilot.router.actions import ToolRouteResult
 
@@ -47,6 +55,28 @@ class AgentState:
     diff_paths_checked: list[str] = field(default_factory=list)
     policy_violations: int = 0
     tool_calls: list[str] = field(default_factory=list)
+
+
+def evidence_snapshot(state: AgentState) -> EvidenceSnapshot:
+    """从可变 AgentState 复制证据字段，并形成唯一的不可变快照。
+
+    这里是 AgentState 到运行结果证据字段的唯一复制位置。使用 tuple 会切断快照与
+    State 内部 list 的引用关系，避免任务结束后状态变化意外改写已发布的结果。
+    """
+
+    return EvidenceSnapshot(
+        requires_evidence=state.requires_evidence,
+        reasons=tuple(state.evidence_reasons),
+        write_attempted=state.write_attempted,
+        write_executed=state.write_executed,
+        written_files=tuple(state.written_files),
+        observed_changed_files=tuple(state.observed_changed_files),
+        claimed_changed_files=tuple(state.claimed_changed_files),
+        tests_required=state.tests_required,
+        diff_required=state.diff_required,
+        diff_checked=state.diff_checked,
+        missing=tuple(state.missing_evidence),
+    )
 
 
 def _append_unique(items: list[str], value: str) -> None:
@@ -216,7 +246,6 @@ def refresh_evidence_state(state: AgentState) -> EvidenceDecision:
         write_attempted=state.write_attempted,
         write_executed=state.write_executed,
         written_files=state.written_files,
-        observed_changed_files=state.observed_changed_files,
         claimed_changed_files=state.claimed_changed_files,
         last_test_status=state.last_test_status,
         diff_checked=state.diff_checked,

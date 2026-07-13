@@ -1,31 +1,7 @@
 from pathlib import Path
 
-from codepilot.agent.evidence import classify_task_intent, evaluate_evidence, shell_command_may_write
-from codepilot.agent.state import create_initial_state, refresh_evidence_state
-
-
-def test_classify_task_intent_hello_is_general() -> None:
-    assert classify_task_intent("hello") == "general"
-
-
-def test_classify_task_intent_project_explanation_is_general() -> None:
-    assert classify_task_intent("请解释项目结构") == "general"
-
-
-def test_classify_task_intent_read_only_phrase_wins() -> None:
-    assert classify_task_intent("不要改代码，只分析失败原因") == "read_only"
-
-
-def test_classify_task_intent_english_read_only_wins() -> None:
-    assert classify_task_intent("do not modify, explain the bug") == "read_only"
-
-
-def test_classify_task_intent_fix_is_code_delivery() -> None:
-    assert classify_task_intent("fix the bug") == "code_delivery"
-
-
-def test_classify_task_intent_chinese_modify_is_code_delivery() -> None:
-    assert classify_task_intent("修复 add bug") == "code_delivery"
+from codepilot.agent.evidence import evaluate_evidence, shell_command_may_write
+from codepilot.agent.state import create_initial_state, evidence_snapshot, refresh_evidence_state
 
 
 def test_shell_command_may_write_detects_redirection() -> None:
@@ -55,7 +31,6 @@ def test_write_attempt_without_real_change_reports_missing_execution_and_files()
         write_attempted=True,
         write_executed=False,
         written_files=[],
-        observed_changed_files=[],
         claimed_changed_files=[],
         last_test_status=None,
         diff_checked=False,
@@ -104,16 +79,10 @@ def test_complete_evidence_allows_success(tmp_path: Path) -> None:
 
 
 def test_observed_changed_files_alone_do_not_prove_modification(tmp_path: Path) -> None:
-    decision = evaluate_evidence(
-        task_requires_code_delivery=True,
-        write_attempted=False,
-        write_executed=False,
-        written_files=[],
-        observed_changed_files=["src/calc.py"],
-        claimed_changed_files=[],
-        last_test_status=None,
-        diff_checked=False,
-    )
+    state = create_initial_state("demo", tmp_path, max_steps=1)
+    state.task_requires_code_delivery = True
+    state.observed_changed_files = ["src/calc.py"]
+    decision = refresh_evidence_state(state)
 
     assert "missing_changed_files" in decision.missing
 
@@ -124,7 +93,6 @@ def test_claimed_changed_files_alone_do_not_trigger_tests_or_diff(tmp_path: Path
         write_attempted=False,
         write_executed=False,
         written_files=[],
-        observed_changed_files=[],
         claimed_changed_files=["src/calc.py"],
         last_test_status=None,
         diff_checked=False,
@@ -142,7 +110,6 @@ def test_code_change_without_real_write_reports_missing_write_execution(tmp_path
         write_attempted=False,
         write_executed=False,
         written_files=[],
-        observed_changed_files=[],
         claimed_changed_files=[],
         last_test_status=None,
         diff_checked=False,
@@ -158,3 +125,35 @@ def test_general_task_without_writes_does_not_require_evidence(tmp_path: Path) -
 
     assert decision.requires_evidence is False
     assert decision.success_allowed is True
+
+
+def test_evidence_snapshot_payload_preserves_all_fields_and_order(tmp_path: Path) -> None:
+    state = create_initial_state("demo", tmp_path, max_steps=1)
+    state.requires_evidence = True
+    state.evidence_reasons = ["write_attempted", "written_files"]
+    state.write_attempted = True
+    state.write_executed = True
+    state.written_files = ["src/b.py", "src/a.py"]
+    state.observed_changed_files = ["README.md", "src/a.py"]
+    state.claimed_changed_files = ["src/a.py", "src/b.py"]
+    state.tests_required = True
+    state.diff_required = True
+    state.diff_checked = False
+    state.missing_evidence = ["missing_passed_tests", "missing_diff_check"]
+
+    snapshot = evidence_snapshot(state)
+    state.written_files.append("src/later.py")
+
+    assert snapshot.to_payload() == {
+        "requires_evidence": True,
+        "evidence_reasons": ["write_attempted", "written_files"],
+        "write_attempted": True,
+        "write_executed": True,
+        "written_files": ["src/b.py", "src/a.py"],
+        "observed_changed_files": ["README.md", "src/a.py"],
+        "claimed_changed_files": ["src/a.py", "src/b.py"],
+        "tests_required": True,
+        "diff_required": True,
+        "diff_checked": False,
+        "missing_evidence": ["missing_passed_tests", "missing_diff_check"],
+    }

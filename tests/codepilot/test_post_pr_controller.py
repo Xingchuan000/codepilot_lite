@@ -332,6 +332,19 @@ def test_value_error_path_writes_report_and_manifest(tmp_path: Path, monkeypatch
     assert result.manifest_path is not None and result.manifest_path.exists()
 
 
+def test_invalid_auto_pr_manifest_writes_report_and_manifest(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "issue-001"
+    run_dir.mkdir(parents=True)
+    (run_dir / "auto_pr_manifest.json").write_text("[]", encoding="utf-8")
+
+    result = run_post_pr_automation(run_dir=run_dir, overwrite=True, post_pr_action_template=False)
+
+    assert result.status == "blocked"
+    assert result.terminal_reason == "manifest_invalid"
+    assert result.report_path is not None and result.report_path.exists()
+    assert result.manifest_path is not None and result.manifest_path.exists()
+
+
 def test_approval_file_outside_post_pr_is_rejected(tmp_path: Path, monkeypatch) -> None:
     run_dir = tmp_path / "runs" / "issue-001"
     run_dir.mkdir(parents=True)

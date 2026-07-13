@@ -1,22 +1,26 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from codepilot.agent.actions import (
+    AgentActionParseError,
     AgentFinishAction,
     AgentToolCallAction,
+    ParsedAgentAction,
     agent_action_dict_to_trace_preview,
     agent_action_to_trace_input,
     parse_agent_turn,
 )
-from codepilot.agent.evidence import AssistantStopReason, CompletionKind
+from codepilot.agent.evidence import AssistantStopReason, CompletionKind, EvidenceDecision
 from codepilot.agent.observation import format_finish_blocked_observation, format_observation, format_parse_error_observation
+from codepilot.agent.outcome import RunOutcomeSnapshot, build_run_outcome
 from codepilot.agent.prompts import build_initial_messages
 from codepilot.agent.state import (
     AgentState,
     create_initial_state,
+    evidence_snapshot,
     mark_finished_from_action,
     refresh_evidence_state,
     register_finish_claim,
@@ -33,32 +37,85 @@ from codepilot.trace.logger import TraceLogger
 
 @dataclass(frozen=True)
 class AgentRunResult:
-    """MinimalAgentLoop 对外暴露的最小结果。"""
+    """MinimalAgentLoop 对外暴露的结果。
+
+    最终状态和证据只存放在 outcome 中。下方只读 property 保留原有公开访问方式，
+    使现有调用方可以逐步迁移，但不会在结果对象里保存第二份可变证据数据。
+    """
 
     success: bool
     status: str
     summary: str
     steps: int
-    completion_kind: CompletionKind | None = None
-    assistant_stop_reason: AssistantStopReason | None = None
-    delivery_kind: str | None = None
+    outcome: RunOutcomeSnapshot
     task_intent: str = "general"
-    requires_evidence: bool = False
-    evidence_reasons: list[str] = field(default_factory=list)
-    write_attempted: bool = False
-    write_executed: bool = False
-    written_files: list[str] = field(default_factory=list)
-    observed_changed_files: list[str] = field(default_factory=list)
-    claimed_changed_files: list[str] = field(default_factory=list)
-    tests_required: bool = False
-    diff_required: bool = False
-    diff_checked: bool = False
-    missing_evidence: list[str] = field(default_factory=list)
-    changed_files: list[str] = field(default_factory=list)
-    last_test_status: str | None = None
     trace_path: str | None = None
     error: str | None = None
     policy_violations: int = 0
+
+    @property
+    def completion_kind(self) -> CompletionKind | None:
+        return self.outcome.completion_kind
+
+    @property
+    def assistant_stop_reason(self) -> AssistantStopReason | None:
+        return self.outcome.assistant_stop_reason
+
+    @property
+    def delivery_kind(self) -> str | None:
+        return self.outcome.delivery_kind
+
+    @property
+    def requires_evidence(self) -> bool:
+        return self.outcome.evidence.requires_evidence
+
+    @property
+    def evidence_reasons(self) -> list[str]:
+        return list(self.outcome.evidence.reasons)
+
+    @property
+    def write_attempted(self) -> bool:
+        return self.outcome.evidence.write_attempted
+
+    @property
+    def write_executed(self) -> bool:
+        return self.outcome.evidence.write_executed
+
+    @property
+    def written_files(self) -> list[str]:
+        return list(self.outcome.evidence.written_files)
+
+    @property
+    def observed_changed_files(self) -> list[str]:
+        return list(self.outcome.evidence.observed_changed_files)
+
+    @property
+    def claimed_changed_files(self) -> list[str]:
+        return list(self.outcome.evidence.claimed_changed_files)
+
+    @property
+    def tests_required(self) -> bool:
+        return self.outcome.evidence.tests_required
+
+    @property
+    def diff_required(self) -> bool:
+        return self.outcome.evidence.diff_required
+
+    @property
+    def diff_checked(self) -> bool:
+        return self.outcome.evidence.diff_checked
+
+    @property
+    def missing_evidence(self) -> list[str]:
+        return list(self.outcome.evidence.missing)
+
+    @property
+    def changed_files(self) -> list[str]:
+        return list(self.outcome.changed_files)
+
+    @property
+    def last_test_status(self) -> str | None:
+        return self.outcome.last_test_status
 
 
 def _inject_repo_if_missing(arguments: dict[str, Any], repo: Path) -> dict[str, Any]:
@@ -87,6 +144,51 @@ def _infer_finish_delivery_kind(state: AgentState, action: AgentFinishAction) ->
     if action.delivery_kind in {"message", "analysis"}:
         return action.delivery_kind
     return "message"
+
+
+@dataclass(frozen=True)
+class FinishResolution:
+    """结构化 finish 的纯决策结果，不执行 Trace 或状态修改。"""
+
+    status: str
+    completion_kind: CompletionKind
+    success: bool
+    status_normalized: bool
+    blocked_by_evidence: bool = False
+
+
+def _parsed_action_metadata(parsed_action: ParsedAgentAction) -> dict[str, Any]:
+    """集中生成成功解析动作的 Trace 元数据，确保工具和 finish 使用同一契约。"""
+
+    metadata = parsed_action.normalization_metadata
+    return {
+        "parse_success": True,
+        "normalization_applied": metadata.get("normalization_applied", False),
+        "normalized_fields": metadata.get("normalized_fields", {}),
+        "non_standard_fields": metadata.get("non_standard_fields", []),
+        "normalization_conflicts": metadata.get("conflicts", []),
+        "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
+        "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
+    }
+
+
+def _resolve_finish(
+    action: AgentFinishAction,
+    *,
+    delivery_kind: str,
+    evidence: EvidenceDecision,
+) -> FinishResolution:
+    """按照既有顺序解析 finish，不读取或修改 AgentState。"""
+
+    if action.status == "failed":
+        return FinishResolution("failed", "task_failed", False, False)
+    if action.status == "partial":
+        return FinishResolution("partial", "task_partial", False, False)
+    if evidence.missing:
+        return FinishResolution("success", "task_success", False, False, blocked_by_evidence=True)
+    if delivery_kind != "code_change":
+        return FinishResolution("message_complete", "message_complete", True, True)
+    return FinishResolution("success", "task_success", True, False)
 
 
 class MinimalAgentLoop:
@@ -129,6 +231,21 @@ class MinimalAgentLoop:
     def _cancel_requested(self) -> bool:
         return bool(self.cancellation_token and self.cancellation_token.is_cancelled())
 
+    def _cancelled_result(self, state: AgentState) -> AgentRunResult:
+        """在一个位置完成取消状态、Trace 和返回值构造。"""
+
+        state.final_status = "cancelled"
+        state.final_summary = "cancelled"
+        state.assistant_stop_reason = "cancelled"
+        state.completion_kind = "cancelled"
+        self.trace_logger.record_run_cancelled(
+            metadata={
+                "source": "minimal_agent_loop",
+                **build_run_outcome(state, status="cancelled").to_payload(),
+            }
+        )
+        return self._result(state=state, status="cancelled", summary="cancelled", success=False, error="cancelled")
+
     def _result(
         self,
         *,
@@ -137,33 +254,16 @@ class MinimalAgentLoop:
         summary: str,
         success: bool,
         error: str | None = None,
-        completion_kind: CompletionKind | None = None,
-        assistant_stop_reason: AssistantStopReason | None = None,
     ) -> AgentRunResult:
-        """统一构造返回值。"""
+        """通过统一 Outcome 快照构造返回值，不再复制各个证据字段。"""
 
         return AgentRunResult(
             success=success,
             status=status,
             summary=summary,
             steps=state.step,
-            completion_kind=completion_kind or state.completion_kind,
-            assistant_stop_reason=assistant_stop_reason or state.assistant_stop_reason,
-            delivery_kind=state.delivery_kind,
+            outcome=build_run_outcome(state, status=status),
             task_intent=state.task_intent,
-            requires_evidence=state.requires_evidence,
-            evidence_reasons=list(state.evidence_reasons),
-            write_attempted=state.write_attempted,
-            write_executed=state.write_executed,
-            written_files=list(state.written_files),
-            observed_changed_files=list(state.observed_changed_files),
-            claimed_changed_files=list(state.claimed_changed_files),
-            tests_required=state.tests_required,
-            diff_required=state.diff_required,
-            diff_checked=state.diff_checked,
-            missing_evidence=list(state.missing_evidence),
-            changed_files=list(state.changed_files),
-            last_test_status=state.last_test_status,
             trace_path=str(self.trace_logger.trace_path),
             error=error,
             policy_violations=state.policy_violations,
@@ -173,11 +273,229 @@ class MinimalAgentLoop:
         spec = self.tool_specs_by_name.get(tool_name)
         return spec.side_effect.value if spec is not None else None
 
+    def _runtime_failure_result(
+        self,
+        state: AgentState,
+        *,
+        status: str,
+        stop_reason: AssistantStopReason,
+        error: str | None = None,
+    ) -> AgentRunResult:
+        """统一收尾 LLM 耗尽、LLM 调用失败和最大步数耗尽。"""
+
+        state.final_status = status
+        state.final_summary = status
+        state.assistant_stop_reason = stop_reason
+        state.completion_kind = "runtime_failure"
+        metadata = build_run_outcome(state, status=status).to_payload()
+        if error is not None:
+            metadata["error"] = error
+        self.trace_logger.record_run_end(success=False, summary=status, metadata=metadata)
+        return self._result(state=state, status=status, summary=status, success=False, error=error)
+
+    def _natural_reply_result(
+        self,
+        state: AgentState,
+        *,
+        response_content: str,
+        text: str,
+    ) -> AgentRunResult:
+        """保持自然文本结束的现有状态和 Trace 行为。"""
+
+        # messages 保留模型原始正文，最终 summary 仍使用 parse_agent_turn 规范化后的文本。
+        state.messages.append(ChatMessage(role="assistant", content=response_content))
+        state.assistant_stop_reason = "natural_reply"
+        decision = refresh_evidence_state(state)
+        status = "message_complete" if not decision.requires_evidence else "task_incomplete"
+        completion_kind: CompletionKind = "message_complete" if not decision.requires_evidence else "task_incomplete"
+        success = not decision.requires_evidence
+        state.final_status = status
+        state.final_summary = text
+        state.completion_kind = completion_kind
+        self.trace_logger.record_agent_finish(
+            status=status,
+            success=success,
+            summary=text,
+            metadata={
+                "requested_status": None,
+                "effective_status": status,
+                "status_normalized": False,
+                "completion_kind": completion_kind,
+                "assistant_stop_reason": state.assistant_stop_reason,
+                **evidence_snapshot(state).to_payload(),
+                "changed_files": list(state.changed_files),
+            },
+        )
+        self.trace_logger.record_run_end(
+            success=success,
+            summary=text,
+            metadata={
+                "status": status,
+                "completion_kind": completion_kind,
+                "assistant_stop_reason": state.assistant_stop_reason,
+                **evidence_snapshot(state).to_payload(),
+            },
+        )
+        return self._result(state=state, status=status, summary=text, success=success)
+
+    def _finish_metadata(
+        self,
+        *,
+        state: AgentState,
+        action: AgentFinishAction,
+        resolution: FinishResolution,
+        delivery_kind: str,
+    ) -> dict[str, Any]:
+        """构造 agent_finish 的唯一元数据，保留现有诊断字段。"""
+
+        return {
+            "requested_status": action.status,
+            "effective_status": resolution.status,
+            "status_normalized": resolution.status_normalized,
+            "completion_kind": resolution.completion_kind,
+            "assistant_stop_reason": state.assistant_stop_reason,
+            "delivery_kind": delivery_kind,
+            "tests": action.tests,
+            **evidence_snapshot(state).to_payload(),
+            "changed_files": list(state.changed_files),
+        }
+
+    def _finish_from_action(
+        self,
+        *,
+        state: AgentState,
+        action: AgentFinishAction,
+        parsed_action: ParsedAgentAction,
+        resolution: FinishResolution,
+        delivery_kind: str,
+    ) -> AgentRunResult:
+        """统一完成结构化 finish 的动作、状态、Trace 和结果收尾。"""
+
+        self.trace_logger.record_agent_action(
+            action_type=action.type,
+            tool_name=None,
+            input=agent_action_to_trace_input(action),
+            success=True,
+            metadata={
+                **_parsed_action_metadata(parsed_action),
+                "requested_status": action.status,
+                "effective_status": resolution.status,
+                "status_normalized": resolution.status_normalized,
+                "completion_kind": resolution.completion_kind,
+                "assistant_stop_reason": "structured_finish",
+                "delivery_kind": delivery_kind,
+                **evidence_snapshot(state).to_payload(),
+            },
+        )
+        mark_finished_from_action(
+            state,
+            action,
+            effective_status=resolution.status,
+            completion_kind=resolution.completion_kind,
+            delivery_kind=delivery_kind,
+        )
+        self.trace_logger.record_agent_finish(
+            status=resolution.status,
+            success=resolution.success,
+            summary=action.summary,
+            metadata=self._finish_metadata(
+                state=state,
+                action=action,
+                resolution=resolution,
+                delivery_kind=delivery_kind,
+            ),
+        )
+        self.trace_logger.record_run_end(
+            success=resolution.success,
+            summary=action.summary,
+            metadata={
+                "status": resolution.status,
+                "completion_kind": resolution.completion_kind,
+                "assistant_stop_reason": state.assistant_stop_reason,
+                "delivery_kind": delivery_kind,
+                **evidence_snapshot(state).to_payload(),
+            },
+        )
+        return self._result(
+            state=state,
+            status=resolution.status,
+            summary=action.summary,
+            success=resolution.success,
+        )
+
+    def _handle_evidence_block(
+        self,
+        *,
+        state: AgentState,
+        action: AgentFinishAction,
+        parsed_action: ParsedAgentAction,
+        response_content: str,
+        delivery_kind: str,
+    ) -> None:
+        """记录 Evidence Gate 拒绝并把可执行的下一步反馈给模型。"""
+
+        if delivery_kind == "code_change":
+            state.delivery_kind = "code_change"
+        self.trace_logger.record_agent_action(
+            action_type=action.type,
+            tool_name=None,
+            input=agent_action_to_trace_input(action),
+            success=False,
+            error="finish success blocked by evidence gate",
+            metadata={
+                **_parsed_action_metadata(parsed_action),
+                "finish_blocked_by_evidence": True,
+                "requested_status": action.status,
+                "delivery_kind": delivery_kind,
+                **evidence_snapshot(state).to_payload(),
+                "last_test_status": state.last_test_status,
+            },
+        )
+        state.messages.append(ChatMessage(role="assistant", content=response_content))
+        observation = format_finish_blocked_observation(
+            missing_evidence=list(state.missing_evidence),
+            last_test_status=state.last_test_status,
+            last_test_command=state.last_test_command,
+            diff_checked=state.diff_checked,
+            written_files=list(state.written_files),
+        )
+        state.messages.append(ChatMessage(role="user", content=observation))
+        self.trace_logger.record_agent_observation(
+            tool_name=None,
+            observation=observation,
+            metadata={
+                "finish_blocked_by_evidence": True,
+                "delivery_kind": delivery_kind,
+                **evidence_snapshot(state).to_payload(),
+                "last_test_status": state.last_test_status,
+            },
+        )
+
+    def _record_tool_error(
+        self,
+        *,
+        state: AgentState,
+        response_content: str,
+        tool_name: str,
+        error: Exception,
+    ) -> None:
+        """把预期的工具准备或执行异常反馈给模型，不吞掉其他阶段的编程错误。"""
+
+        observation = (
+            "Your previous tool_call could not be executed.\n"
+            f"Error: {error}\n"
+            'Use natural text for normal replies, or return one JSON object for tool_call / finish.'
+        )
+        state.messages.append(ChatMessage(role="assistant", content=response_content))
+        state.messages.append(ChatMessage(role="user", content=observation))
+        self.trace_logger.record_agent_observation(tool_name=tool_name, observation=observation)
+
     def run(self, task: str, repo: str | Path) -> AgentRunResult:
         """执行最小 LLM loop。"""
 
         state = create_initial_state(task, repo, max_steps=self.max_steps)
         state.messages = build_initial_messages(task, state.repo, extra_tool_specs=self.prompt_extra_tool_specs)
+        initial_evidence = evidence_snapshot(state)
         self.trace_logger.record_run_start(
             task=task,
             metadata={
@@ -186,35 +504,35 @@ class MinimalAgentLoop:
                 "max_steps": self.max_steps,
                 "task_intent": state.task_intent,
                 "task_requires_code_delivery": state.task_requires_code_delivery,
-                "requires_evidence": state.requires_evidence,
-                "initial_evidence_reasons": list(state.evidence_reasons),
+                "requires_evidence": initial_evidence.requires_evidence,
+                "initial_evidence_reasons": list(initial_evidence.reasons),
             },
         )
         try:
             while state.step < state.max_steps and not state.finished:
+                # 每轮开始先检查取消，避免任务已取消后仍调用一次模型。
                 if self._cancel_requested():
-                    self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
-                    state.final_status = "cancelled"
-                    state.final_summary = "cancelled"
-                    state.assistant_stop_reason = "cancelled"
-                    state.completion_kind = "cancelled"
-                    return self._result(state=state, status="cancelled", summary="cancelled", success=False, error="cancelled")
+                    return self._cancelled_result(state)
                 state.step += 1
+                try:
+                    response = self.llm.complete(state.messages)
+                except FakeLLMExhaustedError as exc:
+                    return self._runtime_failure_result(
+                        state,
+                        status="llm_exhausted",
+                        stop_reason="llm_exhausted",
+                        error=str(exc),
+                    )
+                except Exception as exc:
+                    return self._runtime_failure_result(
+                        state,
+                        status="llm_error",
+                        stop_reason="llm_error",
+                        error=str(exc),
+                    )
+                # 模型调用可能耗时，返回后必须再次检查，取消时不再处理这次响应。
                 if self._cancel_requested():
-                    self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
-                    state.final_status = "cancelled"
-                    state.final_summary = "cancelled"
-                    state.assistant_stop_reason = "cancelled"
-                    state.completion_kind = "cancelled"
-                    return self._result(state=state, status="cancelled", summary="cancelled", success=False, error="cancelled")
-                response = self.llm.complete(state.messages)
-                if self._cancel_requested():
-                    self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
-                    state.final_status = "cancelled"
-                    state.final_summary = "cancelled"
-                    state.assistant_stop_reason = "cancelled"
-                    state.completion_kind = "cancelled"
-                    return self._result(state=state, status="cancelled", summary="cancelled", success=False, error="cancelled")
+                    return self._cancelled_result(state)
                 self.trace_logger.record_llm_call(
                     model=response.model,
                     message_count=len(state.messages),
@@ -223,8 +541,8 @@ class MinimalAgentLoop:
                 )
                 try:
                     turn = parse_agent_turn(response.content)
-                except Exception as exc:
-                    normalization_metadata = getattr(exc, "normalization_metadata", {}) or {}
+                except AgentActionParseError as exc:
+                    normalization_metadata = exc.normalization_metadata
                     self.trace_logger.record_agent_action(
                         action_type=None,
                         input={},
@@ -235,9 +553,9 @@ class MinimalAgentLoop:
                             "normalization_applied": normalization_metadata.get("normalization_applied", False),
                             "normalized_fields": normalization_metadata.get("normalized_fields", {}),
                             "non_standard_fields": normalization_metadata.get("non_standard_fields", []),
-                            "raw_action_preview": agent_action_dict_to_trace_preview(getattr(exc, "raw_action", {}) or {}),
+                            "raw_action_preview": agent_action_dict_to_trace_preview(exc.raw_action or {}),
                             "normalized_action_preview": agent_action_dict_to_trace_preview(
-                                getattr(exc, "normalized_action", {}) or {}
+                                exc.normalized_action or {}
                             ),
                         },
                     )
@@ -247,54 +565,11 @@ class MinimalAgentLoop:
                     self.trace_logger.record_agent_observation(tool_name=None, observation=observation)
                     continue
                 if turn.kind == "natural_reply":
-                    state.messages.append(ChatMessage(role="assistant", content=response.content))
-                    state.assistant_stop_reason = "natural_reply"
-                    decision = refresh_evidence_state(state)
-                    status = "message_complete" if not decision.requires_evidence else "task_incomplete"
-                    completion_kind = "message_complete" if not decision.requires_evidence else "task_incomplete"
-                    success = not decision.requires_evidence
-                    state.final_status = status
-                    state.final_summary = turn.text
-                    state.completion_kind = completion_kind
-                    self.trace_logger.record_agent_finish(
-                        status=status,
-                        success=success,
-                        summary=turn.text,
-                        metadata={
-                            "requested_status": None,
-                            "effective_status": status,
-                            "status_normalized": False,
-                            "completion_kind": completion_kind,
-                            "assistant_stop_reason": state.assistant_stop_reason,
-                            "requires_evidence": state.requires_evidence,
-                            "evidence_reasons": list(state.evidence_reasons),
-                            "missing_evidence": list(state.missing_evidence),
-                            "tests_required": state.tests_required,
-                            "diff_required": state.diff_required,
-                            "diff_checked": state.diff_checked,
-                            "write_attempted": state.write_attempted,
-                            "write_executed": state.write_executed,
-                            "written_files": list(state.written_files),
-                            "observed_changed_files": list(state.observed_changed_files),
-                            "claimed_changed_files": list(state.claimed_changed_files),
-                            "changed_files": list(state.changed_files),
-                        },
+                    return self._natural_reply_result(
+                        state,
+                        response_content=response.content,
+                        text=turn.text,
                     )
-                    self.trace_logger.record_run_end(
-                        success=success,
-                        summary=turn.text,
-                        metadata={
-                            "status": status,
-                            "completion_kind": completion_kind,
-                            "assistant_stop_reason": state.assistant_stop_reason,
-                            "requires_evidence": state.requires_evidence,
-                            "missing_evidence": list(state.missing_evidence),
-                            "tests_required": state.tests_required,
-                            "diff_required": state.diff_required,
-                            "diff_checked": state.diff_checked,
-                        },
-                    )
-                    return self._result(state=state, status=status, summary=turn.text, success=success, completion_kind=completion_kind)
                 action = turn.action
                 assert action is not None
                 parsed_action = turn.parsed_action
@@ -305,375 +580,29 @@ class MinimalAgentLoop:
                     if delivery_kind == "code_change":
                         state.task_requires_code_delivery = True
                     decision = refresh_evidence_state(state)
-                    if action.status == "failed":
-                        self.trace_logger.record_agent_action(
-                            action_type=action.type,
-                            tool_name=None,
-                            input=agent_action_to_trace_input(action),
-                            success=True,
-                            metadata={
-                                "parse_success": True,
-                                "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
-                                "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
-                                "non_standard_fields": parsed_action.normalization_metadata.get("non_standard_fields", []),
-                                "normalization_conflicts": parsed_action.normalization_metadata.get("conflicts", []),
-                                "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
-                                "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
-                                "requested_status": action.status,
-                                "effective_status": "failed",
-                                "completion_kind": "task_failed",
-                                "assistant_stop_reason": "structured_finish",
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "missing_evidence": list(state.missing_evidence),
-                            },
-                        )
-                        mark_finished_from_action(
-                            state,
-                            action,
-                            effective_status="failed",
-                            completion_kind="task_failed",
-                            delivery_kind=delivery_kind,
-                        )
-                        self.trace_logger.record_agent_finish(
-                            status="failed",
-                            success=False,
-                            summary=action.summary,
-                            metadata={
-                                "requested_status": action.status,
-                                "effective_status": "failed",
-                                "status_normalized": False,
-                                "completion_kind": "task_failed",
-                                "assistant_stop_reason": state.assistant_stop_reason,
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "evidence_reasons": list(state.evidence_reasons),
-                                "missing_evidence": list(state.missing_evidence),
-                                "tests_required": state.tests_required,
-                                "diff_required": state.diff_required,
-                                "diff_checked": state.diff_checked,
-                                "write_attempted": state.write_attempted,
-                                "write_executed": state.write_executed,
-                                "written_files": list(state.written_files),
-                                "observed_changed_files": list(state.observed_changed_files),
-                                "claimed_changed_files": list(state.claimed_changed_files),
-                                "changed_files": list(state.changed_files),
-                                "tests": action.tests,
-                            },
-                        )
-                        self.trace_logger.record_run_end(
-                            success=False,
-                            summary=action.summary,
-                            metadata={
-                                "status": "failed",
-                                "completion_kind": "task_failed",
-                                "assistant_stop_reason": state.assistant_stop_reason,
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "missing_evidence": list(state.missing_evidence),
-                                "tests_required": state.tests_required,
-                                "diff_required": state.diff_required,
-                                "diff_checked": state.diff_checked,
-                            },
-                        )
-                        return self._result(state=state, status="failed", summary=action.summary, success=False, completion_kind="task_failed")
-                    if action.status == "partial":
-                        self.trace_logger.record_agent_action(
-                            action_type=action.type,
-                            tool_name=None,
-                            input=agent_action_to_trace_input(action),
-                            success=True,
-                            metadata={
-                                "parse_success": True,
-                                "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
-                                "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
-                                "non_standard_fields": parsed_action.normalization_metadata.get("non_standard_fields", []),
-                                "normalization_conflicts": parsed_action.normalization_metadata.get("conflicts", []),
-                                "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
-                                "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
-                                "requested_status": action.status,
-                                "effective_status": "partial",
-                                "completion_kind": "task_partial",
-                                "assistant_stop_reason": "structured_finish",
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "missing_evidence": list(state.missing_evidence),
-                            },
-                        )
-                        mark_finished_from_action(
-                            state,
-                            action,
-                            effective_status="partial",
-                            completion_kind="task_partial",
-                            delivery_kind=delivery_kind,
-                        )
-                        self.trace_logger.record_agent_finish(
-                            status="partial",
-                            success=False,
-                            summary=action.summary,
-                            metadata={
-                                "requested_status": action.status,
-                                "effective_status": "partial",
-                                "status_normalized": False,
-                                "completion_kind": "task_partial",
-                                "assistant_stop_reason": state.assistant_stop_reason,
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "evidence_reasons": list(state.evidence_reasons),
-                                "missing_evidence": list(state.missing_evidence),
-                                "tests_required": state.tests_required,
-                                "diff_required": state.diff_required,
-                                "diff_checked": state.diff_checked,
-                                "write_attempted": state.write_attempted,
-                                "write_executed": state.write_executed,
-                                "written_files": list(state.written_files),
-                                "observed_changed_files": list(state.observed_changed_files),
-                                "claimed_changed_files": list(state.claimed_changed_files),
-                                "changed_files": list(state.changed_files),
-                                "tests": action.tests,
-                            },
-                        )
-                        self.trace_logger.record_run_end(
-                            success=False,
-                            summary=action.summary,
-                            metadata={
-                                "status": "partial",
-                                "completion_kind": "task_partial",
-                                "assistant_stop_reason": state.assistant_stop_reason,
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "missing_evidence": list(state.missing_evidence),
-                                "tests_required": state.tests_required,
-                                "diff_required": state.diff_required,
-                                "diff_checked": state.diff_checked,
-                            },
-                        )
-                        return self._result(state=state, status="partial", summary=action.summary, success=False, completion_kind="task_partial")
-                    if action.status == "success" and not decision.requires_evidence:
-                        self.trace_logger.record_agent_action(
-                            action_type=action.type,
-                            tool_name=None,
-                            input=agent_action_to_trace_input(action),
-                            success=True,
-                            metadata={
-                                "parse_success": True,
-                                "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
-                                "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
-                                "non_standard_fields": parsed_action.normalization_metadata.get("non_standard_fields", []),
-                                "normalization_conflicts": parsed_action.normalization_metadata.get("conflicts", []),
-                                "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
-                                "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
-                                "requested_status": action.status,
-                                "effective_status": "message_complete",
-                                "status_normalized": True,
-                                "completion_kind": "message_complete",
-                                "assistant_stop_reason": "structured_finish",
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "missing_evidence": list(state.missing_evidence),
-                            },
-                        )
-                        mark_finished_from_action(
-                            state,
-                            action,
-                            effective_status="message_complete",
-                            completion_kind="message_complete",
-                            delivery_kind=delivery_kind,
-                        )
-                        self.trace_logger.record_agent_finish(
-                            status="message_complete",
-                            success=True,
-                            summary=action.summary,
-                            metadata={
-                                "requested_status": action.status,
-                                "effective_status": "message_complete",
-                                "status_normalized": True,
-                                "completion_kind": "message_complete",
-                                "assistant_stop_reason": state.assistant_stop_reason,
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "evidence_reasons": list(state.evidence_reasons),
-                                "missing_evidence": list(state.missing_evidence),
-                                "tests_required": state.tests_required,
-                                "diff_required": state.diff_required,
-                                "diff_checked": state.diff_checked,
-                                "write_attempted": state.write_attempted,
-                                "write_executed": state.write_executed,
-                                "written_files": list(state.written_files),
-                                "observed_changed_files": list(state.observed_changed_files),
-                                "claimed_changed_files": list(state.claimed_changed_files),
-                                "changed_files": list(state.changed_files),
-                                "tests": action.tests,
-                            },
-                        )
-                        self.trace_logger.record_run_end(
-                            success=True,
-                            summary=action.summary,
-                            metadata={
-                                "status": "message_complete",
-                                "completion_kind": "message_complete",
-                                "assistant_stop_reason": state.assistant_stop_reason,
-                                "delivery_kind": delivery_kind,
-                                "requires_evidence": state.requires_evidence,
-                                "missing_evidence": list(state.missing_evidence),
-                                "tests_required": state.tests_required,
-                                "diff_required": state.diff_required,
-                                "diff_checked": state.diff_checked,
-                            },
-                        )
-                        return self._result(
+                    resolution = _resolve_finish(action, delivery_kind=delivery_kind, evidence=decision)
+                    if resolution.blocked_by_evidence:
+                        self._handle_evidence_block(
                             state=state,
-                            status="message_complete",
-                            summary=action.summary,
-                            success=True,
-                            completion_kind="message_complete",
-                        )
-                    if action.status == "success" and decision.missing:
-                        if delivery_kind == "code_change":
-                            state.delivery_kind = "code_change"
-                        self.trace_logger.record_agent_action(
-                            action_type=action.type,
-                            tool_name=None,
-                            input=agent_action_to_trace_input(action),
-                            success=False,
-                            error="finish success blocked by evidence gate",
-                            metadata={
-                                "parse_success": True,
-                                "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
-                                "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
-                                "non_standard_fields": parsed_action.normalization_metadata.get("non_standard_fields", []),
-                                "normalization_conflicts": parsed_action.normalization_metadata.get("conflicts", []),
-                                "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
-                                "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
-                                "finish_blocked_by_evidence": True,
-                                "requested_status": action.status,
-                                "delivery_kind": delivery_kind,
-                                "missing_evidence": list(state.missing_evidence),
-                                "requires_evidence": state.requires_evidence,
-                                "tests_required": state.tests_required,
-                                "diff_required": state.diff_required,
-                                "write_attempted": state.write_attempted,
-                                "write_executed": state.write_executed,
-                                "written_files": list(state.written_files),
-                                "observed_changed_files": list(state.observed_changed_files),
-                                "claimed_changed_files": list(state.claimed_changed_files),
-                                "last_test_status": state.last_test_status,
-                                "diff_checked": state.diff_checked,
-                            },
-                        )
-                        state.messages.append(ChatMessage(role="assistant", content=response.content))
-                        observation = format_finish_blocked_observation(
-                            missing_evidence=list(state.missing_evidence),
-                            last_test_status=state.last_test_status,
-                            last_test_command=state.last_test_command,
-                            diff_checked=state.diff_checked,
-                            written_files=list(state.written_files),
-                        )
-                        state.messages.append(ChatMessage(role="user", content=observation))
-                        self.trace_logger.record_agent_observation(
-                            tool_name=None,
-                            observation=observation,
-                            metadata={
-                                "finish_blocked_by_evidence": True,
-                                "missing_evidence": list(state.missing_evidence),
-                                "requires_evidence": state.requires_evidence,
-                                "tests_required": state.tests_required,
-                                "diff_required": state.diff_required,
-                                "delivery_kind": delivery_kind,
-                                "write_attempted": state.write_attempted,
-                                "write_executed": state.write_executed,
-                                "written_files": list(state.written_files),
-                                "observed_changed_files": list(state.observed_changed_files),
-                                "claimed_changed_files": list(state.claimed_changed_files),
-                                "last_test_status": state.last_test_status,
-                                "diff_checked": state.diff_checked,
-                            },
+                            action=action,
+                            parsed_action=parsed_action,
+                            response_content=response.content,
+                            delivery_kind=delivery_kind,
                         )
                         continue
-                    self.trace_logger.record_agent_action(
-                        action_type=action.type,
-                        tool_name=None,
-                        input=agent_action_to_trace_input(action),
-                        success=True,
-                        metadata={
-                            "parse_success": True,
-                            "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
-                            "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
-                            "non_standard_fields": parsed_action.normalization_metadata.get("non_standard_fields", []),
-                            "normalization_conflicts": parsed_action.normalization_metadata.get("conflicts", []),
-                            "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
-                            "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
-                            "requested_status": action.status,
-                            "effective_status": "success",
-                            "status_normalized": False,
-                            "completion_kind": "task_success",
-                            "assistant_stop_reason": "structured_finish",
-                            "requires_evidence": state.requires_evidence,
-                            "missing_evidence": list(state.missing_evidence),
-                        },
-                    )
-                    mark_finished_from_action(
-                        state,
-                        action,
-                        effective_status="success",
-                        completion_kind="task_success",
+                    return self._finish_from_action(
+                        state=state,
+                        action=action,
+                        parsed_action=parsed_action,
+                        resolution=resolution,
                         delivery_kind=delivery_kind,
                     )
-                    self.trace_logger.record_agent_finish(
-                        status="success",
-                        success=True,
-                        summary=action.summary,
-                        metadata={
-                            "requested_status": action.status,
-                            "effective_status": "success",
-                            "status_normalized": False,
-                            "completion_kind": "task_success",
-                            "assistant_stop_reason": state.assistant_stop_reason,
-                            "requires_evidence": state.requires_evidence,
-                            "evidence_reasons": list(state.evidence_reasons),
-                            "missing_evidence": list(state.missing_evidence),
-                            "tests_required": state.tests_required,
-                            "diff_required": state.diff_required,
-                            "diff_checked": state.diff_checked,
-                            "write_attempted": state.write_attempted,
-                            "write_executed": state.write_executed,
-                            "written_files": list(state.written_files),
-                            "observed_changed_files": list(state.observed_changed_files),
-                            "claimed_changed_files": list(state.claimed_changed_files),
-                            "changed_files": list(state.changed_files),
-                            "tests": action.tests,
-                        },
-                    )
-                    self.trace_logger.record_run_end(
-                        success=True,
-                        summary=action.summary,
-                        metadata={
-                            "status": "success",
-                            "completion_kind": "task_success",
-                            "assistant_stop_reason": state.assistant_stop_reason,
-                            "delivery_kind": delivery_kind,
-                            "requires_evidence": state.requires_evidence,
-                            "missing_evidence": list(state.missing_evidence),
-                            "tests_required": state.tests_required,
-                            "diff_required": state.diff_required,
-                            "diff_checked": state.diff_checked,
-                        },
-                    )
-                    return self._result(state=state, status="success", summary=action.summary, success=True, completion_kind="task_success")
                 self.trace_logger.record_agent_action(
                     action_type=action.type,
                     tool_name=action.tool_name if isinstance(action, AgentToolCallAction) else None,
                     input=agent_action_to_trace_input(action),
                     success=True,
-                    metadata={
-                        "parse_success": True,
-                        "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
-                        "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
-                        "non_standard_fields": parsed_action.normalization_metadata.get("non_standard_fields", []),
-                        "normalization_conflicts": parsed_action.normalization_metadata.get("conflicts", []),
-                        "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
-                        "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
-                    },
+                    metadata=_parsed_action_metadata(parsed_action),
                 )
                 try:
                     injected_args = _inject_repo_if_missing(action.arguments, state.repo)
@@ -683,43 +612,45 @@ class MinimalAgentLoop:
                         side_effect=self._tool_side_effect(action.tool_name),
                         arguments=injected_args,
                     )
-                    refresh_evidence_state(state)
-                    tool_action = ToolAction(
+                except Exception as exc:
+                    self._record_tool_error(
+                        state=state,
+                        response_content=response.content,
                         tool_name=action.tool_name,
-                        arguments=injected_args,
-                        reason=action.short_rationale,
-                        metadata={
-                            "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
-                            "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
-                        },
+                        error=exc,
                     )
-                    if self._cancel_requested():
-                        self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
-                        state.final_status = "cancelled"
-                        state.final_summary = "cancelled"
-                        state.assistant_stop_reason = "cancelled"
-                        state.completion_kind = "cancelled"
-                        return self._result(state=state, status="cancelled", summary="cancelled", success=False, error="cancelled")
+                    continue
+                refresh_evidence_state(state)
+                tool_action = ToolAction(
+                    tool_name=action.tool_name,
+                    arguments=injected_args,
+                    reason=action.short_rationale,
+                    metadata={
+                        "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
+                        "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
+                    },
+                )
+                # Router 可能等待权限审批，进入前检查可避免取消后继续阻塞。
+                if self._cancel_requested():
+                    return self._cancelled_result(state)
+                try:
                     route_result = self.router.route(tool_action)
                 except Exception as exc:
-                    observation = (
-                        "Your previous tool_call could not be executed.\n"
-                        f"Error: {exc}\n"
-                        'Use natural text for normal replies, or return one JSON object for tool_call / finish.'
+                    # Router 可能因权限等待被取消而抛错；此时取消状态优先，不生成误导性的工具错误。
+                    if self._cancel_requested():
+                        return self._cancelled_result(state)
+                    self._record_tool_error(
+                        state=state,
+                        response_content=response.content,
+                        tool_name=action.tool_name,
+                        error=exc,
                     )
-                    state.messages.append(ChatMessage(role="assistant", content=response.content))
-                    state.messages.append(ChatMessage(role="user", content=observation))
-                    self.trace_logger.record_agent_observation(tool_name=action.tool_name, observation=observation)
                     continue
                 update_state_from_route_result(state, route_result)
                 refresh_evidence_state(state)
+                # 权限等待或工具执行结束后再次检查，取消结果优先于工具 observation。
                 if self._cancel_requested():
-                    self.trace_logger.record_run_cancelled(metadata={"source": "minimal_agent_loop"})
-                    state.final_status = "cancelled"
-                    state.final_summary = "cancelled"
-                    state.assistant_stop_reason = "cancelled"
-                    state.completion_kind = "cancelled"
-                    return self._result(state=state, status="cancelled", summary="cancelled", success=False, error="cancelled")
+                    return self._cancelled_result(state)
                 observation = format_observation(route_result)
                 state.messages.append(ChatMessage(role="assistant", content=response.content))
                 state.messages.append(ChatMessage(role="user", content=observation))
@@ -728,25 +659,10 @@ class MinimalAgentLoop:
                     observation=observation,
                     metadata={"success": route_result.success},
                 )
-        except FakeLLMExhaustedError as exc:
-            state.final_status = "llm_exhausted"
-            state.final_summary = "llm_exhausted"
-            state.assistant_stop_reason = "llm_exhausted"
-            state.completion_kind = "runtime_failure"
-            self.trace_logger.record_run_end(success=False, summary="llm_exhausted", metadata={"status": "llm_exhausted", "error": str(exc), "completion_kind": "runtime_failure", "assistant_stop_reason": "llm_exhausted"})
-            return self._result(state=state, status="llm_exhausted", summary="llm_exhausted", success=False, error=str(exc), completion_kind="runtime_failure")
         except KeyboardInterrupt:
             raise
-        except Exception as exc:
-            state.final_status = "llm_error"
-            state.final_summary = "llm_error"
-            state.assistant_stop_reason = "llm_error"
-            state.completion_kind = "runtime_failure"
-            self.trace_logger.record_run_end(success=False, summary="llm_error", metadata={"status": "llm_error", "error": str(exc), "completion_kind": "runtime_failure", "assistant_stop_reason": "llm_error"})
-            return self._result(state=state, status="llm_error", summary="llm_error", success=False, error=str(exc), completion_kind="runtime_failure")
-        state.final_status = "max_steps_exceeded"
-        state.final_summary = "max_steps_exceeded"
-        state.assistant_stop_reason = "max_steps"
-        state.completion_kind = "runtime_failure"
-        self.trace_logger.record_run_end(success=False, summary="max_steps_exceeded", metadata={"status": "max_steps_exceeded", "completion_kind": "runtime_failure", "assistant_stop_reason": "max_steps"})
-        return self._result(state=state, status="max_steps_exceeded", summary="max_steps_exceeded", success=False, completion_kind="runtime_failure")
+        return self._runtime_failure_result(
+            state,
+            status="max_steps_exceeded",
+            stop_reason="max_steps",
+        )

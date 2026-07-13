@@ -562,9 +562,9 @@ def agent_run(
     typer.echo(f"Success: {str(result.success).lower()}")
     typer.echo(f"Steps: {result.steps}")
     typer.echo("Changed files:")
-    for path in result.changed_files:
+    for path in result.outcome.changed_files:
         typer.echo(f"- {path}")
-    typer.echo(f"Tests: {result.last_test_status or 'unknown'}")
+    typer.echo(f"Tests: {result.outcome.last_test_status or 'unknown'}")
     typer.echo(f"Policy violations: {result.policy_violations}")
     typer.echo(f"Trace: {result.trace_path}")
     typer.echo(f"MCP config: {mcp_config or 'none'}")

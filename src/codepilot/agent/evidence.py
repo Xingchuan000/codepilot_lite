@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 import shlex
 from dataclasses import dataclass
 from typing import Literal
@@ -29,78 +28,42 @@ class EvidenceDecision:
     success_allowed: bool
 
 
-_READ_ONLY_PHRASES = (
-    "不要改代码",
-    "不要修改",
-    "只读",
-    "仅分析",
-    "只分析",
-    "只解释",
-    "无需修改",
-    "不要写文件",
-    "do not modify",
-    "do not change",
-    "don't modify",
-    "don't change",
-    "read only",
-    "read-only",
-    "analysis only",
-    "explain only",
-    "without changing code",
-)
-_MODIFY_PHRASES = (
-    "修复",
-    "修改",
-    "实现",
-    "添加",
-    "删除",
-    "重构",
-    "改成",
-    "补丁",
-    "生成代码",
-    "优化代码",
-    "解决报错",
-    "让它支持",
-    "新增功能",
-    "fix",
-    "modify",
-    "implement",
-    "add",
-    "remove",
-    "refactor",
-    "patch",
-    "change",
-    "update code",
-    "resolve error",
-    "make it support",
-    "add feature",
-)
+@dataclass(frozen=True)
+class EvidenceSnapshot:
+    """一次运行结束时不可变的证据快照。
 
+    AgentState 使用 list 维护运行中的可变状态；结束结果、Trace 和 TUI 则需要稳定的数据。
+    因此快照内部统一使用 tuple，只在生成 JSON 兼容 payload 时转换为 list。
+    """
 
-def _contains_chinese_phrase(task: str, phrases: tuple[str, ...]) -> bool:
-    return any(phrase in task for phrase in phrases if any(ord(char) > 127 for char in phrase))
+    requires_evidence: bool
+    reasons: tuple[str, ...]
+    write_attempted: bool
+    write_executed: bool
+    written_files: tuple[str, ...]
+    observed_changed_files: tuple[str, ...]
+    claimed_changed_files: tuple[str, ...]
+    tests_required: bool
+    diff_required: bool
+    diff_checked: bool
+    missing: tuple[str, ...]
 
+    def to_payload(self) -> dict[str, object]:
+        """按现有 Trace/TUI 字段契约生成可序列化 payload。"""
 
-def _contains_english_phrase(task: str, phrases: tuple[str, ...]) -> bool:
-    lowered = task.lower()
-    for phrase in phrases:
-        if any(ord(char) > 127 for char in phrase):
-            continue
-        pattern = r"\b" + re.escape(phrase.lower()) + r"\b"
-        if re.search(pattern, lowered):
-            return True
-    return False
-
-
-def classify_task_intent(task: str) -> TaskIntent:
-    text = task.strip()
-    if not text:
-        return "general"
-    if _contains_chinese_phrase(text, _READ_ONLY_PHRASES) or _contains_english_phrase(text, _READ_ONLY_PHRASES):
-        return "read_only"
-    if _contains_chinese_phrase(text, _MODIFY_PHRASES) or _contains_english_phrase(text, _MODIFY_PHRASES):
-        return "code_delivery"
-    return "general"
+        return {
+            "requires_evidence": self.requires_evidence,
+            "evidence_reasons": list(self.reasons),
+            "write_attempted": self.write_attempted,
+            "write_executed": self.write_executed,
+            "written_files": list(self.written_files),
+            "observed_changed_files": list(self.observed_changed_files),
+            "claimed_changed_files": list(self.claimed_changed_files),
+            "tests_required": self.tests_required,
+            "diff_required": self.diff_required,
+            "diff_checked": self.diff_checked,
+            "missing_evidence": list(self.missing),
+        }
 
 
 def shell_command_may_write(command: str) -> bool:
@@ -138,7 +101,6 @@ def evaluate_evidence(
     write_attempted: bool,
     write_executed: bool,
     written_files: list[str],
-    observed_changed_files: list[str],
     claimed_changed_files: list[str],
     last_test_status: str | None,
     diff_checked: bool,
@@ -170,9 +132,6 @@ def evaluate_evidence(
         missing.append("missing_passed_tests")
     if diff_required and not diff_checked:
         missing.append("missing_diff_check")
-    if observed_changed_files:
-        # 这里只记录证据判断不依赖观测脏文件的事实，不把它们直接视为本轮修改证据。
-        pass
     return EvidenceDecision(
         requires_evidence=requires_evidence,
         tests_required=tests_required,

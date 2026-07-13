@@ -12,7 +12,8 @@ from codepilot.tui_agent.config import merge_config
 from codepilot.tui_agent.event_reducer import EventReducer
 from codepilot.tui_agent.event_stream import MemoryEventStream
 from codepilot.tui_agent.layout import format_header, format_side_status, format_transcript_item, format_transcript_plain
-from codepilot.tui_agent.models import PermissionMode, PermissionResponse, ProjectContext, TUIEvent
+from codepilot.permissions import PermissionResponse
+from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
@@ -137,7 +138,7 @@ def create_tui_agent_app(
             )
 
         def action_approve(self) -> None:
-            request_id = self.request.get("request_id") or self.request.get("permission_request_id")
+            request_id = self.request.get("request_id")
             if not request_id:
                 event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "permission request missing request_id"}))
                 self.dismiss()
@@ -153,7 +154,7 @@ def create_tui_agent_app(
             self.dismiss()
 
         def action_deny(self) -> None:
-            request_id = self.request.get("request_id") or self.request.get("permission_request_id")
+            request_id = self.request.get("request_id")
             if not request_id:
                 event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "permission request missing request_id"}))
                 self.dismiss()
@@ -333,7 +334,7 @@ def create_tui_agent_app(
             for event in events:
                 if event.type != "permission_requested":
                     continue
-                request_id = event.payload.get("request_id") or event.payload.get("permission_request_id")
+                request_id = event.payload.get("request_id")
                 if not request_id:
                     continue
                 request_id = str(request_id)

@@ -2,16 +2,20 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from codepilot.policy import PolicyChecker, PolicyContext, PolicyDecision
+from codepilot.permissions import (
+    PermissionBroker,
+    PermissionRequest,
+    PermissionResponse,
+    make_permission_request_id,
+    permission_now_iso,
+)
 from codepilot.router.actions import ToolAction, ToolRouteResult
 from codepilot.tools.base import ToolResult
 from codepilot.tools.registry import call_external_tool_traced, call_tool_traced
 from codepilot.trace.logger import TraceLogger
-from codepilot.tui_agent.permission_broker import PermissionBroker, make_permission_request_id
-from codepilot.tui_agent.models import PermissionRequest
-from codepilot.tui_agent.session_store import now_iso
 
 
 class ToolRouter:
@@ -73,6 +77,11 @@ class ToolRouter:
             "approved": self.policy_context.approved,
         }
 
+    def _permission_decision(self, response: PermissionResponse | None) -> Literal["approve_once", "deny"]:
+        if response is not None and response.decision == "approve_once":
+            return "approve_once"
+        return "deny"
+
     def route(self, action: ToolAction | Mapping[str, Any]) -> ToolRouteResult:
         """执行单个 tool action。"""
 
@@ -131,7 +140,7 @@ class ToolRouter:
                         risk=policy_metadata.get("risk") if isinstance(policy_metadata.get("risk"), str) else None,
                         side_effect=policy_metadata.get("side_effect") if isinstance(policy_metadata.get("side_effect"), str) else None,
                         matched_rule=decision.matched_rule,
-                        created_at=now_iso(),
+                        created_at=permission_now_iso(),
                     )
                     self.permission_broker.request(request)
                     self.trace_logger.record_permission_request(
@@ -146,8 +155,8 @@ class ToolRouter:
                             "matched_rule": decision.matched_rule,
                         },
                     )
-                    response = getattr(self.permission_broker, "wait", lambda _request_id: None)(request.request_id)
-                    decision_value = "approve_once" if response is not None and response.decision == "approve_once" else "deny"
+                    response = self.permission_broker.wait(request.request_id)
+                    decision_value = self._permission_decision(response)
                     self.trace_logger.record_permission_response(
                         request_id=request.request_id,
                         decision=decision_value,

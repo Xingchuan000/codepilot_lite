@@ -714,7 +714,7 @@ def run_pr_feedback_loop(
             attempt_manifest_path=attempt.attempt_dir / "followup_attempt_manifest.json",
             patch_metadata=patch_metadata,
             issue_title=str((auto_pr_manifest.get("pr_request") or {}).get("title") or pr.url),
-            tests_summary=followup_result.last_test_status,
+            tests_summary=followup_result.outcome.last_test_status,
             run_id=run_id,
         )
         commit_created = True

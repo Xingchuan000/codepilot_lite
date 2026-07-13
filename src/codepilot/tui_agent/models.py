@@ -4,6 +4,9 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from codepilot.agent.outcome import RunOutcomeSnapshot
+from codepilot.permissions import PermissionRequest
+
 
 PermissionMode = Literal["manual", "read_only", "accept_edits", "unsafe_auto"]
 RunStatus = Literal[
@@ -105,6 +108,51 @@ class TUISessionRunRef:
     missing_evidence: tuple[str, ...] = ()
     tests: str | None = None
 
+    @classmethod
+    def from_outcome(
+        cls,
+        *,
+        run_id: str,
+        task_preview: str,
+        outcome: RunOutcomeSnapshot,
+        trace_path: str | None,
+        report_path: str | None,
+        report_json_path: str | None,
+        started_at: str,
+        ended_at: str,
+    ) -> "TUISessionRunRef":
+        """从统一运行结果构造 Session 索引项。
+
+        Session v1 的字段名和层级保持不变；这里只负责将不可变 Outcome 映射到已有
+        持久化模型，避免 Runner 再逐项复制 Evidence 字段。
+        """
+
+        evidence = outcome.evidence
+        return cls(
+            run_id=run_id,
+            task_preview=task_preview,
+            status=outcome.status,
+            trace_path=trace_path,
+            report_path=report_path,
+            report_json_path=report_json_path,
+            started_at=started_at,
+            ended_at=ended_at,
+            completion_kind=outcome.completion_kind,
+            assistant_stop_reason=outcome.assistant_stop_reason,
+            delivery_kind=outcome.delivery_kind,
+            requires_evidence=evidence.requires_evidence,
+            evidence_reasons=evidence.reasons,
+            write_attempted=evidence.write_attempted,
+            write_executed=evidence.write_executed,
+            written_files=evidence.written_files,
+            changed_files=outcome.changed_files,
+            tests_required=evidence.tests_required,
+            diff_required=evidence.diff_required,
+            diff_checked=evidence.diff_checked,
+            missing_evidence=evidence.missing,
+            tests=outcome.last_test_status,
+        )
+
 
 @dataclass(frozen=True)
 class TUISession:
@@ -125,29 +173,6 @@ class TUISession:
     runs: tuple[TUISessionRunRef, ...] = ()
     last_run_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class PermissionRequest:
-    request_id: str
-    run_id: str
-    action_id: str | None
-    tool_name: str
-    arguments_preview: dict[str, Any]
-    reason: str
-    risk: str | None
-    side_effect: str | None
-    matched_rule: str | None
-    created_at: str
-    status: Literal["pending", "approved", "denied", "expired"] = "pending"
-
-
-@dataclass(frozen=True)
-class PermissionResponse:
-    request_id: str
-    decision: Literal["approve_once", "deny"]
-    reason: str | None
-    responded_at: str
 
 
 @dataclass(frozen=True)

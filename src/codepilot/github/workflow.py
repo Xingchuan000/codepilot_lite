@@ -348,8 +348,8 @@ def run_issue_workflow(
                 "status": agent_result.status,
                 "success": agent_result.success,
                 "final_summary": agent_result.summary,
-                "changed_files": agent_result.changed_files,
-                "tests": {"status": agent_result.last_test_status},
+                "changed_files": list(agent_result.outcome.changed_files),
+                "tests": {"status": agent_result.outcome.last_test_status},
             }
         status = agent_result.status
         success = agent_result.success

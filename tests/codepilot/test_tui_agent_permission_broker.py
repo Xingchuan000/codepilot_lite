@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from codepilot.tui_agent.models import PermissionRequest, PermissionResponse
+from codepilot.permissions import PermissionRequest, PermissionResponse
 from codepilot.tui_agent.permission_broker import AutoApproveLocalWriteBroker, BlockingTUIBroker, TestBroker
 
 
@@ -154,3 +154,37 @@ def test_test_broker_clears_pending_after_wait() -> None:
 
     assert broker.wait("perm-3") is not None
     assert broker.wait("perm-3") is None
+
+
+def test_non_interactive_broker_is_safe_to_call() -> None:
+    from codepilot.tui_agent.permission_broker import NonInteractiveBroker
+
+    broker = NonInteractiveBroker()
+
+    assert broker.wait("perm-4") is None
+    assert broker.cancel_all("cancelled") is None
+
+
+def test_auto_approve_local_write_delegates_cancel_all() -> None:
+    inner = TestBroker()
+    broker = AutoApproveLocalWriteBroker(inner)
+    request = PermissionRequest(
+        request_id="perm-5",
+        run_id="run-1",
+        action_id="act-1",
+        tool_name="run_shell",
+        arguments_preview={},
+        reason="need approval",
+        risk="shell_execution",
+        side_effect="local_exec",
+        matched_rule="tool.default_permission.ask",
+        created_at="2024-01-01T00:00:00Z",
+    )
+
+    broker.request(request)
+    broker.cancel_all("cancelled")
+
+    response = inner.wait("perm-5")
+
+    assert response is not None
+    assert response.decision == "deny"

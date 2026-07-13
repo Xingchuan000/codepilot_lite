@@ -23,6 +23,62 @@ def test_trace_logger_writes_jsonl(tmp_path) -> None:
     assert json.loads(lines[0])["event_type"] == "run_start"
 
 
+def test_trace_logger_notifies_record_hook_with_written_event(tmp_path) -> None:
+    received: list[TraceEvent] = []
+    logger = TraceLogger(runs_dir=tmp_path, run_id="run-test", record_hook=received.append)
+    event = TraceEvent(run_id="run-test", step=logger.next_step, event_type="run_start")
+
+    assert logger.record(event) is event
+    assert received == [event]
+    assert logger.last_record_hook_error is None
+
+
+def test_trace_logger_exposes_hook_failure_after_trace_is_written(tmp_path) -> None:
+    errors: list[tuple[Exception, TraceEvent]] = []
+
+    def broken_hook(_event: TraceEvent) -> None:
+        raise RuntimeError("event bridge failed")
+
+    logger = TraceLogger(
+        runs_dir=tmp_path,
+        run_id="run-test",
+        record_hook=broken_hook,
+        record_hook_error=lambda error, event: errors.append((error, event)),
+    )
+    event = TraceEvent(run_id="run-test", step=logger.next_step, event_type="run_start")
+
+    assert logger.record(event) is event
+    assert json.loads(logger.trace_path.read_text(encoding="utf-8"))["event_type"] == "run_start"
+    assert logger.last_record_hook_error is not None
+    assert logger.last_record_hook_error[0] is errors[0][0]
+    assert logger.last_record_hook_error[1] is event
+    assert errors[0][1] is event
+
+
+def test_trace_logger_error_callback_failure_does_not_escape(tmp_path) -> None:
+    def broken_hook(_event: TraceEvent) -> None:
+        raise RuntimeError("event bridge failed")
+
+    def broken_error_hook(_error: Exception, _event: TraceEvent) -> None:
+        raise RuntimeError("diagnostic bridge failed")
+
+    logger = TraceLogger(
+        runs_dir=tmp_path,
+        run_id="run-test",
+        record_hook=broken_hook,
+        record_hook_error=broken_error_hook,
+    )
+    event = TraceEvent(run_id="run-test", step=logger.next_step, event_type="run_start")
+
+    assert logger.record(event) is event
+    assert json.loads(logger.trace_path.read_text(encoding="utf-8"))["event_type"] == "run_start"
+    assert logger.last_record_hook_error is not None
+    assert str(logger.last_record_hook_error[0]) == "event bridge failed"
+    assert logger.last_record_hook_error_callback_error is not None
+    assert str(logger.last_record_hook_error_callback_error[0]) == "diagnostic bridge failed"
+    assert logger.last_record_hook_error_callback_error[1] is event
+
+
 def test_trace_logger_creates_run_directory(tmp_path) -> None:
     logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
 
@@ -56,6 +112,7 @@ def test_trace_logger_skips_bad_json_lines(tmp_path) -> None:
 def test_trace_logger_record_run_start_and_end(tmp_path) -> None:
     logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
 
+    assert logger.terminal_recorded is False
     logger.record_run_start(task="demo task", metadata={"source": "test"})
     logger.record_run_end(success=True, summary="done", metadata={"checked": True})
 
@@ -70,6 +127,16 @@ def test_trace_logger_record_run_start_and_end(tmp_path) -> None:
     assert end_event["success"] is True
     assert end_event["output_summary"] == "done"
     assert end_event["metadata"]["checked"] is True
+    assert logger.terminal_recorded is True
+
+
+def test_trace_logger_restores_terminal_state_from_existing_trace(tmp_path) -> None:
+    logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
+    logger.record_run_cancelled(metadata={"source": "test"})
+
+    reopened = TraceLogger(runs_dir=tmp_path, run_id="run-test")
+
+    assert reopened.terminal_recorded is True
 
 
 def test_trace_logger_record_policy_decision(tmp_path) -> None:

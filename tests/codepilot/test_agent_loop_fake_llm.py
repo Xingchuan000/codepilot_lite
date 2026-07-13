@@ -6,8 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from codepilot.agent.loop import MinimalAgentLoop
+from codepilot.agent.actions import AgentFinishAction
+from codepilot.agent.evidence import EvidenceDecision
+from codepilot.agent.loop import MinimalAgentLoop, _resolve_finish
 from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.types import ChatMessage, LLMResponse
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
 from codepilot.trace.logger import TraceLogger
@@ -49,6 +52,21 @@ def _event_types(events: list[dict]) -> list[str]:
     return [event["event_type"] for event in events]
 
 
+class _CancelledToken:
+    def is_cancelled(self) -> bool:
+        return True
+
+
+class _RaisingLLM:
+    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
+        raise RuntimeError("provider unavailable")
+
+
+class _InvalidResponseLLM:
+    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
+        return LLMResponse(content=1)  # type: ignore[arg-type]
+
+
 def test_loop_rejects_different_trace_logger(tmp_path: Path) -> None:
     router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs-a", run_id="a")
     other_logger = TraceLogger(runs_dir=tmp_path / "runs-b", run_id="b")
@@ -59,6 +77,97 @@ def test_loop_rejects_different_trace_logger(tmp_path: Path) -> None:
             router=router,
             trace_logger=other_logger,
         )
+
+
+def test_resolve_finish_keeps_existing_status_decision_table() -> None:
+    complete = EvidenceDecision(False, False, False, (), (), True)
+    missing = EvidenceDecision(True, True, True, ("write_executed",), ("missing_passed_tests",), False)
+
+    assert _resolve_finish(
+        AgentFinishAction(type="finish", status="failed", summary="failed"),
+        delivery_kind="message",
+        evidence=complete,
+    ).completion_kind == "task_failed"
+    assert _resolve_finish(
+        AgentFinishAction(type="finish", status="partial", summary="partial"),
+        delivery_kind="code_change",
+        evidence=missing,
+    ).completion_kind == "task_partial"
+    assert _resolve_finish(
+        AgentFinishAction(type="finish", status="success", summary="blocked"),
+        delivery_kind="code_change",
+        evidence=missing,
+    ).blocked_by_evidence is True
+    message = _resolve_finish(
+        AgentFinishAction(type="finish", status="success", summary="message"),
+        delivery_kind="message",
+        evidence=complete,
+    )
+    assert (message.status, message.completion_kind, message.success, message.status_normalized) == (
+        "message_complete",
+        "message_complete",
+        True,
+        True,
+    )
+    success = _resolve_finish(
+        AgentFinishAction(type="finish", status="success", summary="success"),
+        delivery_kind="code_change",
+        evidence=complete,
+    )
+    assert (success.status, success.completion_kind, success.success) == ("success", "task_success", True)
+
+
+def test_cancelled_result_is_recorded_once_before_llm_call(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-cancelled")
+    result = MinimalAgentLoop(
+        llm=FakeLLMClient(["unused"]),
+        router=router,
+        max_steps=1,
+        cancellation_token=_CancelledToken(),
+    ).run("Inspect repo", repo)
+    events = _read_trace_events(Path(result.trace_path))
+
+    assert result.status == "cancelled"
+    assert result.steps == 0
+    assert _event_types(events).count("run_cancelled") == 1
+    assert "llm_call" not in _event_types(events)
+
+
+def test_llm_exception_is_runtime_failure(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-llm-error")
+
+    result = MinimalAgentLoop(llm=_RaisingLLM(), router=router, max_steps=1).run("Inspect repo", repo)
+
+    assert result.status == "llm_error"
+    assert result.assistant_stop_reason == "llm_error"
+    assert result.completion_kind == "runtime_failure"
+    assert result.error == "provider unavailable"
+
+
+def test_non_llm_processing_error_is_not_mislabeled_as_llm_error(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-invalid-response")
+
+    with pytest.raises(TypeError):
+        MinimalAgentLoop(llm=_InvalidResponseLLM(), router=router, max_steps=1).run("Inspect repo", repo)
+
+    events = _read_trace_events(router.trace_logger.trace_path)
+    assert not any(event["event_type"] == "run_end" and event.get("metadata", {}).get("status") == "llm_error" for event in events)
+
+
+def test_fake_llm_exhaustion_uses_runtime_failure_helper(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+
+    result = _build_loop(tmp_path, [], max_steps=1).run("Inspect repo", repo)
+    events = _read_trace_events(Path(result.trace_path))
+
+    assert result.status == "llm_exhausted"
+    assert result.assistant_stop_reason == "llm_exhausted"
+    assert result.completion_kind == "runtime_failure"
+    assert events[-1]["event_type"] == "run_end"
+    assert events[-1]["metadata"]["status"] == "llm_exhausted"
 
 
 def test_fake_loop_greeting_becomes_message_complete(tmp_path: Path) -> None:

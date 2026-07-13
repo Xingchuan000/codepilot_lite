@@ -254,6 +254,136 @@ print(format_transcript_plain((item,)))
 可用的 transcript kind 包括 `user_message`、`assistant_plan`、`assistant_action`、`assistant_raw`、`tool_result`、`permission_request`、`permission_response`、`final_summary`、`command_output`、`system_status` 和 `error`。
 如果需要显示右侧状态摘要，可以直接调用 `format_side_status(...)`，它默认不会展示完整的 `report.json`、`report.md` 或 `trace.jsonl` 路径。
 
+### Phase 0-2 使用说明
+
+这次重构后，权限和事件契约有两个最直接的变化：
+
+- 权限请求和响应类型统一从 `codepilot.permissions` 导入。
+- TUI 的权限弹窗和 reducer 只读取标准字段 `request_id`，不再依赖旧的 `permission_request_id`。
+- `run_start` 和 `run_end` 仍会写入 trace 文件，但不会再作为重复的 TUI 生命周期事件显示。
+
+常用入口没有变化，还是下面这几个命令：
+
+```bash
+# 启动交互式 TUI
+codepilot tui <project>
+
+# 路由一个结构化工具动作
+codepilot route '{"tool_name":"list_files","arguments":{"repo":".","path":".","max_depth":2}}'
+
+# 直接调用一个工具
+codepilot tool list_files '{"repo":".","path":".","max_depth":2,"max_entries":200,"offset":0}'
+```
+
+在 TUI 里，`/permissions` 仍然可以切换 `manual`、`read_only`、`accept_edits` 和 `unsafe_auto` 四种模式。
+其中 `accept_edits` 仍然会自动批准本地写入，但不会影响其他需要确认的动作。
+
+### Phase 3 运行结果快照使用说明
+
+Phase 3 将运行结束状态集中到 `RunOutcomeSnapshot`，TUI Session 和 `run_finished` 事件现在使用同一份 Outcome 数据，外部 Session JSON 的字段名和层级没有变化。
+
+如果需要在 Python 中读取新结构，优先访问 `result.outcome`：
+
+```python
+result = run_agent_task(task="fix add", repo=".")
+
+print(result.outcome.status)
+print(result.outcome.completion_kind)
+print(result.outcome.changed_files)
+print(result.outcome.last_test_status)
+print(result.outcome.evidence.missing)
+print(result.outcome.to_payload())
+```
+
+`outcome.to_payload()` 返回 TUI 结束事件使用的标准顶层字段，其中集合会在序列化边界转换为 list。为避免破坏已有调用，`result.changed_files`、`result.last_test_status` 和其他原有结果属性仍可只读访问；新代码应使用 `result.outcome`。
+
+TUI 的启动方式、权限模式和 Session 文件位置均未改变。已有的 `session.json` 仍由 `SessionStore.load_session()` 按原有 v1 Schema 读取，不需要迁移。
+
+### Phase 4 Agent 结束与异常状态说明
+
+Phase 4 没有改变 Agent 的调用命令、Prompt 或 Action JSON Schema，主要收敛了 Agent Loop 内部的结束和异常分类。继续使用原有命令即可：
+
+```bash
+codepilot agent-run "Fix the failing test" --repo . --approve
+```
+
+运行结果的状态含义保持不变：
+
+- 自然文本回复或非代码交付的成功 finish 返回 `message_complete`。
+- 代码交付证据完整时返回 `success`；缺少写入、测试或 diff 证据时继续下一轮。
+- 模型明确返回 `failed` 或 `partial` 时分别结束为 `failed`、`partial`。
+- 用户取消返回 `cancelled`，并且只记录一次有效的取消 Trace。
+- Fake LLM 响应耗尽返回 `llm_exhausted`；只有 `llm.complete()` 本身抛出的其他异常才返回 `llm_error`。
+- 达到最大步数返回 `max_steps_exceeded`，其 `completion_kind` 仍为 `runtime_failure`。
+
+Trace、状态更新或其他 Agent 内部编程错误不会再被错误包装为 `llm_error`：TUI Runner 会按既有异常结束流程处理，CLI 则会直接显示异常。工具参数准备和 `router.route()` 的执行异常仍会作为 observation 返回给模型，使模型可以修正动作后继续运行。
+
+### Phase 5 Post-PR 类型化状态使用说明
+
+Phase 5 没有改变 `codepilot post-pr` 的命令参数、审批范围、安全分支检查或产物 JSON Schema。命令行仍按原有方式先生成审批请求，再使用 `--resume` 恢复同一轮：
+
+```bash
+# dry-run：只收集反馈并生成审批请求，不执行 Agent、Push 或 Comment
+codepilot post-pr --run-dir runs/<run_id> --overwrite
+
+# 审批后恢复同一 round_id；approval file 必须位于 run_dir/post_pr 内
+codepilot post-pr \
+  --run-dir runs/<run_id> \
+  --execute \
+  --resume \
+  --approval-file runs/<run_id>/post_pr/approval_decision.json
+```
+
+`state.json` 和 `side_effects.json` 的磁盘结构仍是 `codepilot.post_pr.state.v1` 与 `codepilot.post_pr.side_effects.v1`。加载后，Python API 返回不可变的类型对象：
+
+```python
+from codepilot.post_pr.state_store import load_post_pr_state, load_side_effects
+
+state = load_post_pr_state("runs/<run_id>/post_pr/state.json")
+ledger = load_side_effects("runs/<run_id>/post_pr/side_effects.json", run_id="<run_id>")
+
+if state is not None:
+    print(state.status, state.terminal_reason, state.rounds)
+print(ledger.effects)
+```
+
+状态中的 `rounds`、`blockers`、`warnings` 以及账本中的 `effects` 均为 tuple。更新同一轮应使用 `upsert_round(state, round_ref)`，它会替换相同 `round_id`，不会在 resume 时重复追加；写回仍使用 `write_post_pr_state(...)`。JSON 与 dataclass 的转换只由 State Store 负责，Controller 不再读取裸字典字段。
+
+### Phase 6 Evidence 与 Trace 诊断说明
+
+Phase 6 删除了未接入生产链路的任务关键词分类器。Agent 初始 `task_intent` 仍为 `general`，不会根据“修复”“只分析”等中英文关键词提前决定证据门禁；证据要求继续只依据真实工具写入尝试、实际写入、测试结果、`git_diff` 和结构化 finish 的交付类型动态升级。
+
+`observed_changed_files` 仍会出现在 Agent 状态、运行结果、Trace、TUI 和 Report 中，用于展示 `git_status` 观测到的工作区脏文件，但它不再作为 `evaluate_evidence()` 的输入，也不会被当成本轮真实写入证据。调用 Evidence API 时不再传入该参数：
+
+```python
+from codepilot.agent.evidence import evaluate_evidence
+
+decision = evaluate_evidence(
+    task_requires_code_delivery=True,
+    write_attempted=True,
+    write_executed=True,
+    written_files=["src/example.py"],
+    claimed_changed_files=["src/example.py"],
+    last_test_status="passed",
+    diff_checked=True,
+)
+```
+
+工具 action alias 仍通过工具注册表识别。若注册表查询本身发生编程错误，原始异常会直接暴露，不会再被改写为 `Unknown action alias`。
+
+`TraceLogger` 仍然先写入 `trace.jsonl`，再调用可选的 `record_hook`。Hook 失败不会撤销或阻断已经完成的 Trace 写入；可以通过 `record_hook_error` 接收异常和对应事件，也可以检查 `last_record_hook_error`：
+
+```python
+from codepilot.trace import TraceLogger
+
+def on_hook_error(error, event):
+    print(event.event_type, error)
+
+logger = TraceLogger(record_hook=publish_event, record_hook_error=on_hook_error)
+```
+
+TUI Runner 已将 Trace 事件桥接失败转换为 `source=trace_record_hook` 的 `error` 事件，方便在界面中诊断，同时不改变 Agent、Trace 和 Session 的主流程。如果错误回调自身也失败，TraceLogger 不会重试或改用其他发布通道，而是把该异常保存在 `last_record_hook_error_callback_error`，避免次要诊断链路中断 Agent。
+
 TUI 里现在还支持两种复制方式：
 
 ```text
@@ -404,6 +534,12 @@ codepilot post-pr --run-dir runs/<run_id> --execute --approve-run-agent --approv
 `approval_request.md` 只列出审批范围、相关哈希和待审产物，不包含完整日志、完整 diff、token 或环境变量。  
 `approval_file` 必须放在 `runs/<run_id>/post_pr/` 目录内，不能指向目录外的文件。
 如果要恢复执行，可以加 `--resume`，这样已经成功的 commit / push / comment 不会重复执行。
+如果在 TUI 或事件流里看到 `type="error"` 的诊断事件，可以用 `source` 判断阶段：
+
+- `runner_setup` / `agent_runtime` 表示这次执行没有拿到可信的 Agent 结果，最终 `run_finished.status` 会是 `failed`
+- `report_generation` / `session_persistence` 表示 Agent 结果已经完成，只是报告或会话索引写入失败，`run_finished.status` 仍然保持真实 Agent 结果
+- `failure_source` 只会出现在真正的运行失败里，不再把报告失败伪装成 `llm_error`
+
 Known limitation: concurrent post-pr runs with the same `run_id` should be avoided; use one active post-pr process per `run_id`.
 
 ### Controlled Auto PR 使用说明

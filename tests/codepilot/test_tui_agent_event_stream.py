@@ -30,6 +30,7 @@ def test_permission_request_trace_event_is_normalized() -> None:
 
     tui_event = trace_event_to_tui_event(event)
 
+    assert tui_event is not None
     assert tui_event.type == "permission_requested"
     assert tui_event.payload["request_id"] == "perm-1"
     assert tui_event.payload["arguments_preview"] == {"path": "demo.py"}
@@ -48,6 +49,7 @@ def test_permission_response_trace_event_is_normalized() -> None:
 
     tui_event = trace_event_to_tui_event(event)
 
+    assert tui_event is not None
     assert tui_event.type == "permission_resolved"
     assert tui_event.payload["request_id"] == "perm-1"
     assert tui_event.payload["decision"] == "approve_once"
@@ -59,6 +61,7 @@ def test_llm_call_trace_event_maps_to_finished_event() -> None:
 
     tui_event = trace_event_to_tui_event(event)
 
+    assert tui_event is not None
     assert tui_event.type == "llm_call_finished"
 
 
@@ -67,7 +70,16 @@ def test_agent_finish_trace_event_maps_to_finished_event() -> None:
 
     tui_event = trace_event_to_tui_event(event)
 
+    assert tui_event is not None
     assert tui_event.type == "agent_finished"
+
+
+def test_run_start_and_run_end_trace_events_are_not_published() -> None:
+    start_event = TraceEvent(run_id="run-1", step=1, event_type="run_start")
+    end_event = TraceEvent(run_id="run-1", step=2, event_type="run_end")
+
+    assert trace_event_to_tui_event(start_event) is None
+    assert trace_event_to_tui_event(end_event) is None
 
 
 def test_agent_observation_trace_event_maps_to_observation_event() -> None:
@@ -75,6 +87,7 @@ def test_agent_observation_trace_event_maps_to_observation_event() -> None:
 
     tui_event = trace_event_to_tui_event(event)
 
+    assert tui_event is not None
     assert tui_event.type == "agent_observation"
 
 
@@ -83,7 +96,29 @@ def test_tool_call_trace_event_maps_to_tool_finished_event() -> None:
 
     tui_event = trace_event_to_tui_event(event)
 
+    assert tui_event is not None
     assert tui_event.type == "tool_finished"
+
+
+def test_agent_action_trace_event_uses_input_preview() -> None:
+    event = TraceEvent(
+        run_id="run-1",
+        step=7,
+        event_type="agent_action",
+        tool_name="list_files",
+        input={
+            "type": "tool_call",
+            "tool_name": "list_files",
+            "arguments": {"path": ".", "max_depth": 2},
+            "short_rationale": "先检查结构",
+        },
+        metadata={"action_type": "tool_call", "parse_success": True},
+    )
+
+    tui_event = trace_event_to_tui_event(event)
+
+    assert tui_event is not None
+    assert tui_event.payload["input_preview"] == {"max_depth": 2, "path": "."}
 
 
 def test_unknown_trace_event_stays_trace_event() -> None:
@@ -91,6 +126,7 @@ def test_unknown_trace_event_stays_trace_event() -> None:
 
     tui_event = trace_event_to_tui_event(event)
 
+    assert tui_event is not None
     assert tui_event.type == "trace_event"
 
 
@@ -113,6 +149,9 @@ def test_long_natural_reply_survives_trace_preview_pipeline(tmp_path: Path) -> N
             metadata={"assistant_stop_reason": "natural_reply"},
         )
     )
+
+    assert llm_event is not None
+    assert finish_event is not None
 
     view = reducer.reduce(llm_event)
     view = reducer.reduce(finish_event)

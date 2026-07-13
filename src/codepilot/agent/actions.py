@@ -12,14 +12,15 @@ TRACE_TEXT_MAX_CHARS = 1000
 
 
 def _registered_tool_names() -> set[str]:
-    """延迟读取工具名，避免模块导入阶段引入不必要的耦合。"""
+    """延迟读取工具名，注册表故障直接暴露给调用方。
 
-    try:
-        from codepilot.tools.registry import list_tool_specs
+    这里没有可恢复的预期异常。若注册表初始化或工具规格本身损坏，应保留
+    原始异常，而不是把编程错误伪装成模型提交了未知 action alias。
+    """
 
-        return {spec.name for spec in list_tool_specs()}
-    except Exception:
-        return set()
+    from codepilot.tools.registry import list_tool_specs
+
+    return {spec.name for spec in list_tool_specs()}
 
 
 @dataclass(frozen=True)

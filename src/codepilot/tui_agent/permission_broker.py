@@ -2,29 +2,30 @@ from __future__ import annotations
 
 import queue
 import threading
-from uuid import uuid4
 
-from codepilot.tui_agent.models import PermissionRequest, PermissionResponse
-from codepilot.tui_agent.session_store import now_iso
-
-
-class PermissionBroker:
-    def request(self, request: PermissionRequest) -> PermissionRequest:
-        raise NotImplementedError
-
-    def resolve(self, response: PermissionResponse) -> None:
-        raise NotImplementedError
+from codepilot.permissions import (
+    PermissionBroker,
+    PermissionRequest,
+    PermissionResponse,
+    permission_now_iso,
+)
 
 
-class NonInteractiveBroker(PermissionBroker):
+class NonInteractiveBroker:
     def request(self, request: PermissionRequest) -> PermissionRequest:
         return request
 
     def resolve(self, response: PermissionResponse) -> None:
         return None
 
+    def wait(self, request_id: str) -> PermissionResponse | None:
+        return None
 
-class TestBroker(PermissionBroker):
+    def cancel_all(self, reason: str = "cancelled") -> None:
+        return None
+
+
+class TestBroker:
     __test__ = False
 
     def __init__(self) -> None:
@@ -59,7 +60,7 @@ class TestBroker(PermissionBroker):
                 request_id=request_id,
                 decision="deny",
                 reason=reason,
-                responded_at=now_iso(),
+                responded_at=permission_now_iso(),
             )
             pending = self._pending.get(request_id)
             if pending is None:
@@ -80,7 +81,7 @@ class TestBroker(PermissionBroker):
             self._resolved_early.pop(request_id, None)
 
 
-class BlockingTUIBroker(PermissionBroker):
+class BlockingTUIBroker:
     def __init__(self) -> None:
         self._pending: dict[str, queue.Queue[PermissionResponse]] = {}
         self._resolved_early: dict[str, PermissionResponse] = {}
@@ -115,7 +116,7 @@ class BlockingTUIBroker(PermissionBroker):
                     request_id=request_id,
                     decision="deny",
                     reason=reason,
-                    responded_at=now_iso(),
+                    responded_at=permission_now_iso(),
                 )
                 pending = self._pending.get(request_id)
                 if pending is None:
@@ -138,7 +139,7 @@ class BlockingTUIBroker(PermissionBroker):
                 self._resolved_early.pop(request_id, None)
 
 
-class AutoApproveLocalWriteBroker(PermissionBroker):
+class AutoApproveLocalWriteBroker:
     def __init__(self, inner: PermissionBroker) -> None:
         self.inner = inner
 
@@ -159,13 +160,7 @@ class AutoApproveLocalWriteBroker(PermissionBroker):
         self.inner.resolve(response)
 
     def wait(self, request_id: str) -> PermissionResponse | None:
-        return getattr(self.inner, "wait", lambda _request_id: None)(request_id)
+        return self.inner.wait(request_id)
 
     def cancel_all(self, reason: str = "cancelled") -> None:
-        cancel_all = getattr(self.inner, "cancel_all", None)
-        if callable(cancel_all):
-            cancel_all(reason)
-
-
-def make_permission_request_id() -> str:
-    return f"perm-{uuid4().hex[:12]}"
+        self.inner.cancel_all(reason)

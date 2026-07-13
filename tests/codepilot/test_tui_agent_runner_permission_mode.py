@@ -5,11 +5,11 @@ import time
 from pathlib import Path
 
 from codepilot.tui_agent.event_stream import MemoryEventStream
+from codepilot.tui_agent.models import TUISessionRunRef
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker, NonInteractiveBroker
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
 from codepilot.tui_agent.session_store import SessionStore
-from codepilot.tui_agent.models import TUISessionRunRef
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -91,7 +91,16 @@ def test_cancel_current_does_not_poison_next_task(tmp_path: Path) -> None:
 
     assert runner.session.last_run_id is not None
     assert (runner.session.session_dir / "session.json").exists()
-    assert any(event.type == "run_started" for event in event_stream.drain())
+    events = event_stream.drain()
+    assert any(event.type == "run_started" for event in events)
+    finished_payload = next(event.payload for event in events if event.type == "run_finished")
+    run_ref = runner.session.runs[-1]
+    assert finished_payload["status"] == run_ref.status
+    assert finished_payload["changed_files"] == list(run_ref.changed_files)
+    assert finished_payload["evidence_reasons"] == list(run_ref.evidence_reasons)
+    assert finished_payload["written_files"] == list(run_ref.written_files)
+    assert finished_payload["test_status"] == run_ref.tests
+    assert finished_payload["missing_evidence"] == list(run_ref.missing_evidence)
 
 
 def test_cancel_current_wakes_pending_permission(tmp_path: Path) -> None:

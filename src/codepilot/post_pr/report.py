@@ -3,10 +3,8 @@ from __future__ import annotations
 """第十五步 Post-PR automation 的 Markdown 报告。"""
 
 from pathlib import Path
-from typing import Any
-
 from codepilot.pr_feedback.report import markdown_escape_table_cell
-from codepilot.post_pr.models import PostPRAutomationResult
+from codepilot.post_pr.models import PostPRAutomationResult, PostPRAutomationState, SideEffectLedger
 
 
 def _display_path(path: Path | str | None, *, run_dir: Path) -> str:
@@ -37,8 +35,8 @@ def _manual_next_command(result: PostPRAutomationResult) -> str:
 def render_post_pr_automation_report(
     result: PostPRAutomationResult,
     *,
-    state: dict[str, Any] | None = None,
-    side_effects: dict[str, Any] | None = None,
+    state: PostPRAutomationState | None = None,
+    side_effects: SideEffectLedger | None = None,
 ) -> str:
     lines = [
         "# CodePilot Post-PR Automation Report",
@@ -97,11 +95,8 @@ def render_post_pr_automation_report(
         ]
     )
     if side_effects:
-        for effect in side_effects.get("effects") or []:
-            if isinstance(effect, dict):
-                lines.append(
-                    f"- {effect.get('round_id')}: {effect.get('action')} / {effect.get('status')} / {effect.get('commit_sha') or 'n/a'}"
-                )
+        for effect in side_effects.effects:
+            lines.append(f"- {effect.round_id}: {effect.action} / {effect.status} / {effect.commit_sha or 'n/a'}")
     else:
         lines.append("- none")
     lines.extend(
@@ -117,7 +112,7 @@ def render_post_pr_automation_report(
             "",
         ]
     )
-    lines.extend(f"- {item}" for item in (state or {}).get("blockers") or result.blockers or ["none"])
+    lines.extend(f"- {item}" for item in (state.blockers if state else ()) or result.blockers or ["none"])
     lines.extend(
         [
             "",
@@ -133,8 +128,8 @@ def write_post_pr_automation_report(
     result: PostPRAutomationResult,
     output_path: str | Path,
     *,
-    state: dict[str, Any] | None = None,
-    side_effects: dict[str, Any] | None = None,
+    state: PostPRAutomationState | None = None,
+    side_effects: SideEffectLedger | None = None,
     overwrite: bool = False,
 ) -> Path:
     path = Path(output_path)
@@ -143,4 +138,3 @@ def write_post_pr_automation_report(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(render_post_pr_automation_report(result, state=state, side_effects=side_effects), encoding="utf-8")
     return path
-

@@ -188,6 +188,37 @@ class SideEffectEntry:
 
 
 @dataclass(frozen=True)
+class PostPRAutomationState:
+    """Post-PR 自动化在内存中的不可变状态。
+
+    rounds、blockers 和 warnings 使用 tuple，避免 frozen dataclass 内部继续
+    持有可变 list。JSON 的 list 转换统一留给 State Store 持久化边界处理。
+    """
+
+    schema_version: str
+    run_id: str
+    run_dir: Path
+    created_at: str
+    updated_at: str
+    max_rounds: int
+    status: PostPRAutomationStatus = "planned"
+    terminal_reason: PostPRTerminalReason = "none"
+    rounds: tuple[PostPRRoundRef, ...] = ()
+    latest_round_id: str | None = None
+    blockers: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SideEffectLedger:
+    """记录已计划或已执行副作用的不可变账本。"""
+
+    schema_version: str
+    run_id: str
+    effects: tuple[SideEffectEntry, ...] = ()
+
+
+@dataclass(frozen=True)
 class PostPRAutomationResult:
     run_id: str
     run_dir: Path
@@ -239,4 +270,3 @@ def to_post_pr_jsonable(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [to_post_pr_jsonable(item) for item in value]
     return value
-

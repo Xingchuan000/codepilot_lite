@@ -3,7 +3,6 @@ from pathlib import Path
 import pytest
 
 from codepilot.agent.actions import AgentFinishAction
-from codepilot.agent.evidence import classify_task_intent
 from codepilot.agent.state import (
     create_initial_state,
     looks_like_pytest_command,
@@ -39,10 +38,6 @@ def test_create_initial_state_ignores_read_only_keyword(tmp_path: Path) -> None:
 
     assert state.task_intent == "general"
     assert state.requires_evidence is False
-
-
-def test_classify_task_intent_read_only_wins() -> None:
-    assert classify_task_intent("do not modify, explain the bug") == "read_only"
 
 
 def test_create_initial_state_rejects_non_positive_max_steps(tmp_path: Path) -> None:

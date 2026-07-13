@@ -71,13 +71,9 @@ def test_llm_call_finished_json_creates_plan_only_until_real_tool_action_arrives
             run_id="run-1",
             payload={
                 "tool_name": "list_files",
-                "input": {
-                    "type": "tool_call",
-                    "tool_name": "list_files",
-                    "arguments": {"path": ".", "max_depth": 2},
-                    "short_rationale": "先检查结构",
-                },
-                "metadata": {"action_type": "tool_call", "parse_success": True},
+                "input_preview": {"path": ".", "max_depth": 2},
+                "action_type": "tool_call",
+                "parse_success": True,
                 "step": 2,
             },
         )
@@ -161,7 +157,8 @@ def test_tool_finished_updates_changed_files_and_test_status() -> None:
                 "tool_name": "run_tests",
                 "success": True,
                 "output_summary": "tests passed",
-                "metadata": {"changed_files": ["src/calc.py"], "status": "passed"},
+                "changed_files": ["src/calc.py"],
+                "status": "passed",
             },
         )
     )
@@ -215,7 +212,7 @@ def test_agent_finished_message_complete_creates_raw_assistant_message() -> None
         TUIEvent(
             type="agent_finished",
             timestamp="2024-01-01T00:00:01Z",
-            payload={"output_summary": "Hello", "metadata": {"status": "message_complete", "assistant_stop_reason": "natural_reply"}},
+            payload={"output_summary": "Hello", "status": "message_complete", "assistant_stop_reason": "natural_reply"},
         )
     )
 
@@ -232,7 +229,7 @@ def test_long_final_summary_is_not_truncated_in_transcript_body() -> None:
         TUIEvent(
             type="agent_finished",
             timestamp="2024-01-01T00:00:00Z",
-            payload={"output_summary": summary, "metadata": {"status": "success"}},
+            payload={"output_summary": summary, "status": "success"},
         )
     )
 
@@ -248,7 +245,7 @@ def test_agent_finished_creates_final_summary() -> None:
         TUIEvent(
             type="agent_finished",
             timestamp="2024-01-01T00:00:00Z",
-            payload={"output_summary": "已完成", "metadata": {"status": "success"}},
+            payload={"output_summary": "已完成", "status": "success"},
         )
     )
 
@@ -266,16 +263,24 @@ def test_agent_finished_message_complete_does_not_duplicate_assistant_message() 
             payload={"output_preview": "Hello"},
         )
     )
-    view = reducer.reduce(
+    first = reducer.reduce(
         TUIEvent(
             type="agent_finished",
             timestamp="2024-01-01T00:00:01Z",
-            payload={"output_summary": "Hello", "metadata": {"status": "message_complete", "assistant_stop_reason": "natural_reply"}},
+            payload={"output_summary": "Hello", "status": "message_complete"},
+        )
+    )
+    view = reducer.reduce(
+        TUIEvent(
+            type="agent_finished",
+            timestamp="2024-01-01T00:00:02Z",
+            payload={"output_summary": "Hello", "status": "message_complete"},
         )
     )
 
-    assert view.status == "message_complete"
+    assert _transcript_kinds(first) == ("assistant_raw",)
     assert _transcript_kinds(view) == ("assistant_raw",)
+    assert len(view.transcript) == 1
 
 
 def test_long_tool_result_is_still_truncated_in_transcript_body() -> None:
@@ -290,7 +295,7 @@ def test_long_tool_result_is_still_truncated_in_transcript_body() -> None:
                 "tool_name": "run_tests",
                 "success": True,
                 "output_preview": output,
-                "metadata": {"status": "passed"},
+                "status": "passed",
             },
         )
     )
@@ -315,7 +320,9 @@ def test_agent_finished_task_incomplete_uses_system_status() -> None:
             timestamp="2024-01-01T00:00:01Z",
             payload={
                 "output_summary": "Hello",
-                "metadata": {"status": "task_incomplete", "assistant_stop_reason": "natural_reply", "missing_evidence": ["missing_changed_files"]},
+                "status": "task_incomplete",
+                "assistant_stop_reason": "natural_reply",
+                "missing_evidence": ["missing_changed_files"],
             },
         )
     )
@@ -389,14 +396,14 @@ def test_duplicate_run_finished_does_not_duplicate_status_notice() -> None:
         TUIEvent(
             type="run_finished",
             timestamp="2024-01-01T00:00:00Z",
-            payload={"status": "message_complete", "success": True, "metadata": {"status": "message_complete"}},
+            payload={"status": "message_complete", "success": True},
         )
     )
     view = reducer.reduce(
         TUIEvent(
             type="run_finished",
             timestamp="2024-01-01T00:00:01Z",
-            payload={"status": "message_complete", "success": True, "metadata": {"status": "message_complete"}},
+            payload={"status": "message_complete", "success": True},
         )
     )
 
@@ -450,5 +457,50 @@ def test_error_appends_transcript_and_warning() -> None:
     view = reducer.reduce(TUIEvent(type="error", timestamp="2024-01-01T00:00:00Z", payload={"error": "boom"}))
 
     assert view.status == "failed"
-    assert view.warnings == ("boom",)
+    assert view.warnings == ("[unknown] boom",)
     assert _transcript_kinds(view) == ("error",)
+    assert view.transcript[0].title == "Error"
+
+
+def test_non_fatal_error_keeps_status_and_adds_warning() -> None:
+    reducer = EventReducer()
+
+    view = reducer.reduce(
+        TUIEvent(
+            type="error",
+            timestamp="2024-01-01T00:00:00Z",
+            payload={"error": "report failed", "source": "report_generation", "fatal": False},
+        )
+    )
+
+    assert view.status == "idle"
+    assert view.warnings == ("[report_generation] report failed",)
+    assert view.transcript[0].title == "Warning"
+
+
+def test_complete_event_sequence_has_no_duplicate_lifecycle_messages() -> None:
+    reducer = EventReducer()
+
+    view = reducer.reduce(TUIEvent(type="run_started", timestamp="2024-01-01T00:00:00Z", payload={"task": "修复问题", "trace_path": "runs/run-1/trace.jsonl"}))
+    view = reducer.reduce(TUIEvent(type="llm_call_finished", timestamp="2024-01-01T00:00:01Z", payload={"output_preview": '{"short_rationale":"先检查结构"}'}))
+    view = reducer.reduce(
+        TUIEvent(
+            type="agent_action",
+            timestamp="2024-01-01T00:00:02Z",
+            payload={"tool_name": "list_files", "input_preview": {"path": ".", "max_depth": 2}, "action_type": "tool_call", "parse_success": True, "step": 2},
+        )
+    )
+    view = reducer.reduce(
+        TUIEvent(
+            type="tool_finished",
+            timestamp="2024-01-01T00:00:03Z",
+            payload={"tool_name": "list_files", "success": True, "output_summary": "ok", "status": "passed", "changed_files": []},
+        )
+    )
+    view = reducer.reduce(TUIEvent(type="agent_finished", timestamp="2024-01-01T00:00:04Z", payload={"output_summary": "完成", "status": "success"}))
+    view = reducer.reduce(TUIEvent(type="run_finished", timestamp="2024-01-01T00:00:05Z", payload={"status": "success", "trace_path": "runs/run-1/trace.jsonl"}))
+
+    assert view.status == "success"
+    assert _transcript_kinds(view).count("system_status") <= 1
+    assert _transcript_kinds(view).count("final_summary") == 1
+    assert _transcript_kinds(view).count("assistant_raw") <= 1
