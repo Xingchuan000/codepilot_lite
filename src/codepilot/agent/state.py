@@ -14,7 +14,7 @@ from codepilot.agent.evidence import (
     evaluate_evidence,
     shell_command_may_write,
 )
-from codepilot.llm.types import ChatMessage
+from codepilot.llm.types import ChatMessage, RichChatMessage
 from codepilot.router.actions import ToolRouteResult
 
 
@@ -39,7 +39,7 @@ class AgentState:
     assistant_stop_reason: AssistantStopReason | None = None
     completion_kind: CompletionKind | None = None
     delivery_kind: str | None = None
-    messages: list[ChatMessage] = field(default_factory=list)
+    messages: list[ChatMessage | RichChatMessage] = field(default_factory=list)
     step: int = 0
     max_steps: int = 12
     finished: bool = False
@@ -129,7 +129,13 @@ def looks_like_pytest_command(command: str) -> bool:
     return False
 
 
-def create_initial_state(task: str, repo: str | Path, *, max_steps: int) -> AgentState:
+def create_initial_state(
+    task: str,
+    repo: str | Path,
+    *,
+    max_steps: int,
+    messages: list[ChatMessage | RichChatMessage] | None = None,
+) -> AgentState:
     """创建 loop 初始状态。"""
 
     if max_steps <= 0:
@@ -143,6 +149,7 @@ def create_initial_state(task: str, repo: str | Path, *, max_steps: int) -> Agen
         requires_evidence=False,
         evidence_reasons=[],
         max_steps=max_steps,
+        messages=list(messages or []),
     )
     refresh_evidence_state(state)
     return state

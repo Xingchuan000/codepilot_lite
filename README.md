@@ -230,6 +230,73 @@ codepilot tool run_shell '{"repo":".","command":"python --version"}'
 `search_code` 在结果截断时会在 output 末尾追加 `... truncated after N results` 提示。  
 `list_files` 严格按 `max_depth` 控制返回层级深度，不会越界。`max_entries` 是单页条目上限，默认 200；当结果 `has_more=true` 时，使用 `next_offset` 继续读取下一页，同一轮翻页必须保持 `path`、`max_depth`、`include_hidden`、`max_entries` 不变。
 
+### CodePilot Session SQLite 核心
+
+这一版新增了独立的 `codepilot.session` 包，专门负责 Session 的 SQLite 持久化。它只做底层数据读写，不会自动接入现有 TUI 或 LLM 流程。
+
+最小用法如下：
+
+```python
+from pathlib import Path
+
+from codepilot.session import SessionDatabase, SessionStore, resolve_session_paths
+
+paths = resolve_session_paths(Path("/tmp/codepilot-data"))
+database = SessionDatabase(paths.database_path)
+database.initialize()
+
+store = SessionStore(database, paths)
+session = store.create_session(
+    project_path=Path("/tmp/repo"),
+    provider="openai",
+    current_model="gpt-4.1",
+    permission_mode="manual",
+)
+turn = store.create_turn(
+    session_id=session.session_id,
+    title="Turn 1",
+    provider_snapshot="openai",
+    model_snapshot="gpt-4.1",
+    permission_mode_snapshot="manual",
+    branch_snapshot="main",
+)
+```
+
+说明：
+
+* `resolve_session_paths(...)` 默认会指向用户级 `codepilot` 数据目录，也可以在测试里显式传入 `tmp_path`。
+* `SessionDatabase.initialize()` 会创建 SQLite schema，重复调用是安全的。
+* `SessionStore` 负责创建和读取 `projects`、`sessions`、`turns`、`messages`、`tool_calls`、`session_events` 等核心记录。
+* 这一阶段不会创建旧的 `session.json`、`messages.jsonl` 或 `runs.jsonl`。
+
+### Session 生命周期与多轮执行（Step3–Step5）
+
+Step3–Step5 在 SQLite 核心之上提供 `SessionService`、`ContextAssembler`、`SessionRuntime` 和 `SessionTraceRecorder`。Session 的历史由数据库重新组装，`MinimalAgentLoop.run_turn()` 接收已经组装好的消息；旧的 `run(task, repo)` 仍用于非 Session CLI。
+
+```python
+from pathlib import Path
+
+from codepilot.session import SessionDatabase, SessionRuntime, SessionService, resolve_session_paths
+
+paths = resolve_session_paths(Path("/tmp/codepilot-data"))
+database = SessionDatabase(paths.database_path)
+database.initialize()
+service = SessionService(database, paths)
+session = service.create_session(Path("/tmp/repo"), "openai", "gpt-4.1", "manual")
+
+# SessionRuntime 需要应用层提供 LLM 客户端和
+# `router_factory(trace_recorder)`，以便工具路由与 SessionTraceRecorder 共用同一事实流。
+# runtime = SessionRuntime(database, llm, router_factory)
+
+# 如果返回 BranchConfirmationRequired，应先由用户确认，再调用
+# service.confirm_branch_change(session.session_id, result.new_branch)。
+turn = runtime.submit_user_message(session.session_id, "请检查项目状态")
+if hasattr(turn, "turn_id"):
+    result = runtime.run_turn(turn.turn_id)
+```
+
+`SessionService.open_session()` 在项目路径不存在时仍允许读取历史，但运行新 Turn 会拒绝。检测到 Git 分支变化时只返回确认信息，不会提前创建 Turn；确认事务会同时写入 `branch_changed` 事件和更新 Session 分支。Session 模式的 Trace 写入 `session_events`，不会创建 `trace.jsonl` 或 run 目录。
+
 ### Chat-style TUI transcript helpers
 
 这一阶段新增了聊天式 TUI 用到的 transcript 数据结构和格式化函数，方便把 trace 投影成可复制的纯文本消息流。

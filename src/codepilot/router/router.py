@@ -16,6 +16,7 @@ from codepilot.router.actions import ToolAction, ToolRouteResult
 from codepilot.tools.base import ToolResult
 from codepilot.tools.registry import call_external_tool_traced, call_tool_traced
 from codepilot.trace.logger import TraceLogger
+from codepilot.trace.protocol import TraceRecorder
 
 
 class ToolRouter:
@@ -23,7 +24,7 @@ class ToolRouter:
 
     def __init__(
         self,
-        trace_logger: TraceLogger,
+        trace_logger: TraceRecorder,
         output_preview_chars: int = 1000,
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
@@ -46,7 +47,7 @@ class ToolRouter:
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
         external_tool_registry: Any | None = None,
-        trace_logger: TraceLogger | None = None,
+        trace_logger: TraceRecorder | None = None,
         permission_broker: PermissionBroker | None = None,
     ) -> "ToolRouter":
         logger = trace_logger or TraceLogger(runs_dir=runs_dir, run_id=run_id)

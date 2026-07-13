@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from codepilot.agent.actions import (
     AgentActionParseError,
@@ -28,11 +28,12 @@ from codepilot.agent.state import (
     update_state_from_route_result,
 )
 from codepilot.llm.fake import FakeLLMExhaustedError
-from codepilot.llm.types import ChatMessage, CodePilotLLMClient
+from codepilot.llm.types import ChatMessage, CodePilotLLMClient, RichChatMessage
 from codepilot.router import ToolAction, ToolRouter
 from codepilot.tools.base import ToolSpec
 from codepilot.tools.registry import list_tool_specs
 from codepilot.trace.logger import TraceLogger
+from codepilot.trace.protocol import TraceRecorder
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,29 @@ class AgentRunResult:
         return self.outcome.last_test_status
 
 
+@dataclass(frozen=True)
+class TurnExecutionContext:
+    """一次 Session Turn 的完整执行输入；历史由调用方预先从 SQLite 组装。"""
+
+    session_id: str | None
+    turn_id: str | None
+    attempt_id: str | None
+    task: str
+    repo: Path
+    messages: list[ChatMessage | RichChatMessage]
+
+
+class AgentEventSink(Protocol):
+    """Loop 向 Session 持久化层发布的最小语义事件接口。"""
+
+    def assistant_message_started(self, **kwargs: Any) -> None: ...
+    def assistant_text_delta(self, **kwargs: Any) -> None: ...
+    def assistant_message_completed(self, **kwargs: Any) -> None: ...
+    def tool_call_created(self, **kwargs: Any) -> None: ...
+    def tool_result_created(self, **kwargs: Any) -> None: ...
+    def agent_finished(self, **kwargs: Any) -> None: ...
+
+
 def _inject_repo_if_missing(arguments: dict[str, Any], repo: Path) -> dict[str, Any]:
     """确保模型不能借 repo 参数切换到当前仓库之外。"""
 
@@ -199,10 +223,11 @@ class MinimalAgentLoop:
         *,
         llm: CodePilotLLMClient,
         router: ToolRouter,
-        trace_logger: TraceLogger | None = None,
+        trace_logger: TraceRecorder | None = None,
         max_steps: int = 12,
         prompt_extra_tool_specs: list[ToolSpec] | None = None,
         cancellation_token: Any | None = None,
+        event_sink: AgentEventSink | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be greater than 0")
@@ -219,6 +244,7 @@ class MinimalAgentLoop:
         self.trace_logger = router.trace_logger
         self.prompt_extra_tool_specs = list(prompt_extra_tool_specs or [])
         self.cancellation_token = cancellation_token
+        self.event_sink = event_sink
         self.tool_specs_by_name = {}
         for spec in list_tool_specs():
             self.tool_specs_by_name[spec.name] = spec
@@ -490,14 +516,13 @@ class MinimalAgentLoop:
         state.messages.append(ChatMessage(role="user", content=observation))
         self.trace_logger.record_agent_observation(tool_name=tool_name, observation=observation)
 
-    def run(self, task: str, repo: str | Path) -> AgentRunResult:
-        """执行最小 LLM loop。"""
+    def run_turn(self, context: TurnExecutionContext) -> AgentRunResult:
+        """执行一个 Turn；不会重新生成或查询历史消息。"""
 
-        state = create_initial_state(task, repo, max_steps=self.max_steps)
-        state.messages = build_initial_messages(task, state.repo, extra_tool_specs=self.prompt_extra_tool_specs)
+        state = create_initial_state(context.task, context.repo, max_steps=self.max_steps, messages=context.messages)
         initial_evidence = evidence_snapshot(state)
         self.trace_logger.record_run_start(
-            task=task,
+            task=context.task,
             metadata={
                 "source": "minimal_agent_loop",
                 "repo": str(state.repo),
@@ -530,6 +555,8 @@ class MinimalAgentLoop:
                         stop_reason="llm_error",
                         error=str(exc),
                     )
+                if self.event_sink is not None:
+                    self.event_sink.assistant_message_completed(content=response.content, turn_id=context.turn_id, attempt_id=context.attempt_id)
                 # 模型调用可能耗时，返回后必须再次检查，取消时不再处理这次响应。
                 if self._cancel_requested():
                     return self._cancelled_result(state)
@@ -630,6 +657,13 @@ class MinimalAgentLoop:
                         "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
                     },
                 )
+                if self.event_sink is not None:
+                    self.event_sink.tool_call_created(
+                        tool_name=action.tool_name,
+                        arguments=injected_args,
+                        turn_id=context.turn_id,
+                        attempt_id=context.attempt_id,
+                    )
                 # Router 可能等待权限审批，进入前检查可避免取消后继续阻塞。
                 if self._cancel_requested():
                     return self._cancelled_result(state)
@@ -646,6 +680,14 @@ class MinimalAgentLoop:
                         error=exc,
                     )
                     continue
+                if self.event_sink is not None:
+                    self.event_sink.tool_result_created(
+                        tool_name=route_result.tool_name,
+                        success=route_result.success,
+                        content=route_result.result.output,
+                        turn_id=context.turn_id,
+                        attempt_id=context.attempt_id,
+                    )
                 update_state_from_route_result(state, route_result)
                 refresh_evidence_state(state)
                 # 权限等待或工具执行结束后再次检查，取消结果优先于工具 observation。
@@ -665,4 +707,19 @@ class MinimalAgentLoop:
             state,
             status="max_steps_exceeded",
             stop_reason="max_steps",
+        )
+
+    def run(self, task: str, repo: str | Path) -> AgentRunResult:
+        """兼容旧 CLI：单次运行仍使用旧的首轮 Prompt。"""
+
+        repository = Path(repo).resolve()
+        return self.run_turn(
+            TurnExecutionContext(
+                session_id=None,
+                turn_id=None,
+                attempt_id=None,
+                task=task,
+                repo=repository,
+                messages=build_initial_messages(task, repository, extra_tool_specs=self.prompt_extra_tool_specs),
+            )
         )

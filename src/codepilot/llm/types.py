@@ -17,6 +17,24 @@ class ChatMessage:
 
 
 @dataclass(frozen=True)
+class ChatMessagePart:
+    """Provider 无关的消息分片；replayable 控制是否可以重放给模型。"""
+
+    type: str
+    content: str | dict[str, Any]
+    provider_format: str | None = None
+    replayable: bool = True
+
+
+@dataclass(frozen=True)
+class RichChatMessage:
+    """允许一条消息同时包含文本、工具调用和工具结果。"""
+
+    role: str
+    parts: tuple[ChatMessagePart, ...]
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     """CodePilot 最小模型响应结构。"""
 

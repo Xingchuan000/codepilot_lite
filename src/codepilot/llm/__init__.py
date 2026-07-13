@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from codepilot.llm.types import ChatMessage, CodePilotLLMClient, LLMResponse
+from codepilot.llm.types import ChatMessage, ChatMessagePart, RichChatMessage, CodePilotLLMClient, LLMResponse
 
 if TYPE_CHECKING:
     from codepilot.llm.fake import FakeLLMClient as FakeLLMClient
@@ -10,6 +10,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ChatMessage",
+    "ChatMessagePart",
+    "RichChatMessage",
     "CodePilotLLMClient",
     "FakeLLMClient",
     "LLMResponse",

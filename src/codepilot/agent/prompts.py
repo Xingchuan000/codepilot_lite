@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+from typing import Any
 
 from codepilot.llm.types import ChatMessage
 from codepilot.tools.base import ToolSpec
@@ -133,3 +135,9 @@ def build_initial_messages(
         ChatMessage(role="system", content=build_system_prompt(extra_tool_specs=extra_tool_specs)),
         ChatMessage(role="user", content=build_user_prompt(task, repo)),
     ]
+
+
+def build_system_event_text(event_type: str, payload: dict[str, Any]) -> str:
+    """把 Session 领域事件格式化为可重放的系统消息。"""
+
+    return f"Session event: {event_type}\n{json.dumps(payload, ensure_ascii=False, sort_keys=True)}"
