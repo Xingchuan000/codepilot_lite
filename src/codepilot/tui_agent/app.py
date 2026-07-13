@@ -21,6 +21,7 @@ from codepilot.tui_agent.session_store import SessionStore, now_iso
 from codepilot.session.database import SessionDatabase
 from codepilot.session.service import SessionService
 from codepilot.tui_agent.session_picker import SessionPickerScreen, SessionPicker
+from codepilot.session.exporter import SessionExporter
 
 
 def _load_textual():
@@ -90,7 +91,9 @@ def create_tui_agent_app(
         ),
     )
     reducer = EventReducer()
-    session_picker = SessionPickerScreen(SessionPicker(SessionService(session_database))) if session_database is not None else None
+    active_database = session_database or session_store.database
+    session_picker = SessionPickerScreen(SessionPicker(SessionService(active_database)))
+    session_exporter = SessionExporter(active_database)
 
     class SelectableStatic(Static):
         can_focus = True
@@ -210,6 +213,7 @@ def create_tui_agent_app(
             self._last_top_status_text: str | None = None
             self._last_side_status_text: str | None = None
             self.session_picker = session_picker
+            self.session_exporter = session_exporter
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -318,11 +322,6 @@ def create_tui_agent_app(
             self._shown_permission_request_ids.clear()
             self._rendered_transcript_ids.clear()
 
-        def _export_transcript(self) -> Path:
-            transcript_path = self.session.session_dir / "transcript.md"
-            transcript_path.write_text(format_transcript_plain(self._reducer.view.transcript), encoding="utf-8")
-            return transcript_path
-
         def copy_to_clipboard(self, text: str) -> None:
             super().copy_to_clipboard(text)
             if sys.platform == "darwin" and shutil.which("pbcopy") is not None:
@@ -388,6 +387,12 @@ def create_tui_agent_app(
                     runner.active_session_id = self.session.session_id
                     self._reducer.view = replace(self._reducer.view, transcript=(), timeline=(), task="", status="idle")
                     self._rendered_transcript_ids.clear()
+                if result.export_session_requested:
+                    if self.session_exporter is None:
+                        result = replace(result, output="Session export requires a SQLite Session database")
+                    else:
+                        exported = self.session_exporter.export(self.session.session_id, result.project_path)
+                        result = replace(result, output=f"Session exported: {exported}")
                 if result.cancel_requested:
                     runner.cancel_current()
                 if result.exit_requested:
@@ -396,8 +401,7 @@ def create_tui_agent_app(
                 if result.open_copy_mode:
                     self.push_screen(TranscriptCopyScreen(self._transcript_copy_text(result.copy_target)))
                 if result.export_transcript_requested:
-                    transcript_path = self._export_transcript()
-                    result = replace(result, output=f"Transcript exported: {transcript_path}")
+                    result = replace(result, output="/export-transcript is deprecated; use /export-session")
                 if result.project_path is not None:
                     self._switch_project(result.project_path)
                 self._publish_command_output(text, result.output)

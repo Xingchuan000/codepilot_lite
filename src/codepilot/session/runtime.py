@@ -26,7 +26,7 @@ class TurnExecutionResult:
 class SessionRuntime:
     """把 Session 持久化生命周期接到现有单线程 AgentLoop。"""
 
-    def __init__(self, database: SessionDatabase, llm: CodePilotLLMClient, router_factory: Callable[[Any], ToolRouter], max_steps: int = 12) -> None:
+    def __init__(self, database: SessionDatabase, llm: CodePilotLLMClient, router_factory: Callable[[Any], ToolRouter], max_steps: int = 12, trace_hook: Callable[[Any], None] | None = None) -> None:
         self.database = database
         self.store = SessionStore(database)
         self.service = SessionService(database)
@@ -34,6 +34,7 @@ class SessionRuntime:
         self.llm = llm
         self.router_factory = router_factory
         self.max_steps = max_steps
+        self.trace_hook = trace_hook
 
     def submit_user_message(self, session_id: str, text: str) -> TurnRecord | BranchConfirmationRequired:
         """提交用户消息；分支变化确认前不写入 Turn。"""
@@ -73,7 +74,7 @@ class SessionRuntime:
         opened = self.service.open_session(session.session_id)
         attempt = self.store.create_attempt(turn_id=turn_id)
         self.store.update_turn_status(turn_id, "running")
-        trace = SessionTraceRecorder(self.database, session.session_id, turn_id, attempt.attempt_id)
+        trace = SessionTraceRecorder(self.database, session.session_id, turn_id, attempt.attempt_id, record_hook=self.trace_hook)
         router = self.router_factory(trace)
         # Session 模式必须在真实副作用前落 durable execution intent。
         router.lifecycle_observer = trace

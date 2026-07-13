@@ -46,6 +46,7 @@ from codepilot.session.reconcilers import RecoveryDecision, ReconciliationResult
 from codepilot.session.compaction import CompactionService
 from codepilot.session.model_capabilities import ModelContextProfile, resolve_model_context_profile
 from codepilot.session.service import CrossProviderSwitchNotSupported
+from codepilot.session.exporter import SessionExporter
 from codepilot.session.store import SessionStore
 
 __all__ = [
@@ -80,6 +81,7 @@ __all__ = [
     "ModelContextProfile",
     "resolve_model_context_profile",
     "CrossProviderSwitchNotSupported",
+    "SessionExporter",
     "SessionStatus",
     "SessionStore",
     "SessionSummary",
