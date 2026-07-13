@@ -16,6 +16,10 @@ from codepilot.session.paths import SessionPaths, resolve_session_paths
 from codepilot.session.store import SessionStore
 
 
+class CrossProviderSwitchNotSupported(ValueError):
+    """Step9 明确禁止跨 Provider 切换。"""
+
+
 class SessionService:
     """编排 Session 生命周期；具体 SQL 仍全部留在 SessionStore。"""
 
@@ -55,6 +59,12 @@ class SessionService:
 
     def unarchive_session(self, session_id: str) -> SessionRecord:
         return self.store.unarchive_session(session_id)
+
+    def change_model(self, session_id: str, provider: str, model: str) -> SessionRecord:
+        session = self.store.get_session(session_id)
+        if provider != session.provider:
+            raise CrossProviderSwitchNotSupported(f"cannot switch {session.provider} session to {provider}")
+        return self.store.update_session(session_id, current_model=model)
 
     def validate_branch_before_turn(self, session_id: str) -> BranchCheckResult:
         opened = self.open_session(session_id)

@@ -75,6 +75,8 @@ class SessionRuntime:
         self.store.update_turn_status(turn_id, "running")
         trace = SessionTraceRecorder(self.database, session.session_id, turn_id, attempt.attempt_id)
         router = self.router_factory(trace)
+        # Session 模式必须在真实副作用前落 durable execution intent。
+        router.lifecycle_observer = trace
         loop = MinimalAgentLoop(llm=self.llm, router=router, trace_logger=trace, max_steps=self.max_steps, cancellation_token=cancellation_token, event_sink=trace)
         task = next(message.content for message, _ in self.store.list_messages_with_parts(session.session_id, turn_id) if message.role == "user")
         context = ContextAssembler(self.database, self.store).build(session.session_id, turn_id, session.provider, session.current_model)

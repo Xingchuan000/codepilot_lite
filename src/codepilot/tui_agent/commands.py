@@ -20,6 +20,12 @@ class CommandResult:
     copy_target: str | None = None
     export_transcript_requested: bool = False
     project_path: Path | None = None
+    session_id: str | None = None
+    rename_title: str | None = None
+    archive_requested: bool = False
+    unarchive_requested: bool = False
+    compact_requested: bool = False
+    export_session_requested: bool = False
 
 
 def parse_slash_command(text: str) -> tuple[str, list[str]]:
@@ -41,7 +47,22 @@ def handle_command(
     if not command:
         return CommandResult(handled=False)
     if command == "help":
-        return CommandResult(handled=True, output="/help /status /permissions /diff /report /trace /copy /export-transcript /new /cancel /exit")
+        return CommandResult(handled=True, output="/help /sessions /new /switch <session-id> /rename <title> /archive /unarchive <session-id> /compact /export-session [path] /cancel /exit")
+    if command == "sessions":
+        return CommandResult(handled=True, output="Session picker requested")
+    if command == "switch":
+        return CommandResult(handled=True, output="Session switch requested" if args else "Usage: /switch <session-id>", session_id=args[0] if args else None)
+    if command == "rename":
+        title = " ".join(args).strip()
+        return CommandResult(handled=True, output="Session rename requested" if title else "Usage: /rename <title>", rename_title=title or None)
+    if command == "archive":
+        return CommandResult(handled=True, output="Session archive requested", archive_requested=True)
+    if command == "unarchive":
+        return CommandResult(handled=True, output="Session unarchive requested", unarchive_requested=True, session_id=args[0] if args else None)
+    if command == "compact":
+        return CommandResult(handled=True, output="Session compaction requested", compact_requested=True)
+    if command == "export-session":
+        return CommandResult(handled=True, output="Session export requested", export_session_requested=True, project_path=Path(" ".join(args)).expanduser() if args else None)
     if command == "status":
         return CommandResult(handled=True, output=format_side_status(project, session, view, permission_mode))
     if command == "permissions":

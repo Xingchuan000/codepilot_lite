@@ -6,7 +6,7 @@ from typing import Any, Literal, Protocol
 from uuid import uuid4
 
 
-PermissionDecision = Literal["approve_once", "deny"]
+PermissionDecision = Literal["approve_once", "approve_session", "deny"]
 PermissionRequestStatus = Literal["pending", "approved", "denied", "expired"]
 
 
@@ -23,6 +23,11 @@ class PermissionRequest:
     matched_rule: str | None
     created_at: str
     status: PermissionRequestStatus = "pending"
+    session_id: str | None = None
+    turn_id: str | None = None
+    attempt_id: str | None = None
+    tool_call_id: str | None = None
+    scope_key: str | None = None
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,9 @@ from codepilot.tui_agent.permission_broker import BlockingTUIBroker
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
 from codepilot.tui_agent.session_store import SessionStore, now_iso
+from codepilot.session.database import SessionDatabase
+from codepilot.session.service import SessionService
+from codepilot.tui_agent.session_picker import SessionPickerScreen, SessionPicker
 
 
 def _load_textual():
@@ -42,6 +45,7 @@ def create_tui_agent_app(
     runs_dir: str | Path | None = None,
     fake_actions: str | Path | None = None,
     max_steps: int | None = None,
+    session_database: SessionDatabase | None = None,
 ):
     App, ComposeResult, Horizontal, Vertical, VerticalScroll, Footer, Header, Input, Static, TextArea, ModalScreen, Binding = _load_textual()
 
@@ -86,6 +90,7 @@ def create_tui_agent_app(
         ),
     )
     reducer = EventReducer()
+    session_picker = SessionPickerScreen(SessionPicker(SessionService(session_database))) if session_database is not None else None
 
     class SelectableStatic(Static):
         can_focus = True
@@ -204,6 +209,7 @@ def create_tui_agent_app(
             self._auto_scroll = True
             self._last_top_status_text: str | None = None
             self._last_side_status_text: str | None = None
+            self.session_picker = session_picker
 
         def compose(self) -> ComposeResult:
             yield Header()
@@ -369,6 +375,19 @@ def create_tui_agent_app(
                     runner.set_permission_mode(result.permission_mode)
                     self.session = self._session_store.update_session(self.session, permission_mode=result.permission_mode)
                     runner.session = self.session
+                if result.rename_title is not None:
+                    self.session = self._session_store.update_session(self.session, title=result.rename_title)
+                    runner.session = self.session
+                if result.new_task_requested:
+                    self.session = self._session_store.create_session(
+                        model=self.session.model,
+                        permission_mode=self.permission_mode,
+                        metadata=self.session.metadata,
+                    )
+                    runner.session = self.session
+                    runner.active_session_id = self.session.session_id
+                    self._reducer.view = replace(self._reducer.view, transcript=(), timeline=(), task="", status="idle")
+                    self._rendered_transcript_ids.clear()
                 if result.cancel_requested:
                     runner.cancel_current()
                 if result.exit_requested:

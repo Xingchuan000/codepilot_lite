@@ -554,6 +554,11 @@ class SessionStore:
             ).fetchall()
         return [self._event_from_row(row) for row in rows]
 
+    def list_context_summaries(self, session_id: str) -> list[ContextSummaryRecord]:
+        with self.database.transaction() as connection:
+            rows = connection.execute("SELECT * FROM context_summaries WHERE session_id = ? ORDER BY created_at, summary_id", (session_id,)).fetchall()
+        return [self._context_summary_from_row(row) for row in rows]
+
     def create_permission_request(
         self,
         *,

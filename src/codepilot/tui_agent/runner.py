@@ -71,6 +71,9 @@ class TUIAgentRunner:
         self.base_permission_broker = permission_broker or NonInteractiveBroker()
         self.permission_broker = self.base_permission_broker
         self.config = config
+        # 新生命周期接口使用稳定的 Session 身份；旧 UI 仍可通过 session 兼容访问。
+        self.active_session_id = session.session_id
+        self.active_turn_id: str | None = None
         self.cancellation_token = CancellationToken()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()

@@ -21,10 +21,17 @@ class ContextAssembler:
         with self.store.database.transaction() as connection:
             project_path = Path(connection.execute("SELECT path FROM projects WHERE project_id = ?", (session.project_id,)).fetchone()[0])
         messages: list[ChatMessage] = [ChatMessage("system", build_system_prompt())]
+        covered_ids: set[str] = set()
+        for summary in self.store.list_context_summaries(session_id):
+            summary_metadata = summary.metadata
+            covered_ids.update(str(item) for item in summary_metadata.get("covered_message_ids", []))
+            messages.append(ChatMessage("system", f"Persisted context summary:\n{summary.content}"))
         for event in self.store.list_events(session_id):
             if event.event_type == "branch_changed":
                 messages.append(ChatMessage("system", build_system_event_text(event.event_type, event.payload)))
         for message, parts in self.store.list_messages_with_parts(session_id):
+            if message.message_id in covered_ids:
+                continue
             if message.status == "failed":
                 continue
             content = _message_content(message.content, parts)

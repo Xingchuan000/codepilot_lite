@@ -28,7 +28,7 @@ from codepilot.agent.state import (
     update_state_from_route_result,
 )
 from codepilot.llm.fake import FakeLLMExhaustedError
-from codepilot.llm.types import ChatMessage, CodePilotLLMClient, RichChatMessage
+from codepilot.llm.types import ChatMessage, CodePilotLLMClient, LLMResponse, LLMStreamEvent, RichChatMessage
 from codepilot.router import ToolAction, ToolRouter
 from codepilot.tools.base import ToolSpec
 from codepilot.tools.registry import list_tool_specs
@@ -140,6 +140,8 @@ class AgentEventSink(Protocol):
     def tool_call_created(self, **kwargs: Any) -> None: ...
     def tool_result_created(self, **kwargs: Any) -> None: ...
     def agent_finished(self, **kwargs: Any) -> None: ...
+
+    def assistant_message_interrupted(self, **kwargs: Any) -> None: ...
 
 
 def _inject_repo_if_missing(arguments: dict[str, Any], repo: Path) -> dict[str, Any]:
@@ -256,6 +258,29 @@ class MinimalAgentLoop:
 
     def _cancel_requested(self) -> bool:
         return bool(self.cancellation_token and self.cancellation_token.is_cancelled())
+
+    def _complete_llm(self, messages: list[ChatMessage | RichChatMessage], context: TurnExecutionContext) -> LLMResponse:
+        """优先消费可选流式接口；旧客户端仍走 complete。"""
+
+        stream = getattr(self.llm, "stream", None)
+        if stream is None:
+            if self.event_sink is not None:
+                self.event_sink.assistant_message_started(turn_id=context.turn_id, attempt_id=context.attempt_id, streaming=False)
+            return self.llm.complete(messages)  # type: ignore[arg-type]
+        content: list[str] = []
+        usage: dict[str, Any] = {}
+        if self.event_sink is not None:
+            self.event_sink.assistant_message_started(turn_id=context.turn_id, attempt_id=context.attempt_id, streaming=True)
+        for event in stream(messages):
+            if event.type in {"text_delta", "reasoning_delta"}:
+                content.append(event.content)
+                if self.event_sink is not None:
+                    self.event_sink.assistant_text_delta(content=event.content, type=event.type, provider_format=event.provider_format, replayable=event.replayable)
+            elif event.type == "usage":
+                usage = event.usage
+            elif event.type == "error":
+                raise RuntimeError(event.content or "streaming LLM error")
+        return LLMResponse(content="".join(content), usage=usage)
 
     def _cancelled_result(self, state: AgentState) -> AgentRunResult:
         """在一个位置完成取消状态、Trace 和返回值构造。"""
@@ -540,7 +565,7 @@ class MinimalAgentLoop:
                     return self._cancelled_result(state)
                 state.step += 1
                 try:
-                    response = self.llm.complete(state.messages)
+                    response = self._complete_llm(state.messages, context)
                 except FakeLLMExhaustedError as exc:
                     return self._runtime_failure_result(
                         state,
@@ -549,6 +574,8 @@ class MinimalAgentLoop:
                         error=str(exc),
                     )
                 except Exception as exc:
+                    if self.event_sink is not None:
+                        self.event_sink.assistant_message_interrupted(error=str(exc), turn_id=context.turn_id, attempt_id=context.attempt_id)
                     return self._runtime_failure_result(
                         state,
                         status="llm_error",

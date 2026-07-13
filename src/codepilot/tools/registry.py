@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from codepilot.tools.base import DefaultPermission, ToolResult, ToolRisk, ToolSideEffect, ToolSpec
+from codepilot.tools.base import DefaultPermission, ToolIdempotency, ToolRecoveryStrategy, ToolResult, ToolRisk, ToolSideEffect, ToolSpec
 from codepilot.tools.edit_tools import apply_patch, replace_range
 from codepilot.tools.file_tools import list_files, read_file
 from codepilot.tools.git_tools import git_diff, git_status
@@ -31,6 +31,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
         default_permission=DefaultPermission.ALLOW,
+        idempotency=ToolIdempotency.SAFE,
+        recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "path": "相对于 repo 的目录路径，默认为当前目录；翻页时必须保持与上一页相同。",
@@ -46,6 +48,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
         default_permission=DefaultPermission.ALLOW,
+        idempotency=ToolIdempotency.SAFE,
+        recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "path": "相对于 repo 的文件路径。",
@@ -60,6 +64,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
         default_permission=DefaultPermission.ALLOW,
+        idempotency=ToolIdempotency.SAFE,
+        recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "query": "搜索关键词或正则片段。",
@@ -75,6 +81,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.SHELL_EXECUTION,
         side_effect=ToolSideEffect.LOCAL_EXEC,
         default_permission=DefaultPermission.ASK,
+        idempotency=ToolIdempotency.UNKNOWN,
+        recovery_strategy=ToolRecoveryStrategy.RECONCILE_OR_ASK,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "command": "要执行的 shell 命令。",
@@ -88,6 +96,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.LOCAL_EXECUTION,
         side_effect=ToolSideEffect.LOCAL_EXEC,
         default_permission=DefaultPermission.ASK,
+        idempotency=ToolIdempotency.SAFE,
+        recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "command": "测试命令，默认 pytest。",
@@ -102,6 +112,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
         default_permission=DefaultPermission.ALLOW,
+        idempotency=ToolIdempotency.SAFE,
+        recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "max_entries": "最多返回的变更条目数。",
@@ -113,6 +125,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
         default_permission=DefaultPermission.ALLOW,
+        idempotency=ToolIdempotency.SAFE,
+        recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "path": "可选，相对于 repo 的目标路径。include_content=True 时必须提供。",
@@ -128,6 +142,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.LOCAL_WRITE,
         side_effect=ToolSideEffect.LOCAL_WRITE,
         default_permission=DefaultPermission.ASK,
+        idempotency=ToolIdempotency.CONDITIONAL,
+        recovery_strategy=ToolRecoveryStrategy.RECONCILE_THEN_RETRY,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "patch": "unified diff patch 内容。",
@@ -141,6 +157,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         risk=ToolRisk.LOCAL_WRITE,
         side_effect=ToolSideEffect.LOCAL_WRITE,
         default_permission=DefaultPermission.ASK,
+        idempotency=ToolIdempotency.CONDITIONAL,
+        recovery_strategy=ToolRecoveryStrategy.RECONCILE_THEN_RETRY,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "path": "相对于 repo 的目标文件路径。",

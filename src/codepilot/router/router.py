@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from codepilot.policy import PolicyChecker, PolicyContext, PolicyDecision
 from codepilot.permissions import (
@@ -19,6 +19,21 @@ from codepilot.trace.logger import TraceLogger
 from codepilot.trace.protocol import TraceRecorder
 
 
+class ToolLifecycleObserver(Protocol):
+    """工具持久化观察器；Router 不要求具体存储实现。"""
+
+    def on_tool_call_created(self, **kwargs: Any) -> None: ...
+    def on_permission_pending(self, **kwargs: Any) -> None: ...
+    def on_permission_resolved(self, **kwargs: Any) -> None: ...
+    def on_execution_started(self, **kwargs: Any) -> None: ...
+    def on_execution_finished(self, **kwargs: Any) -> None: ...
+
+
+class _NoopToolLifecycleObserver:
+    def __getattr__(self, name: str) -> Any:
+        return lambda **kwargs: None
+
+
 class ToolRouter:
     """把结构化 ToolAction 路由到 traced tool call。"""
 
@@ -30,6 +45,7 @@ class ToolRouter:
         policy_context: PolicyContext | None = None,
         external_tool_registry: Any | None = None,
         permission_broker: PermissionBroker | None = None,
+        lifecycle_observer: ToolLifecycleObserver | None = None,
     ) -> None:
         self.trace_logger = trace_logger
         self.output_preview_chars = output_preview_chars
@@ -37,6 +53,7 @@ class ToolRouter:
         self.policy_context = policy_context or PolicyContext()
         self.external_tool_registry = external_tool_registry
         self.permission_broker = permission_broker
+        self.lifecycle_observer = lifecycle_observer or _NoopToolLifecycleObserver()
 
     @classmethod
     def from_runs_dir(
@@ -49,6 +66,7 @@ class ToolRouter:
         external_tool_registry: Any | None = None,
         trace_logger: TraceRecorder | None = None,
         permission_broker: PermissionBroker | None = None,
+        lifecycle_observer: ToolLifecycleObserver | None = None,
     ) -> "ToolRouter":
         logger = trace_logger or TraceLogger(runs_dir=runs_dir, run_id=run_id)
         return cls(
@@ -58,6 +76,7 @@ class ToolRouter:
             policy_context=policy_context,
             external_tool_registry=external_tool_registry,
             permission_broker=permission_broker,
+            lifecycle_observer=lifecycle_observer,
         )
 
     def _base_route_metadata(self, parsed: ToolAction) -> dict[str, Any]:
@@ -78,15 +97,16 @@ class ToolRouter:
             "approved": self.policy_context.approved,
         }
 
-    def _permission_decision(self, response: PermissionResponse | None) -> Literal["approve_once", "deny"]:
-        if response is not None and response.decision == "approve_once":
-            return "approve_once"
+    def _permission_decision(self, response: PermissionResponse | None) -> Literal["approve_once", "approve_session", "deny"]:
+        if response is not None and response.decision in {"approve_once", "approve_session"}:
+            return response.decision
         return "deny"
 
     def route(self, action: ToolAction | Mapping[str, Any]) -> ToolRouteResult:
         """执行单个 tool action。"""
 
         parsed = ToolAction.model_validate(action)
+        self.lifecycle_observer.on_tool_call_created(action=parsed)
         route_metadata = self._base_route_metadata(parsed)
         policy_metadata: dict[str, Any] | None = None
 
@@ -143,6 +163,7 @@ class ToolRouter:
                         matched_rule=decision.matched_rule,
                         created_at=permission_now_iso(),
                     )
+                    self.lifecycle_observer.on_permission_pending(request=request)
                     self.permission_broker.request(request)
                     self.trace_logger.record_permission_request(
                         request_id=request_id,
@@ -157,6 +178,7 @@ class ToolRouter:
                         },
                     )
                     response = self.permission_broker.wait(request.request_id)
+                    self.lifecycle_observer.on_permission_resolved(request=request, response=response)
                     decision_value = self._permission_decision(response)
                     self.trace_logger.record_permission_response(
                         request_id=request.request_id,
@@ -164,7 +186,7 @@ class ToolRouter:
                         reason=response.reason if response is not None else decision.reason,
                         metadata={"action_id": parsed.action_id},
                     )
-                    if decision_value != "approve_once":
+                    if decision_value not in {"approve_once", "approve_session"}:
                         result = ToolResult(
                             success=False,
                             output="",
@@ -210,21 +232,25 @@ class ToolRouter:
                         metadata=route_metadata,
                     )
 
-        if self.external_tool_registry is not None and self.external_tool_registry.has_tool(parsed.tool_name):
-            result = call_external_tool_traced(
-                parsed.tool_name,
-                external_registry=self.external_tool_registry,
-                trace_logger=self.trace_logger,
-                output_preview_chars=self.output_preview_chars,
-                **parsed.arguments,
-            )
-        else:
-            result = call_tool_traced(
-                parsed.tool_name,
-                trace_logger=self.trace_logger,
-                output_preview_chars=self.output_preview_chars,
-                **parsed.arguments,
-            )
+        self.lifecycle_observer.on_execution_started(action=parsed)
+        try:
+            if self.external_tool_registry is not None and self.external_tool_registry.has_tool(parsed.tool_name):
+                result = call_external_tool_traced(
+                    parsed.tool_name,
+                    external_registry=self.external_tool_registry,
+                    trace_logger=self.trace_logger,
+                    output_preview_chars=self.output_preview_chars,
+                    **parsed.arguments,
+                )
+            else:
+                result = call_tool_traced(
+                    parsed.tool_name,
+                    trace_logger=self.trace_logger,
+                    output_preview_chars=self.output_preview_chars,
+                    **parsed.arguments,
+                )
+        finally:
+            self.lifecycle_observer.on_execution_finished(action=parsed, result=locals().get("result"))
 
         if policy_metadata is not None:
             merged_result_metadata = {

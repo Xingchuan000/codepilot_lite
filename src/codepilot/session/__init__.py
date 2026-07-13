@@ -40,6 +40,12 @@ from codepilot.session.models import BranchCheckResult, BranchConfirmationRequir
 from codepilot.session.runtime import SessionRuntime, TurnExecutionResult
 from codepilot.session.service import SessionService
 from codepilot.session.trace_recorder import SessionTraceRecorder
+from codepilot.session.permission import PermissionScope, PermissionScopeBuilder, SessionPermissionBroker
+from codepilot.session.recovery import RecoveryPlan, RecoveryService
+from codepilot.session.reconcilers import RecoveryDecision, ReconciliationResult
+from codepilot.session.compaction import CompactionService
+from codepilot.session.model_capabilities import ModelContextProfile, resolve_model_context_profile
+from codepilot.session.service import CrossProviderSwitchNotSupported
 from codepilot.session.store import SessionStore
 
 __all__ = [
@@ -63,6 +69,17 @@ __all__ = [
     "SessionRuntime",
     "SessionService",
     "SessionTraceRecorder",
+    "SessionPermissionBroker",
+    "PermissionScope",
+    "PermissionScopeBuilder",
+    "RecoveryPlan",
+    "RecoveryService",
+    "RecoveryDecision",
+    "ReconciliationResult",
+    "CompactionService",
+    "ModelContextProfile",
+    "resolve_model_context_profile",
+    "CrossProviderSwitchNotSupported",
     "SessionStatus",
     "SessionStore",
     "SessionSummary",

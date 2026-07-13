@@ -297,6 +297,20 @@ if hasattr(turn, "turn_id"):
 
 `SessionService.open_session()` 在项目路径不存在时仍允许读取历史，但运行新 Turn 会拒绝。检测到 Git 分支变化时只返回确认信息，不会提前创建 Turn；确认事务会同时写入 `branch_changed` 事件和更新 Session 分支。Session 模式的 Trace 写入 `session_events`，不会创建 `trace.jsonl` 或 run 目录。
 
+### 工具恢复、Session 权限与流式消息（Step6–Step8）
+
+Step6 为每个内置工具声明 `idempotency` 和 `recovery_strategy`。工具执行前会通过 `ToolLifecycleObserver` 记录创建、执行开始和执行结束；`RecoveryService` 只会自动重试可确认未执行的低风险工具，无法确认的副作用会进入 `recovery_required`，不会静默重复执行。
+
+Step7 的 `SessionPermissionBroker` 将权限 Request、Response 和 `approve_session` Grant 写入 SQLite。授权范围按工具收窄：编辑工具绑定 workspace，Shell 绑定规范化命令哈希，外部/MCP 工具绑定 server、tool 和参数哈希。Policy deny 不会被 Session Grant 覆盖。
+
+Step8 为 LLM 增加可选 `stream()` 接口，旧的 `complete()` 不变。流式文本和 reasoning delta 会按顺序持久化；进程中断时 Assistant 保持 `interrupted`，恢复时由新的 Attempt 重新生成完整回答，不从最后字符直接续写。
+
+### Context Compact、模型切换与 Session Picker（Step9–Step10）
+
+`CompactionService` 使用有限的 `ModelContextProfile` 估算上下文，在达到阈值后生成结构化摘要并写入 `context_summaries`；原始消息不会删除，摘要失败会记录 `context_compaction_failed` 事件并阻断本次压缩。`SessionService.change_model()` 只允许同一 Provider 内切换，并且后续 Turn 继续保存真实模型快照。
+
+TUI 的 Session 辅助接口位于 `codepilot.tui_agent.session_picker` 和 `session_hydrator`：Picker 查询跨项目 Session，路径缺失的项目标记为只读；Hydrator 使用 message/part/event ID 从 SQLite 构建新的 Transcript View。命令层支持 `/sessions`、`/switch`、`/new`、`/rename`、`/archive`、`/unarchive`、`/compact` 和 `/export-session`，运行中的任务仍禁止切换。
+
 ### Chat-style TUI transcript helpers
 
 这一阶段新增了聊天式 TUI 用到的 transcript 数据结构和格式化函数，方便把 trace 投影成可复制的纯文本消息流。

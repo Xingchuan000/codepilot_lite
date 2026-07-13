@@ -49,6 +49,23 @@ class DefaultPermission(str, Enum):
     DENY = "deny"
 
 
+class ToolIdempotency(str, Enum):
+    """工具在恢复时允许重复执行的确定性等级。"""
+
+    SAFE = "safe"
+    CONDITIONAL = "conditional"
+    UNKNOWN = "unknown"
+
+
+class ToolRecoveryStrategy(str, Enum):
+    """工具执行中断后的对账策略。"""
+
+    AUTO_RETRY = "auto_retry"
+    RECONCILE_THEN_RETRY = "reconcile_then_retry"
+    RECONCILE_OR_ASK = "reconcile_or_ask"
+    ASK_USER = "ask_user"
+
+
 class ToolResult(BaseModel):
     """所有工具的统一返回结果。
 
@@ -74,6 +91,8 @@ class ToolSpec(BaseModel):
     risk: ToolRisk
     side_effect: ToolSideEffect
     default_permission: DefaultPermission
+    idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
+    recovery_strategy: ToolRecoveryStrategy = ToolRecoveryStrategy.ASK_USER
     parameters: dict[str, Any] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
