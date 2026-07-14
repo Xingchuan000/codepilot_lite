@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from inspect import signature
 from typing import Any
 
 from codepilot.session.database import SessionDatabase
@@ -41,11 +42,37 @@ class MustRetainPolicy:
         messages = self.store.list_messages_with_parts(session_id)
         retained_messages = {message.message_id for message, _ in messages if message.turn_id in recent_ids}
         retained_calls = {call.tool_call_id for call in self.store.list_tool_calls(session_id) if call.status in {"approval_pending", "execution_started", "execution_uncertain", "recovery_required"}}
+        retained_call_ids = {call.tool_call_id for call in self.store.list_tool_calls(session_id) if call.tool_call_id in retained_calls}
+        retained_messages.update(
+            message.message_id
+            for message, _ in messages
+            if message.metadata.get("tool_call_id") in retained_call_ids
+        )
+        retained_messages.update(
+            message.message_id
+            for message, parts in messages
+            if any(
+                part.metadata.get("tool_call_id") in retained_call_ids
+                for part in parts
+            )
+        )
         retained_messages.update(
             message.message_id
             for message, parts in messages
             if any(part.metadata.get("key_decision") is True for part in parts)
         )
+        # 最近一次文件修改、测试和 Diff 是后续模型判断工作状态所需的事实，
+        # 即使它们已经不在最近四个 Turn 内，也不能被摘要边界吞掉。
+        protected_tool_names = {"edit_file", "apply_patch", "run_tests", "run_shell", "git_diff"}
+        protected_calls = [call for call in self.store.list_tool_calls(session_id) if call.tool_name in protected_tool_names]
+        for call in protected_calls[-3:]:
+            retained_calls.add(call.tool_call_id)
+            retained_messages.update(
+                message.message_id
+                for message, parts in messages
+                if message.metadata.get("tool_call_id") == call.tool_call_id
+                or any(part.metadata.get("tool_call_id") == call.tool_call_id for part in parts)
+            )
         return retained_messages, retained_calls
 
 
@@ -70,6 +97,8 @@ class CompactionService:
         session = self.store.get_session(session_id)
         profile = profile or resolve_model_context_profile(session.provider, session.current_model)
         messages = self.store.list_messages_with_parts(session_id)
+        latest_summary = self.store.get_latest_context_summary(session_id)
+        covered_before = set(latest_summary.metadata.get("covered_message_ids", [])) if latest_summary is not None else set()
         payload = [
             {
                 "message_id": message.message_id,
@@ -80,7 +109,7 @@ class CompactionService:
                 "parts": [part.content for part in parts if part.replayable],
             }
             for message, parts in messages
-            if message.metadata.get("summary_id") is None
+            if message.metadata.get("summary_id") is None and message.message_id not in covered_before
         ]
         if not payload:
             raise ValueError("cannot compact an empty session")
@@ -88,14 +117,19 @@ class CompactionService:
             raise ValueError("context is below the compaction threshold")
 
         retained_message_ids, retained_tool_call_ids = MustRetainPolicy(self.store).select(session_id, current_turn_id)
-        latest_summary = self.store.get_latest_context_summary(session_id)
-        covered_before = set(latest_summary.metadata.get("covered_message_ids", [])) if latest_summary is not None and latest_summary.status == "completed" else set()
-        covered_message_ids = [message.message_id for message, _ in messages if message.message_id not in retained_message_ids and message.message_id not in covered_before]
+        covered_message_ids = [message.message_id for message, _ in messages if message.message_id not in retained_message_ids and message.message_id not in covered_before and message.metadata.get("summary_id") is None]
         summary_payload = [item for item in payload if item["message_id"] in covered_message_ids]
         if not summary_payload:
             raise ValueError("no new history is available for compaction")
         try:
-            summary_text = self.summarizer(summary_payload)
+            previous_summary = latest_summary.content if latest_summary is not None else None
+            max_output_tokens = max(1, min(4_000, int(profile.max_input_tokens * 0.1)))
+            summary_input = ([{"role": "system", "content": previous_summary}] if previous_summary else []) + summary_payload
+            if "max_output_tokens" in signature(self.summarizer).parameters:
+                summary_text = self.summarizer(summary_input, max_output_tokens=max_output_tokens, previous_summary=previous_summary)
+            else:
+                summary_text = self.summarizer(summary_input)
+            summary_text = summary_text[: max_output_tokens * 4]
             _validate_summary(summary_text)
         except Exception as exc:
             self.store.append_event(
@@ -107,6 +141,11 @@ class CompactionService:
             )
             raise
         source_sequences = [self.store.get_turn(message.turn_id).sequence for message, _ in messages if message.message_id in covered_message_ids]
+        newly_covered_message_ids = tuple(covered_message_ids)
+        if latest_summary is not None:
+            covered_message_ids = list(dict.fromkeys([*latest_summary.metadata.get("covered_message_ids", []), *covered_message_ids]))
+            if latest_summary.status == "completed":
+                self.store.update_context_summary_status(latest_summary.summary_id, "superseded")
         selection = CompactionSelection(tuple(covered_message_ids), tuple(sorted(retained_message_ids)), tuple(sorted(retained_tool_call_ids)), min(source_sequences), max(source_sequences))
         summary_record = self.store.create_context_summary_with_message(
             session_id=session_id,
@@ -117,6 +156,8 @@ class CompactionService:
             model=profile.model,
             metadata={
                 "covered_message_ids": list(selection.covered_message_ids),
+                "newly_covered_message_ids": list(newly_covered_message_ids),
+                "supersedes_summary_id": latest_summary.summary_id if latest_summary is not None else None,
                 "retained_message_ids": list(selection.retained_message_ids),
                 "retained_tool_call_ids": list(selection.retained_tool_call_ids),
                 "provider": profile.provider,
@@ -142,29 +183,22 @@ class CompactionService:
         """运行前先尝试压缩上下文；成功后上下文再重建一次。"""
 
         if _estimate_tokens(self.store.list_messages_with_parts(session_id)) >= profile.max_input_tokens * self.threshold:
-            try:
-                self.compact(session_id, force=False, current_turn_id=current_turn_id, profile=profile)
-            except Exception as exc:
-                self.store.append_event(
-                    session_id=session_id,
-                    event_type="context_compaction_failed",
-                    payload={"turn_id": current_turn_id, "error": str(exc)},
-                    turn_id=current_turn_id,
-                    metadata={"source": "compaction_service"},
-                )
-                raise
+            # compact() 是唯一负责记录失败事件的边界，避免外层重复审计同一失败。
+            self.compact(session_id, force=False, current_turn_id=current_turn_id, profile=profile)
 
 
 def _estimate_tokens(value: Any) -> int:
     return max(1, len(str(value)) // 4)
 
 
-def _default_summary(messages: list[dict[str, Any]]) -> str:
+def _default_summary(messages: list[dict[str, Any]], *, max_output_tokens: int = 4_000, previous_summary: str | None = None) -> str:
     lines = ["Session summary:"]
+    if previous_summary:
+        lines.append(f"Previous summary: {previous_summary[:1000]}")
     for message in messages:
         lines.append(f"- {message['role']}: {str(message['content'])[:800]}")
     lines.extend(["Key decisions: preserved in the summarized messages.", "Files/tests/diff: see the listed tool results.", "Unfinished work: continue from the latest message."])
-    return "\n".join(lines)
+    return "\n".join(lines)[: max_output_tokens * 4]
 
 
 def _validate_summary(summary: str) -> None:

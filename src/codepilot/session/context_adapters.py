@@ -8,6 +8,7 @@ from typing import Protocol
 from codepilot.agent.prompts import build_system_prompt
 from codepilot.llm.types import ChatMessage, RichChatMessage
 from codepilot.session.artifacts import ArtifactStore
+from codepilot.session.context_budget import ContextBudgetAllocator
 from codepilot.session.model_capabilities import ModelContextProfile
 from codepilot.session.models import ContextSummaryRecord, MessagePartRecord, MessageRecord
 from codepilot.session.store import SessionStore
@@ -34,8 +35,8 @@ class TextActionContextAdapter:
         self.artifacts = artifacts or ArtifactStore(store.database)
 
     def build_messages(self, history: SessionHistory, profile: ModelContextProfile) -> list[ChatMessage | RichChatMessage]:
-        budget_chars = profile.max_input_tokens * 4
-        messages: list[ChatMessage | RichChatMessage] = [ChatMessage("system", build_system_prompt())]
+        budget = ContextBudgetAllocator(profile.max_input_tokens)
+        messages: list[ChatMessage | RichChatMessage] = [ChatMessage("system", budget.reserve_system(build_system_prompt()))]
         covered_message_ids: set[str] = set()
         for summary in history.summaries:
             if summary.status != "completed":
@@ -43,13 +44,17 @@ class TextActionContextAdapter:
             covered_message_ids.update(str(item) for item in summary.metadata.get("covered_message_ids", []))
             content = _summary_content(summary)
             if content:
-                messages.append(ChatMessage("system", content))
+                messages.append(ChatMessage("system", budget.consume_summary(content)))
         for message, parts in history.messages:
+            if message.metadata.get("summary_id") is not None:
+                # 摘要索引是唯一注入入口，Summary Message 仅保留为审计实体。
+                continue
             if message.message_id in covered_message_ids:
                 continue
             if message.status in {"failed", "in_progress"}:
                 continue
-            content = _message_content(self.artifacts, message, parts, budget_chars, profile)
+            content = _message_content(self.artifacts, message, parts, budget.remaining_chars(), profile)
+            content = budget.consume_message(content)
             if not content:
                 continue
             if message.status == "interrupted" and message.role == "assistant":
@@ -89,6 +94,10 @@ def _message_content(
                 not profile.supports_reasoning_replay
                 or not _provider_format_compatible(part.provider_format, profile)
             ):
+                continue
+            if part.type == "tool_call":
+                # Text Action 的原始 JSON 已在 text Part 中保存；结构化 Part
+                # 只供 Native Tool Provider 消费，不能再次拼入文本正文。
                 continue
             text = _part_content(artifacts, part, remaining)
             if not text:

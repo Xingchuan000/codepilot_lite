@@ -190,6 +190,48 @@ def test_pending_approval_blocks_automatic_recovery_attempt(tmp_path: Path) -> N
     assert store.get_turn(turn.turn_id).status == "running"
 
 
+def test_approval_after_restart_finalizes_old_tool_call_as_not_executed(tmp_path: Path) -> None:
+    database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
+    database.initialize()
+    store = SessionStore(database)
+    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.create_turn(
+        session_id=session.session_id,
+        title="Turn 1",
+        provider_snapshot="openai",
+        model_snapshot="fake",
+        permission_mode_snapshot="manual",
+        branch_snapshot=None,
+        status="running",
+    )
+    attempt = store.create_attempt(turn_id=turn.turn_id, status="running", started_at="2024-01-01T00:00:00+00:00")
+    call = store.create_tool_call(turn_id=turn.turn_id, attempt_id=attempt.attempt_id, tool_name="run_shell", arguments={"command": "echo hi"}, status="approval_pending")
+    store.create_permission_request(
+        request_id="permission-restart-1",
+        session_id=session.session_id,
+        turn_id=turn.turn_id,
+        attempt_id=attempt.attempt_id,
+        tool_call_id=call.tool_call_id,
+        tool_name="run_shell",
+        arguments={"command": "echo hi"},
+        reason="approval required",
+        status="pending",
+    )
+    store.persist_permission_resolution(
+        "permission-restart-1",
+        "approve_once",
+        "approved after restart",
+        create_grant=False,
+        source="test",
+    )
+
+    resumed = RecoveryService(database).resume_after_permission("permission-restart-1")
+
+    assert resumed is not None
+    assert store.get_tool_call(call.tool_call_id).status == "recovered_not_executed"
+    assert store.get_tool_result_by_call(call.tool_call_id).status == "recovered_not_executed"
+
+
 def test_recovery_claims_only_one_interrupted_turn_at_a_time(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     database.initialize()

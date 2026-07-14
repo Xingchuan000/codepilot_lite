@@ -102,15 +102,14 @@ class SessionTraceRecorder:
     def tool_result_created(self, *, tool_name: str, success: bool, content: Any, **_: Any) -> None:
         tool_call_id = _.get("tool_call_id")
         result = self.store.get_tool_result_by_call(str(tool_call_id)) if tool_call_id else None
-        observation = _.get("observation") or content or ""
+        observation = _.get("observation")
         artifact_id = result.artifact_id if result is not None else None
-        message_content = observation
+        message_content = observation if observation is not None else content or ""
         if artifact_id is None and isinstance(content, str):
             persisted = self.artifacts.persist_content(self.session_id, "tool_result", content)
             artifact_id = persisted.artifact_id
-            message_content = persisted.inline_content if persisted.inline_content is not None else persisted.preview
-        elif result is not None and result.output_preview is not None:
-            message_content = result.output_preview
+            if observation is None:
+                message_content = persisted.inline_content if persisted.inline_content is not None else persisted.preview
         message = self.store.create_message(
             session_id=self.session_id,
             turn_id=self.turn_id or "",
@@ -128,6 +127,25 @@ class SessionTraceRecorder:
             content=message_content,
             artifact_id=artifact_id,
             metadata={"tool_call_id": tool_call_id, "tool_name": tool_name, "success": success},
+        )
+
+    def loop_observation_created(self, *, content: str, category: str, **_: Any) -> None:
+        """把模型可见的内部纠错消息写成可恢复的 synthetic user Message。"""
+
+        message = self.store.create_message(
+            session_id=self.session_id,
+            turn_id=self.turn_id or "",
+            attempt_id=self.attempt_id,
+            role="user",
+            status="completed",
+            content=content,
+            metadata={"synthetic": True, "category": category},
+        )
+        self.store.append_message_part(
+            message.message_id,
+            type="system_event" if category != "pre_execution_error" else "error",
+            content=content,
+            metadata={"synthetic": True, "category": category},
         )
 
     def agent_finished(self, **_: Any) -> None:

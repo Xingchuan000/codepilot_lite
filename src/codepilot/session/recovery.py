@@ -143,6 +143,25 @@ class RecoveryService:
             else:
                 # 批准只表示审计事实已经解决，不代表旧进程执行过工具。新的 Attempt 从
                 # SQLite 历史重新组装上下文，因此不会直接重放未知副作用。
+                if row["tool_call_id"] is not None:
+                    connection.execute(
+                        "UPDATE tool_calls SET status = 'recovered_not_executed', completed_at = ?, updated_at = ? "
+                        "WHERE tool_call_id = ? AND status IN ('approval_pending', 'approved')",
+                        (timestamp, timestamp, row["tool_call_id"]),
+                    )
+                    connection.execute(
+                        "INSERT INTO tool_results(tool_result_id, tool_call_id, status, content_json, created_at, success, metadata_json) "
+                        "SELECT ?, ?, 'recovered_not_executed', ?, ?, NULL, ? "
+                        "WHERE NOT EXISTS (SELECT 1 FROM tool_results WHERE tool_call_id = ?)",
+                        (
+                            make_tool_result_id(),
+                            row["tool_call_id"],
+                            json.dumps("permission resolved after restart; previous worker did not execute the tool"),
+                            timestamp,
+                            json.dumps({"reason": "permission resolved after restart before execution"}),
+                            row["tool_call_id"],
+                        ),
+                    )
                 connection.execute(
                     "UPDATE run_attempts SET status = 'interrupted', ended_at = COALESCE(ended_at, ?), interruption_reason = 'permission resolved after restart', worker_id = NULL, lease_expires_at = NULL, updated_at = ? "
                     "WHERE attempt_id = ? AND status IN ('created', 'running')",

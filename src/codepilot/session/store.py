@@ -366,6 +366,16 @@ class SessionStore:
             raise LookupError(attempt_id)
         return self._attempt_from_row(row)
 
+    def list_attempts(self, turn_id: str) -> list[RunAttemptRecord]:
+        """按创建顺序返回 Turn 的所有 Attempt，供恢复和 TUI 状态重建使用。"""
+
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM run_attempts WHERE turn_id = ? ORDER BY attempt_number",
+                (turn_id,),
+            ).fetchall()
+        return [self._attempt_from_row(row) for row in rows]
+
     def start_turn_attempt(self, turn_id: str, attempt_id: str, *, worker_id: str, lease_expires_at: str) -> tuple[TurnRecord, RunAttemptRecord]:
         """在模型调用前同时把 Turn 和指定 Attempt 标记为 running。"""
 
@@ -822,6 +832,42 @@ class SessionStore:
             updated = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
         return self._tool_call_from_row(updated)
 
+    def require_tool_recovery(
+        self,
+        turn_id: str,
+        attempt_id: str,
+        tool_call_id: str | None,
+        reason: str,
+        worker_id: str,
+    ) -> tuple[TurnRecord, RunAttemptRecord]:
+        """原子停止未知副作用 Attempt，并留下唯一的恢复入口事件。"""
+
+        timestamp = now_iso()
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE run_attempts SET status = 'interrupted', ended_at = ?, interruption_reason = ?, worker_id = NULL, lease_expires_at = NULL, updated_at = ? WHERE attempt_id = ? AND turn_id = ? AND status = 'running' AND worker_id = ?",
+                (timestamp, reason, timestamp, attempt_id, turn_id, worker_id),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise LookupError(attempt_id)
+            connection.execute(
+                "UPDATE turns SET status = 'recovery_required', completed_at = ?, error_code = ?, updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'running'",
+                (timestamp, reason, timestamp, timestamp, turn_id),
+            )
+            if connection.execute("SELECT changes()").fetchone()[0] != 1:
+                raise RuntimeError("turn is no longer owned by this running attempt")
+            session_id = connection.execute("SELECT session_id FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()[0]
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?", (session_id,)
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) VALUES (?, ?, ?, 'recovery_required', ?, ?, ?, ?, ?)",
+                (make_event_id(), session_id, sequence, timestamp, turn_id, attempt_id, _json_dumps({"tool_call_id": tool_call_id, "reason": reason}), _json_dumps({"worker_id": worker_id})),
+            )
+            turn_row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
+            attempt_row = connection.execute("SELECT * FROM run_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
+        return self._turn_from_row(turn_row), self._attempt_from_row(attempt_row)
+
     def persist_recovered_tool_result(
         self,
         tool_call_id: str,
@@ -1069,6 +1115,14 @@ class SessionStore:
                 (session_id,),
             ).fetchone()
         return self._context_summary_from_row(row) if row is not None else None
+
+    def update_context_summary_status(self, summary_id: str, status: str) -> ContextSummaryRecord:
+        with self.database.transaction() as connection:
+            connection.execute("UPDATE context_summaries SET status = ? WHERE summary_id = ?", (status, summary_id))
+            row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
+        if row is None:
+            raise LookupError(summary_id)
+        return self._context_summary_from_row(row)
 
     def get_user_message_for_turn(self, turn_id: str) -> MessageRecord | None:
         with self.database.transaction() as connection:

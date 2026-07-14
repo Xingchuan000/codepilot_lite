@@ -30,6 +30,7 @@ from codepilot.agent.state import (
 from codepilot.llm.fake import FakeLLMExhaustedError
 from codepilot.llm.types import ChatMessage, CodePilotLLMClient, LLMResponse, LLMStreamEvent, RichChatMessage
 from codepilot.router import ToolAction, ToolRouter
+from codepilot.router.errors import ToolExecutionUncertainError, ToolPreExecutionError
 from codepilot.tools.base import ToolSpec
 from codepilot.tools.registry import list_tool_specs
 from codepilot.trace.logger import TraceLogger
@@ -139,6 +140,7 @@ class AgentEventSink(Protocol):
     def assistant_message_completed(self, **kwargs: Any) -> None: ...
     def tool_call_created(self, **kwargs: Any) -> None: ...
     def tool_result_created(self, **kwargs: Any) -> None: ...
+    def loop_observation_created(self, **kwargs: Any) -> None: ...
     def agent_finished(self, **kwargs: Any) -> None: ...
 
     def assistant_message_interrupted(self, **kwargs: Any) -> None: ...
@@ -514,6 +516,13 @@ class MinimalAgentLoop:
             written_files=list(state.written_files),
         )
         state.messages.append(ChatMessage(role="user", content=observation))
+        if self.event_sink is not None:
+            self.event_sink.loop_observation_created(
+                content=observation,
+                category="evidence_blocked",
+                turn_id=self._context_turn_id,
+                attempt_id=self._context_attempt_id,
+            )
         self.trace_logger.record_agent_observation(
             tool_name=None,
             observation=observation,
@@ -542,11 +551,20 @@ class MinimalAgentLoop:
         )
         state.messages.append(ChatMessage(role="assistant", content=response_content))
         state.messages.append(ChatMessage(role="user", content=observation))
+        if self.event_sink is not None:
+            self.event_sink.loop_observation_created(
+                content=observation,
+                category="pre_execution_error",
+                turn_id=self._context_turn_id,
+                attempt_id=self._context_attempt_id,
+            )
         self.trace_logger.record_agent_observation(tool_name=tool_name, observation=observation)
 
     def run_turn(self, context: TurnExecutionContext) -> AgentRunResult:
         """执行一个 Turn；不会重新生成或查询历史消息。"""
 
+        self._context_turn_id = context.turn_id
+        self._context_attempt_id = context.attempt_id
         state = create_initial_state(context.task, context.repo, max_steps=self.max_steps, messages=context.messages)
         initial_evidence = evidence_snapshot(state)
         self.trace_logger.record_run_start(
@@ -619,6 +637,13 @@ class MinimalAgentLoop:
                     state.messages.append(ChatMessage(role="assistant", content=response.content))
                     observation = format_parse_error_observation(exc)
                     state.messages.append(ChatMessage(role="user", content=observation))
+                    if self.event_sink is not None:
+                        self.event_sink.loop_observation_created(
+                            content=observation,
+                            category="parse_error",
+                            turn_id=context.turn_id,
+                            attempt_id=context.attempt_id,
+                        )
                     self.trace_logger.record_agent_observation(tool_name=None, observation=observation)
                     continue
                 if turn.kind == "natural_reply":
@@ -699,7 +724,7 @@ class MinimalAgentLoop:
                     return self._cancelled_result(state)
                 try:
                     route_result = self.router.route(tool_action)
-                except Exception as exc:
+                except ToolPreExecutionError as exc:
                     # Router 可能因权限等待被取消而抛错；此时取消状态优先，不生成误导性的工具错误。
                     if self._cancel_requested():
                         return self._cancelled_result(state)
@@ -710,6 +735,10 @@ class MinimalAgentLoop:
                         error=exc,
                     )
                     continue
+                except ToolExecutionUncertainError:
+                    # execution_started 之后副作用未知，绝不能把异常伪装成普通
+                    # observation；Runtime 会把当前 Attempt 标为 recovery_required。
+                    raise
                 observation = format_observation(route_result)
                 if self.event_sink is not None:
                     self.event_sink.tool_result_created(

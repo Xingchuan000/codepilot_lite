@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -119,6 +120,34 @@ class ArtifactStore:
         target_path = target_dir / f"{artifact.artifact_id}{suffix}"
         target_path.write_bytes(self.read_bytes(artifact_id))
         return target_path
+
+    def cleanup_orphans(self, session_id: str | None = None, *, older_than_seconds: int = 3600) -> list[Path]:
+        """删除超过安全期限且没有 SQLite 记录的 Artifact 文件。"""
+
+        root = self.paths.sessions_dir
+        session_dirs = [root / session_id] if session_id else list(root.iterdir()) if root.exists() else []
+        removed: list[Path] = []
+        cutoff = time.time() - older_than_seconds
+        for session_dir in session_dirs:
+            artifact_dir = session_dir / "artifacts"
+            if not artifact_dir.is_dir():
+                continue
+            with self.database.transaction() as connection:
+                known = {
+                    row[0]
+                    for row in connection.execute(
+                        "SELECT artifact_id FROM artifacts WHERE session_id = ?",
+                        (session_dir.name,),
+                    )
+                }
+            for path in artifact_dir.iterdir():
+                if not path.is_file() or path.name in known or path.stat().st_mtime >= cutoff:
+                    continue
+                if not path.name.startswith("art-"):
+                    continue
+                path.unlink()
+                removed.append(path)
+        return removed
 
     def _put_external(self, session_id: str, kind: str, content: bytes, *, mime_type: str) -> ArtifactRecord:
         artifact_id = make_artifact_id()

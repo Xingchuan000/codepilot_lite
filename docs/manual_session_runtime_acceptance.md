@@ -79,7 +79,7 @@ git -C "$DEMO_ROOT/project-a" checkout -b acceptance-branch
 
 ## 9. tool execution uncertain 恢复
 
-使用测试代码或故障注入，让工具在 `execution_started` 后、Tool Result 写入前终止。重新打开 Session 后检查 Recovery Modal：应显示 Tool、参数、`execution_started` 时间、对账结果及 `inspect / mark completed / retry / abort` 操作。只读工具可自动重试；写 Shell 或未知外部工具必须人工确认，不能静默重复执行。
+使用测试代码或故障注入，让工具在 `execution_started` 后、Tool Result 写入前终止。重新打开 Session 后检查 Recovery Modal：应显示 Tool、参数、`execution_started` 时间和对账结果；Modal 打开时自动 Inspect，用户选择 `mark completed / retry / abort`。只读工具可自动重试；写 Shell 或未知外部工具必须人工确认，不能静默重复执行。
 
 ## 10. interrupted Assistant
 
@@ -104,12 +104,13 @@ database = SessionDatabase(resolve_session_paths().database_path)
 database.initialize()
 CompactionService(database).compact(
     "<session-id>",
-    ModelContextProfile("codepilot", "acceptance", max_input_tokens=1000, supports_reasoning_replay=False),
+    force=True,
+    profile=ModelContextProfile("codepilot", "acceptance", max_input_tokens=1000, supports_reasoning_replay=False),
 )
 PY
 ```
 
-验收：生成 `context_summaries` 和 `context_compacted` Event，原始消息仍可查看，ContextAssembler 使用摘要而不是删除原文。
+验收：生成 `context_summaries` 和 `context_compacted` Event，原始消息仍可查看，ContextAssembler 使用摘要而不是删除原文。连续执行三次 `/compact`，确认早期已压缩消息不会重新以全文进入上下文，未完成 Tool Call、最近文件修改、测试结果和 Diff 仍可见。
 
 ## 12. Compact failure
 
@@ -157,4 +158,4 @@ rm -rf /tmp/codepilot-session-exports
 python -m codepilot.cli tui "$DEMO_ROOT/project-a" --permission-mode manual
 ```
 
-验收：正常运行只更新 SQLite 和内部 Artifact；以下文件均不存在：`session.json`、`messages.jsonl`、`runs.jsonl`、`trace.jsonl`、`report.json`。只有显式执行 `/export-session` 或调用 `SessionExporter.export()` 时，才允许在导出目录生成这些导出文件。
+验收：正常运行只更新 SQLite 和内部 Artifact；以下文件均不存在：`session.json`、`messages.jsonl`、`runs.jsonl`、`trace.jsonl`、`report.json`。只有显式执行 `/export-session` 或调用 `SessionExporter.export()` 时，才允许在导出目录生成这些导出文件。无效 `/switch <不存在 id>`、空 Session 的 `/compact` 和无权限的导出路径应显示为 TUI 错误而不退出主循环；切换 Session 后右侧测试、Diff、证据和完成状态不得串线。

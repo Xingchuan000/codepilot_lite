@@ -278,6 +278,40 @@ turn = store.create_turn(
 - `/export-session [path]` 导出当前 Session 到指定目录
 - `/move <path>` 把后续新建 Session 的项目目录切换到指定路径
 
+### Session 第三轮 Phase 0–7 实现说明
+
+本轮只实现计划中的 Phase 0–4，Session 的 SQLite 数据库仍是唯一事实来源：
+
+- 初始化旧版 v1–v4 数据库时，先按版本完成迁移和外键校验，最后才创建最新索引；未知版本会明确拒绝，不会覆盖版本号。
+- 工具已经进入真实执行阶段但结果未知时，当前 Attempt 会立即停止并进入 `recovery_required`，不会继续调用模型或自动重试。
+- Text Action 上下文只回放 Assistant 的文本/兼容 reasoning；结构化 `tool_call` 仍保留在 SQLite，但不会在文本协议中重复出现。Tool Message 保存模型实际收到的规范 Observation，原始 Tool 输出仍通过 Artifact 关联保存。
+- 解析错误、Evidence Gate 拒绝和工具准备失败等模型可修正 Observation 会作为 synthetic user Message 持久化，因此进程重启后可以恢复同一消息历史。
+- Compact 使用累计覆盖集合，旧摘要标记为 `superseded`，有效摘要只注入一次；当前 Turn、最近完整 Turn、未解决 ToolCall、关键决策以及最近文件/测试/Diff 事实会被保留。
+- 上下文预算按一次模型调用全局递减，而不是每条消息重新获得完整窗口；默认未知模型按 16K 输入 Token 处理，已知模型按能力表选择窗口，超长内容会带有 `context truncated` 标记。
+- Recovery Worker 异常会统一发布 `error` 和 `run_finished`，恢复状态会重新扫描；无效 slash command 会显示为 TUI 错误，不会逃出事件处理器。
+- Session 切换会从 SQLite Hydration 创建全新的 View，恢复 `waiting_permission`、`recovery_required`、`interrupted` 等状态，不复用上一 Session 的证据、测试和完成字段。
+- 新建 Session 保存实际 Provider/Model；`/model <model-name>` 只允许同 Provider 切换，并仅影响后续 Turn。ArtifactStore 提供 `cleanup_orphans()` 清理超过安全期限且无数据库记录的孤儿文件。
+- TUI 的 SessionController 只编排 `codepilot.session.SessionService/SessionStore`，不再新增第二套 Session 事实模型；手动验收流程见 `docs/manual_session_runtime_acceptance.md`。
+
+开发者可以运行 Phase 0–4 定向回归测试：
+
+```bash
+PYTHONPATH=src pytest -q \
+  tests/codepilot/test_session_schema_migrations.py \
+  tests/codepilot/test_session_context_exact_replay.py \
+  tests/codepilot/test_session_context_budget.py \
+  tests/codepilot/test_session_compaction_cumulative.py
+```
+
+TUI/Agent 定向回归测试：
+
+```bash
+PYTHONPATH=src pytest -q \
+  tests/codepilot/test_tui_agent_*.py \
+  tests/codepilot/test_agent_loop_fake_llm.py \
+  tests/codepilot/test_architecture_dependencies.py
+```
+
 导出目录只影响导出结果，不会自动切换当前 Project、Session 或 Transcript。
 Session 的历史内容、权限请求和工具结果都以 SQLite 为唯一事实来源，切换 Session 后会自动从数据库重新挂载。
 

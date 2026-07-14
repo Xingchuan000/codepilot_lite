@@ -168,12 +168,18 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
     transcript.sort(key=lambda item: (item.timestamp, _transcript_type_order(item.kind), item.id))
 
     session = store.get_session(session_id)
+    turns = store.service.store.list_turns(session_id)
+    latest_turn = turns[-1] if turns else None
+    attempts = store.service.store.list_attempts(latest_turn.turn_id) if latest_turn is not None else []
+    latest_attempt = attempts[-1] if attempts else None
     return HydratedSessionView(
         transcript=tuple(transcript),
         timeline=tuple(timeline),
         permission_requests=tuple(permission_requests),
         recovery_state=session.status,
-        status="idle",
+        status=_view_status(latest_turn.status if latest_turn is not None else None, session.status),
+        current_step=latest_turn.sequence if latest_turn is not None else None,
+        run_id=latest_attempt.attempt_id if latest_attempt is not None else None,
         last_assistant_message=last_assistant_text,
         last_tool_output=last_tool_output,
         changed_files=tuple(dict.fromkeys(changed_files)),
@@ -239,7 +245,11 @@ def _dump_json(value: object) -> str:
 
 def _message_body(role: str, content: object, parts) -> str:
     if parts:
-        values = [_part_body(part.content) for part in parts if part.replayable]
+        values = [
+            _part_body(part.content)
+            for part in parts
+            if part.replayable and part.type != "tool_call"
+        ]
         if values:
             return "\n".join(values)
     return _dump_json(content)
@@ -296,3 +306,13 @@ def _permission_request_from_record(record) -> PermissionRequest:
 
 def _transcript_type_order(kind: str) -> int:
     return {"user_message": 0, "assistant_raw": 1, "assistant_action": 2, "permission_request": 3, "permission_response": 4, "tool_result": 5}.get(kind, 9)
+
+
+def _view_status(turn_status: str | None, session_status: str) -> str:
+    """把 SQLite 的最新生命周期状态转换成 TUI 视图状态。"""
+
+    if session_status == "archived":
+        return "idle"
+    if turn_status is None:
+        return "idle"
+    return turn_status

@@ -29,6 +29,7 @@ class CommandResult:
     export_session_requested: bool = False
     export_target: Path | None = None
     next_new_session_project: Path | None = None
+    model_name: str | None = None
 
 def parse_slash_command(text: str) -> tuple[str, list[str]]:
     parts = text.strip().split()
@@ -49,7 +50,7 @@ def handle_command(
     if not command:
         return CommandResult(handled=False)
     if command == "help":
-        return CommandResult(handled=True, output="/help /sessions /new /switch <session-id> /rename <title> /archive /unarchive <session-id> /compact /export-session [path] /cancel /exit")
+        return CommandResult(handled=True, output="/help /sessions /new /switch <session-id> /rename <title> /model <model-name> /archive /unarchive <session-id> /compact /export-session [path] /cancel /exit")
     if command == "sessions":
         return CommandResult(handled=True, output="Session picker requested", open_session_picker=True)
     if command == "switch":
@@ -57,6 +58,9 @@ def handle_command(
     if command == "rename":
         title = " ".join(args).strip()
         return CommandResult(handled=True, output="Session rename requested" if title else "Usage: /rename <title>", rename_title=title or None)
+    if command == "model":
+        model = " ".join(args).strip()
+        return CommandResult(handled=True, output="Session model change requested" if model else "Usage: /model <model-name>", model_name=model or None)
     if command == "archive":
         return CommandResult(handled=True, output="Session archive requested", archive_current_session=True)
     if command == "unarchive":

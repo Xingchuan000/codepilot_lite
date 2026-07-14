@@ -11,6 +11,7 @@ from uuid import uuid4
 from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop, TurnExecutionContext
 from codepilot.llm.types import CodePilotLLMClient
 from codepilot.router import ToolRouter
+from codepilot.router.errors import ToolExecutionUncertainError
 from codepilot.session.compaction import CompactionService
 from codepilot.session.context import ContextAssembler
 from codepilot.session.database import SessionDatabase
@@ -133,6 +134,17 @@ class SessionRuntime:
                 self.store.update_turn_status(turn_id, "recovery_required")
                 raise
             result = loop.run_turn(TurnExecutionContext(session.session_id, turn_id, attempt.attempt_id, str(user_message.content), opened.project_path, context))
+        except ToolExecutionUncertainError as exc:
+            heartbeat_stop.set()
+            heartbeat.join()
+            self.store.require_tool_recovery(
+                turn_id,
+                attempt_id,
+                exc.tool_call_id,
+                str(exc),
+                worker_id,
+            )
+            raise
         except Exception as exc:
             heartbeat_stop.set()
             heartbeat.join()

@@ -31,9 +31,25 @@ class SessionDatabase:
     def initialize(self) -> None:
         connection = self.connect()
         try:
-            connection.executescript(_schema_sql())
+            # 旧库可能缺少新版本索引所引用的列，因此迁移前只能创建表，
+            # 不能直接执行包含完整索引的最新 Schema。
+            has_schema_meta = _table_exists(connection, "schema_meta")
+            has_business_tables = any(_table_exists(connection, table) for table in ("projects", "sessions", "turns"))
+            if not has_schema_meta and not has_business_tables:
+                connection.executescript(_schema_sql())
+                _create_latest_indexes(connection)
+                _write_schema_version(connection, SCHEMA_VERSION)
+                _verify_schema(connection, SCHEMA_VERSION)
+                connection.commit()
+                return
+
+            connection.executescript(_schema_tables_sql())
             row = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
-            version = int(row[0]) if row is not None else SCHEMA_VERSION
+            if row is None:
+                raise RuntimeError("Session database has business tables but no schema version")
+            version = int(row[0])
+            if version > SCHEMA_VERSION or version < 1:
+                raise RuntimeError(f"unsupported Session schema version: {version}")
             if version < 2:
                 _migrate_v1_to_v2(connection)
                 version = 2
@@ -46,9 +62,9 @@ class SessionDatabase:
             if version < 5:
                 _migrate_v4_to_v5(connection)
                 version = 5
-            if version != SCHEMA_VERSION:
-                raise RuntimeError(f"unsupported Session schema version: {version}")
-            connection.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)", (str(version),))
+            _create_latest_indexes(connection)
+            _verify_schema(connection, version)
+            _write_schema_version(connection, version)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -148,16 +164,15 @@ def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
         for column, type_name in columns.items():
             if column not in existing:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_name}")
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_permission_requests_session_status ON permission_requests(session_id, status)")
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_tool_results_tool_call_id ON tool_results(tool_call_id)")
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_status ON messages(session_id, status)")
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_context_summaries_session_status_end ON context_summaries(session_id, status, source_end_sequence)")
 
 
 def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
     """重建权限请求表，使升级库与新建库拥有相同的外键约束。"""
 
+    # 临时表可能来自上次中断。正式表仍在时，旧临时表不可能是已提交的结果，
+    # 因此先删除并从正式表重新复制，保证迁移可重入且不误删正式数据。
     connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute("DROP TABLE IF EXISTS permission_requests_v5")
     connection.execute(
         """CREATE TABLE permission_requests_v5 (
             request_id TEXT PRIMARY KEY,
@@ -190,12 +205,65 @@ def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
     )
     connection.execute("DROP TABLE permission_requests")
     connection.execute("ALTER TABLE permission_requests_v5 RENAME TO permission_requests")
-    connection.execute("CREATE INDEX IF NOT EXISTS idx_permission_requests_session_status ON permission_requests(session_id, status)")
     connection.execute("PRAGMA foreign_keys = ON")
     if connection.execute("PRAGMA foreign_key_check").fetchall():
         raise RuntimeError("Session schema migration left invalid foreign keys")
 
-def _schema_sql() -> str:
+
+def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
+    return connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
+    ).fetchone() is not None
+
+
+def _write_schema_version(connection: sqlite3.Connection, version: int) -> None:
+    connection.execute(
+        "INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)",
+        (str(version),),
+    )
+
+
+def _create_latest_indexes(connection: sqlite3.Connection) -> None:
+    connection.executescript(_indexes_sql())
+
+
+def _verify_schema(connection: sqlite3.Connection, expected_version: int) -> None:
+    required_columns = {
+        "permission_requests": {"session_id", "turn_id", "attempt_id", "tool_call_id"},
+        "tool_results": {"artifact_id"},
+        "turns": {"user_message_id"},
+    }
+    for table, columns in required_columns.items():
+        actual = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        missing = columns - actual
+        if missing:
+            raise RuntimeError(f"Session schema v{expected_version} is missing {table} columns: {sorted(missing)}")
+    expected_indexes = {
+        "idx_sessions_last_activity_at",
+        "idx_sessions_project_status",
+        "idx_turns_session_sequence",
+        "idx_run_attempts_turn_number",
+        "idx_messages_session_turn_created_at",
+        "idx_message_parts_message_sequence",
+        "idx_tool_calls_turn_status",
+        "idx_tool_results_tool_call_id",
+        "idx_permission_requests_session_status",
+        "idx_session_events_session_sequence",
+        "idx_permission_grants_session_scope_revoked",
+        "idx_messages_session_status",
+        "idx_context_summaries_session_status_end",
+        "idx_artifacts_session_created_at",
+    }
+    actual_indexes = {
+        row[0]
+        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+    }
+    if missing := expected_indexes - actual_indexes:
+        raise RuntimeError(f"Session schema is missing indexes: {sorted(missing)}")
+    if connection.execute("PRAGMA foreign_key_check").fetchall():
+        raise RuntimeError("Session schema contains invalid foreign keys")
+
+def _schema_tables_sql() -> str:
     return """
     CREATE TABLE IF NOT EXISTS schema_meta (
         key TEXT PRIMARY KEY,
@@ -428,6 +496,11 @@ def _schema_sql() -> str:
         FOREIGN KEY(session_id) REFERENCES sessions(session_id)
     );
 
+    """
+
+
+def _indexes_sql() -> str:
+    return """
     CREATE INDEX IF NOT EXISTS idx_sessions_last_activity_at ON sessions(last_activity_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_project_status ON sessions(project_id, status);
     CREATE INDEX IF NOT EXISTS idx_turns_session_sequence ON turns(session_id, sequence);
@@ -443,3 +516,9 @@ def _schema_sql() -> str:
     CREATE INDEX IF NOT EXISTS idx_context_summaries_session_status_end ON context_summaries(session_id, status, source_end_sequence);
     CREATE INDEX IF NOT EXISTS idx_artifacts_session_created_at ON artifacts(session_id, created_at);
     """
+
+
+def _schema_sql() -> str:
+    """兼容测试和外部调用的完整最新 Schema。"""
+
+    return _schema_tables_sql() + _indexes_sql()

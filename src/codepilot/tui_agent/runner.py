@@ -17,7 +17,7 @@ from codepilot.trace.events import TraceEvent
 from codepilot.tui_agent.event_stream import MemoryEventStream, trace_event_to_tui_event
 from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent
 from codepilot.tui_agent.permission_broker import AutoApproveLocalWriteBroker, PermissionBroker, NonInteractiveBroker
-from codepilot.tui_agent.session_store import SessionStore, now_iso
+from codepilot.tui_agent.session_controller import SessionController as SessionStore, now_iso
 
 
 class CancellationToken:
@@ -82,7 +82,7 @@ class TUIAgentRunner:
     def _runtime(self) -> SessionRuntime:
         mcp_registry = MCPToolRegistry.from_config(self.config.mcp_config) if self.config.mcp_config else None
         policy_checker = PolicyChecker.default(extra_tool_specs={item.name: item for item in mcp_registry.list_specs()}) if mcp_registry else PolicyChecker.default()
-        llm = build_codepilot_llm(fake_actions=self.config.fake_actions, model=self.config.model, model_config=list(self.config.model_config))
+        built_llm = build_codepilot_llm(fake_actions=self.config.fake_actions, model=self.config.model, model_config=list(self.config.model_config))
         self.mode_permission_broker = AutoApproveLocalWriteBroker(self.base_permission_broker) if self.config.permission_mode == "accept_edits" else self.base_permission_broker
         if self.active_session_id is not None:
             self.session_permission_broker = SessionPermissionBroker(self.session_store.database, self.active_session_id, self.mode_permission_broker)
@@ -100,7 +100,17 @@ class TUIAgentRunner:
                 permission_broker=self.permission_broker,
             )
 
-        return SessionRuntime(self.session_store.database, llm, router_factory, max_steps=self.config.max_steps, trace_hook=self._publish_trace_event)
+        return SessionRuntime(self.session_store.database, built_llm.client, router_factory, max_steps=self.config.max_steps, trace_hook=self._publish_trace_event)
+
+    def model_identity(self) -> tuple[str, str]:
+        """返回当前配置解析出的真实模型身份，用于创建新 Session。"""
+
+        built_llm = build_codepilot_llm(
+            fake_actions=self.config.fake_actions,
+            model=self.config.model,
+            model_config=list(self.config.model_config),
+        )
+        return built_llm.provider, built_llm.model
 
     def _session_broker(self) -> SessionPermissionBroker:
         if self.active_session_id is None:
@@ -161,13 +171,13 @@ class TUIAgentRunner:
             execution = runtime.run_turn(turn_id, attempt_id, self.cancellation_token)
             self.event_stream.publish(TUIEvent(type="run_finished", timestamp=now_iso(), session_id=self.active_session_id, payload={"status": execution.result.status, "success": execution.result.success, "turn_id": turn_id, "attempt_id": attempt_id}))
         except Exception as exc:
-            payload = {"error": str(exc), "source": "agent_runtime"}
-            if turn_id is not None:
-                payload["turn_id"] = turn_id
-            if attempt_id is not None:
-                payload["attempt_id"] = attempt_id
-            self.event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), session_id=self.active_session_id, payload=payload))
-            self.event_stream.publish(TUIEvent(type="run_finished", timestamp=now_iso(), session_id=self.active_session_id, payload={"status": "interrupted", "success": False, "turn_id": turn_id, "attempt_id": attempt_id}))
+            self._publish_worker_failure(
+                session_id=self.active_session_id,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+                error=exc,
+                status="interrupted",
+            )
         finally:
             self.active_turn_id = None
             self._clear_current_worker()
@@ -178,6 +188,34 @@ class TUIAgentRunner:
         with self._lock:
             if self._thread is threading.current_thread():
                 self._thread = None
+
+    def _publish_worker_failure(
+        self,
+        *,
+        session_id: str | None,
+        turn_id: str | None,
+        attempt_id: str | None,
+        error: Exception,
+        status: Literal["interrupted", "recovery_required"],
+    ) -> None:
+        """统一发布失败终态，让 App 能结束 running 状态并重新扫描恢复计划。"""
+
+        self.event_stream.publish(
+            TUIEvent(
+                type="error",
+                timestamp=now_iso(),
+                session_id=session_id,
+                payload={"error": str(error), "source": "agent_runtime", "turn_id": turn_id, "attempt_id": attempt_id},
+            )
+        )
+        self.event_stream.publish(
+            TUIEvent(
+                type="run_finished",
+                timestamp=now_iso(),
+                session_id=session_id,
+                payload={"status": status, "success": False, "turn_id": turn_id, "attempt_id": attempt_id},
+            )
+        )
 
     def start_task(self, task: str, *, confirmed_branch: str | None | object = _UNCONFIRMED_BRANCH) -> str:
         with self._lock:
@@ -216,7 +254,13 @@ class TUIAgentRunner:
                 )
             )
         except Exception as exc:
-            self.event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), session_id=self.active_session_id, payload={"error": str(exc), "source": "agent_runtime"}))
+            self._publish_worker_failure(
+                session_id=self.active_session_id,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+                error=exc,
+                status="recovery_required",
+            )
         finally:
             self.active_turn_id = None
             self._clear_current_worker()

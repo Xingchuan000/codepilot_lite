@@ -13,6 +13,7 @@ from codepilot.permissions import (
     permission_now_iso,
 )
 from codepilot.router.actions import ToolAction, ToolRouteResult
+from codepilot.router.errors import ToolExecutionUncertainError, ToolPreExecutionError
 from codepilot.session.permission import PermissionRequestContext, PermissionScopeBuilder
 from codepilot.tools.base import ToolResult, ToolSpec
 from codepilot.tools.registry import call_external_tool_traced, call_tool_traced, find_tool_spec
@@ -292,7 +293,7 @@ class ToolRouter:
         except Exception as exc:
             if tool_call_id is not None:
                 self.lifecycle_observer.on_pre_execution_failure(tool_call_id, exc)
-            raise
+            raise ToolPreExecutionError(tool_call_id, exc) from exc
         if tool_call_id is not None:
             self.lifecycle_observer.on_execution_started(tool_call_id, recovery_token)
         try:
@@ -314,7 +315,7 @@ class ToolRouter:
         except Exception as exc:
             if tool_call_id is not None:
                 self.lifecycle_observer.on_execution_exception(tool_call_id, exc)
-            raise
+            raise ToolExecutionUncertainError(tool_call_id, parsed.tool_name, exc) from exc
         if tool_call_id is not None:
             self.lifecycle_observer.on_execution_finished(tool_call_id, result)
 

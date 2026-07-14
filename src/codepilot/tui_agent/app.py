@@ -20,14 +20,14 @@ from codepilot.tui_agent.config import merge_config
 from codepilot.tui_agent.event_reducer import EventReducer
 from codepilot.tui_agent.event_stream import MemoryEventStream
 from codepilot.tui_agent.layout import format_header, format_side_status, format_transcript_item, format_transcript_plain
-from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent
+from codepilot.tui_agent.models import AgentRunView, PermissionMode, ProjectContext, TUIEvent
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
 from codepilot.tui_agent.session_modals import format_branch_confirmation, format_recovery_modal
 from codepilot.tui_agent.session_hydrator import hydrate_session_view
 from codepilot.tui_agent.session_picker import SessionPicker, SessionPickerResult, SessionPickerScreen
-from codepilot.tui_agent.session_store import SessionStore, now_iso
+from codepilot.tui_agent.session_controller import SessionController as SessionStore, now_iso
 
 
 SESSION_LIFECYCLE_COMMANDS = {"sessions", "switch", "new", "archive", "unarchive", "move", "compact", "export-session"}
@@ -330,8 +330,10 @@ def create_tui_agent_app(
         def _create_new_session(self) -> None:
             self._project_context = self._new_session_project_context
             self._session_store = SessionStore(self._project_context, self._session_database, self._session_paths)
+            provider, resolved_model = self.runner.model_identity()
             created = self._session_store.create_session(
-                model=merged.model,
+                model=resolved_model,
+                provider=provider,
                 permission_mode=merged.permission_mode,
                 metadata={
                     "config_source": merged.source,
@@ -387,6 +389,10 @@ def create_tui_agent_app(
             if result.rename_title is not None:
                 self.session = self._session_store.update_session(self.session, title=result.rename_title)
                 self.runner.session = self.session
+            if result.model_name is not None:
+                self.session = self._session_service.change_model(self.session.session_id, self.session.provider, result.model_name)
+                self.runner.session = self.session
+                self.runner.config = replace(self.runner.config, model=result.model_name)
             if result.new_task_requested:
                 self._create_new_session()
             if result.open_session_picker:
@@ -478,8 +484,8 @@ def create_tui_agent_app(
             self._last_top_status_text = None
             self._last_side_status_text = None
             hydrated = hydrate_session_view(self._session_store, selected_session.session_id)
-            self._reducer.view = replace(
-                self._reducer.view,
+            # Session 切换必须从空 View 开始，避免上一 Session 的证据、测试和完成状态串线。
+            self._reducer.view = AgentRunView(
                 run_id=hydrated.run_id,
                 task=hydrated.task,
                 status=hydrated.status,
@@ -498,6 +504,11 @@ def create_tui_agent_app(
                 trace_path=hydrated.trace_path,
                 warnings=hydrated.warnings,
             )
+            self._shown_permission_request_ids = {
+                request.request_id for request in hydrated.permission_requests if request.status == "pending"
+            }
+            self._shown_branch_confirmations.clear()
+            self._recovery_scan_pending = False
             self._rendered_transcript_ids = {item.id for item in hydrated.transcript}
             self._refresh()
 
@@ -659,22 +670,29 @@ def create_tui_agent_app(
                     )
                     self._drain_events()
                     return
-                result = handle_command(
-                    text,
-                    view=self._reducer.view,
-                    project=self._project_context,
-                    session=self.session,
-                    permission_mode=self.permission_mode,
-                )
-                if result.cancel_requested:
-                    self.runner.cancel_current()
-                if result.exit_requested:
-                    self.exit()
-                    return
-                if result.open_copy_mode:
-                    self.push_screen(TranscriptCopyScreen(self._transcript_copy_text(result.copy_target)))
-                output = self._apply_command_result(result)
-                self._publish_command_output(text, output or result.output)
+                result = None
+                try:
+                    result = handle_command(
+                        text,
+                        view=self._reducer.view,
+                        project=self._project_context,
+                        session=self.session,
+                        permission_mode=self.permission_mode,
+                    )
+                    if result.cancel_requested:
+                        self.runner.cancel_current()
+                    if result.exit_requested:
+                        self.exit()
+                        return
+                    if result.open_copy_mode:
+                        self.push_screen(TranscriptCopyScreen(self._transcript_copy_text(result.copy_target)))
+                    output = self._apply_command_result(result)
+                except (LookupError, ValueError, RuntimeError, OSError) as exc:
+                    self._event_stream.publish(
+                        TUIEvent(type="error", timestamp=now_iso(), payload={"error": str(exc), "source": "command"})
+                    )
+                    output = None
+                self._publish_command_output(text, output or (result.output if result is not None else ""))
                 self._drain_events()
                 self.query_one("#task-input", Input).value = ""
                 return
@@ -705,4 +723,5 @@ def _changes_session_lifecycle(result: Any) -> bool:
         or result.unarchive_session_id is not None
         or result.next_new_session_project is not None
         or result.compact_requested
+        or result.model_name is not None
     )
