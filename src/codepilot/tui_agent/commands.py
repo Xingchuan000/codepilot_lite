@@ -5,7 +5,8 @@ from pathlib import Path
 
 from codepilot.tui_agent.diff_view import format_diff_summary
 from codepilot.tui_agent.layout import format_side_status
-from codepilot.tui_agent.models import AgentRunView, PermissionMode, ProjectContext, TUISession
+from codepilot.session.models import SessionRecord
+from codepilot.tui_agent.models import AgentRunView, PermissionMode, ProjectContext
 
 
 @dataclass(frozen=True)
@@ -19,14 +20,15 @@ class CommandResult:
     open_copy_mode: bool = False
     copy_target: str | None = None
     export_transcript_requested: bool = False
-    project_path: Path | None = None
-    session_id: str | None = None
+    switch_session_id: str | None = None
     rename_title: str | None = None
-    archive_requested: bool = False
-    unarchive_requested: bool = False
+    open_session_picker: bool = False
+    archive_current_session: bool = False
+    unarchive_session_id: str | None = None
     compact_requested: bool = False
     export_session_requested: bool = False
-
+    export_target: Path | None = None
+    next_new_session_project: Path | None = None
 
 def parse_slash_command(text: str) -> tuple[str, list[str]]:
     parts = text.strip().split()
@@ -40,7 +42,7 @@ def handle_command(
     *,
     view: AgentRunView,
     project: ProjectContext,
-    session: TUISession,
+    session: SessionRecord,
     permission_mode: PermissionMode,
 ) -> CommandResult:
     command, args = parse_slash_command(text)
@@ -49,20 +51,25 @@ def handle_command(
     if command == "help":
         return CommandResult(handled=True, output="/help /sessions /new /switch <session-id> /rename <title> /archive /unarchive <session-id> /compact /export-session [path] /cancel /exit")
     if command == "sessions":
-        return CommandResult(handled=True, output="Session picker requested")
+        return CommandResult(handled=True, output="Session picker requested", open_session_picker=True)
     if command == "switch":
-        return CommandResult(handled=True, output="Session switch requested" if args else "Usage: /switch <session-id>", session_id=args[0] if args else None)
+        return CommandResult(handled=True, output="Session switch requested" if args else "Usage: /switch <session-id>", switch_session_id=args[0] if args else None)
     if command == "rename":
         title = " ".join(args).strip()
         return CommandResult(handled=True, output="Session rename requested" if title else "Usage: /rename <title>", rename_title=title or None)
     if command == "archive":
-        return CommandResult(handled=True, output="Session archive requested", archive_requested=True)
+        return CommandResult(handled=True, output="Session archive requested", archive_current_session=True)
     if command == "unarchive":
-        return CommandResult(handled=True, output="Session unarchive requested", unarchive_requested=True, session_id=args[0] if args else None)
+        return CommandResult(handled=True, output="Session unarchive requested", unarchive_session_id=args[0] if args else None)
     if command == "compact":
         return CommandResult(handled=True, output="Session compaction requested", compact_requested=True)
     if command == "export-session":
-        return CommandResult(handled=True, output="Session export requested", export_session_requested=True, project_path=Path(" ".join(args)).expanduser() if args else None)
+        return CommandResult(
+            handled=True,
+            output="Session export requested",
+            export_session_requested=True,
+            export_target=Path(" ".join(args)).expanduser() if args else None,
+        )
     if command == "status":
         return CommandResult(handled=True, output=format_side_status(project, session, view, permission_mode))
     if command == "permissions":
@@ -122,9 +129,13 @@ def handle_command(
             return CommandResult(handled=True, output=f"Project directory does not exist: {path}")
         if not path.is_dir():
             return CommandResult(handled=True, output=f"Project path is not a directory: {path}")
-        return CommandResult(handled=True, output=f"Project directory switched to {path}", project_path=path)
+        return CommandResult(
+            handled=True,
+            output=f"Next new Session project set to: {path}\nCurrent Session project was not changed.",
+            next_new_session_project=path,
+        )
     if command == "export-transcript":
-        return CommandResult(handled=True, output="Transcript export requested", export_transcript_requested=True)
+        return CommandResult(handled=True, output="/export-transcript is deprecated; use /export-session", export_transcript_requested=True)
     if command == "new":
         return CommandResult(handled=True, output="Ready for new task", new_task_requested=True)
     if command == "cancel":

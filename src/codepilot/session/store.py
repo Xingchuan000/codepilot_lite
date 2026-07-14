@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from codepilot.permissions import PermissionRequest, permission_now_iso
 from codepilot.session.database import SessionDatabase
 from codepilot.session.ids import (
     make_attempt_id,
@@ -74,6 +75,15 @@ def _task_preview(text: str) -> str:
     """把首条用户消息压缩为稳定的 Session 标题。"""
 
     return " ".join(text.split())[:80] or "New session"
+
+
+def _content_preview(content: Any) -> str:
+    if isinstance(content, str):
+        return " ".join(content.split())[:120]
+    return _json_dumps(content)[:120]
+
+
+BLOCKING_TURN_STATUSES = {"queued", "running", "waiting_permission", "recovery_required"}
 
 
 class SessionStore:
@@ -163,12 +173,16 @@ class SessionStore:
         return self._session_from_row(row)
 
     def list_sessions(self, include_archived: bool = False) -> list[SessionSummary]:
-        query = "SELECT * FROM sessions"
+        query = (
+            "SELECT s.*, p.path AS project_path, "
+            "(SELECT content_json FROM messages m WHERE m.session_id = s.session_id AND m.role = 'user' ORDER BY m.created_at DESC, m.message_id DESC LIMIT 1) AS last_user_content "
+            "FROM sessions s JOIN projects p ON p.project_id = s.project_id"
+        )
         params: tuple[Any, ...] = ()
         if not include_archived:
-            query += " WHERE status = ?"
+            query += " WHERE s.status = ?"
             params = ("active",)
-        query += " ORDER BY last_activity_at DESC, created_at DESC, session_id DESC"
+        query += " ORDER BY s.last_activity_at DESC, s.created_at DESC, s.session_id DESC"
         with self.database.transaction() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._session_summary_from_row(row) for row in rows]
@@ -237,8 +251,9 @@ class SessionStore:
                 """
                 INSERT INTO turns(
                     turn_id, session_id, sequence, title, status, provider_snapshot, model_snapshot,
-                    permission_mode_snapshot, branch_snapshot, created_at, updated_at, last_activity_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    permission_mode_snapshot, branch_snapshot, created_at, updated_at, last_activity_at,
+                    user_message_id, started_at, completed_at, error_code, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     make_turn_id(),
@@ -253,6 +268,10 @@ class SessionStore:
                     created_at,
                     created_at,
                     created_at,
+                    None,
+                    None,
+                    None,
+                    None,
                     _json_dumps(metadata or {}),
                 ),
             )
@@ -365,8 +384,8 @@ class SessionStore:
             if connection.execute("SELECT changes()").fetchone()[0] != 1:
                 raise RuntimeError("attempt is not in created state")
             connection.execute(
-                "UPDATE turns SET status = 'running', updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'queued'",
-                (timestamp, timestamp, turn_id),
+                "UPDATE turns SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'queued'",
+                (timestamp, timestamp, timestamp, turn_id),
             )
             if connection.execute("SELECT changes()").fetchone()[0] != 1:
                 raise RuntimeError("turn is not in queued state")
@@ -401,8 +420,8 @@ class SessionStore:
             if connection.execute("SELECT changes()").fetchone()[0] != 1:
                 raise LookupError(attempt_id)
             connection.execute(
-                "UPDATE turns SET status = ?, updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'running'",
-                (turn_status, timestamp, timestamp, turn_id),
+                "UPDATE turns SET status = ?, completed_at = ?, error_code = NULL, updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'running'",
+                (turn_status, timestamp, timestamp, timestamp, turn_id),
             )
             if connection.execute("SELECT changes()").fetchone()[0] != 1:
                 raise RuntimeError("turn is no longer owned by this running attempt")
@@ -427,8 +446,8 @@ class SessionStore:
             if connection.execute("SELECT changes()").fetchone()[0] != 1:
                 raise LookupError(attempt_id)
             connection.execute(
-                "UPDATE turns SET status = 'interrupted', updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'running'",
-                (timestamp, timestamp, turn_id),
+                "UPDATE turns SET status = 'interrupted', completed_at = ?, error_code = ?, updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'running'",
+                (timestamp, reason, timestamp, timestamp, turn_id),
             )
             if connection.execute("SELECT changes()").fetchone()[0] != 1:
                 raise RuntimeError("turn is no longer owned by this running attempt")
@@ -477,10 +496,27 @@ class SessionStore:
             if session_row["status"] != "active":
                 raise ValueError("archived session is read-only")
             if connection.execute(
-                "SELECT 1 FROM turns WHERE session_id = ? AND status IN ('queued', 'running', 'waiting_permission') LIMIT 1",
-                (session_id,),
+                f"SELECT 1 FROM turns WHERE session_id = ? AND status IN ({','.join('?' for _ in BLOCKING_TURN_STATUSES)}) LIMIT 1",
+                (session_id, *BLOCKING_TURN_STATUSES),
             ).fetchone() is not None:
                 raise RuntimeError("session already has a running turn")
+            if connection.execute(
+                "SELECT 1 FROM permission_requests WHERE session_id = ? AND status = 'pending' LIMIT 1",
+                (session_id,),
+            ).fetchone() is not None:
+                raise RuntimeError("session already has a pending permission request")
+            if connection.execute(
+                """
+                SELECT 1
+                FROM tool_calls tc
+                JOIN turns t ON t.turn_id = tc.turn_id
+                WHERE t.session_id = ?
+                  AND tc.status IN ('approval_pending', 'execution_started', 'execution_uncertain', 'recovery_required')
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone() is not None:
+                raise RuntimeError("session already has an unresolved tool call")
 
             # Git 是数据库之外的事实源，因此必须在持有本次提交事务时重新读取，不能使用
             # 弹窗出现前缓存的分支值完成确认。
@@ -491,26 +527,12 @@ class SessionStore:
             if branch_confirmation_provided and confirmed_branch != actual_branch:
                 return BranchConfirmationRequired(session_id, confirmed_branch, actual_branch)
 
-            # 先写 branch_changed，保证事件序列与用户实际确认、随后创建 Turn 的顺序一致。
+            # 先预留事件序列。branch_changed 必须在 Turn 行创建后写入，才能通过外键绑定
+            # 生效 Turn；它仍早于 turn_created 事件，因此时间线语义不变。
             event_sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) FROM session_events WHERE session_id = ?",
                 (session_id,),
             ).fetchone()[0]
-            if old_branch != actual_branch:
-                event_sequence += 1
-                connection.execute(
-                    "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) "
-                    "VALUES (?, ?, ?, 'branch_changed', ?, NULL, NULL, ?, ?)",
-                    (
-                        make_event_id(),
-                        session_id,
-                        event_sequence,
-                        timestamp,
-                        _json_dumps({"old_branch": old_branch, "new_branch": actual_branch}),
-                        "{}",
-                    ),
-                )
-
             turn_sequence = connection.execute(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 FROM turns WHERE session_id = ?",
                 (session_id,),
@@ -519,8 +541,9 @@ class SessionStore:
                 """
                 INSERT INTO turns(
                     turn_id, session_id, sequence, title, status, provider_snapshot, model_snapshot,
-                    permission_mode_snapshot, branch_snapshot, created_at, updated_at, last_activity_at, metadata_json
-                ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?)
+                    permission_mode_snapshot, branch_snapshot, created_at, updated_at, last_activity_at,
+                    user_message_id, started_at, completed_at, error_code, metadata_json
+                ) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     turn_id,
@@ -534,6 +557,10 @@ class SessionStore:
                     timestamp,
                     timestamp,
                     timestamp,
+                    None,
+                    None,
+                    None,
+                    None,
                     "{}",
                 ),
             )
@@ -542,10 +569,30 @@ class SessionStore:
                 "VALUES (?, ?, 1, 'created', ?, ?, NULL, NULL, ?)",
                 (attempt_id, turn_id, timestamp, timestamp, "{}"),
             )
+            if old_branch != actual_branch:
+                event_sequence += 1
+                connection.execute(
+                    "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) "
+                    "VALUES (?, ?, ?, 'branch_changed', ?, ?, ?, ?, ?)",
+                    (
+                        make_event_id(),
+                        session_id,
+                        event_sequence,
+                        timestamp,
+                        turn_id,
+                        attempt_id,
+                        _json_dumps({"old_branch": old_branch, "new_branch": actual_branch, "effective_turn_sequence": turn_sequence}),
+                        "{}",
+                    ),
+                )
             connection.execute(
                 "INSERT INTO messages(message_id, session_id, turn_id, attempt_id, role, status, content_json, created_at, updated_at, interrupted_at, metadata_json) "
                 "VALUES (?, ?, ?, NULL, 'user', 'completed', ?, ?, ?, NULL, ?)",
                 (message_id, session_id, turn_id, _json_dumps(text), timestamp, timestamp, "{}"),
+            )
+            connection.execute(
+                "UPDATE turns SET user_message_id = ? WHERE turn_id = ?",
+                (message_id, turn_id),
             )
 
             first_user_message = connection.execute(
@@ -739,6 +786,66 @@ class SessionStore:
             row = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
         return self._tool_call_from_row(row)
 
+    def mark_tool_approval_pending_with_event(self, tool_call_id: str, request: PermissionRequest) -> ToolCallRecord:
+        return self._tool_call_from_row(self._mark_tool_call_status(tool_call_id, "approval_pending"))
+
+    def mark_tool_approved(self, tool_call_id: str) -> ToolCallRecord:
+        return self._tool_call_from_row(self._mark_tool_call_status(tool_call_id, "approved"))
+
+    def mark_tool_execution_uncertain_with_event(self, tool_call_id: str, error: str) -> ToolCallRecord:
+        timestamp = now_iso()
+        with self.database.transaction() as connection:
+            row = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
+            if row is None:
+                raise LookupError(tool_call_id)
+            connection.execute(
+                "UPDATE tool_calls SET status = 'execution_uncertain', updated_at = ? WHERE tool_call_id = ?",
+                (timestamp, tool_call_id),
+            )
+            turn_row = connection.execute("SELECT session_id FROM turns WHERE turn_id = ?", (row["turn_id"],)).fetchone()
+            if turn_row is None:
+                raise LookupError(row["turn_id"])
+            connection.execute(
+                "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) "
+                "VALUES (?, ?, (SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?), 'tool_execution_uncertain', ?, ?, ?, ?, ?)",
+                (
+                    make_event_id(),
+                    turn_row["session_id"],
+                    turn_row["session_id"],
+                    timestamp,
+                    row["turn_id"],
+                    row["attempt_id"],
+                    _json_dumps({"tool_call_id": tool_call_id, "error": error}),
+                    _json_dumps({}),
+                ),
+            )
+            updated = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
+        return self._tool_call_from_row(updated)
+
+    def persist_recovered_tool_result(
+        self,
+        tool_call_id: str,
+        *,
+        status: ToolResultStatus,
+        content: Any,
+        output_preview: str | None = None,
+        artifact_id: str | None = None,
+        error: str | None = None,
+        success: bool | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ToolResultRecord:
+        return self.persist_tool_result(
+            tool_call_id,
+            call_status="completed" if status in {"success", "recovered_completed"} else "failed",
+            result_status=status,
+            content=content,
+            output_preview=output_preview,
+            artifact_id=artifact_id,
+            error=error,
+            success=success,
+            metadata=metadata,
+        )
+
     def get_tool_call(self, tool_call_id: str) -> ToolCallRecord:
         with self.database.transaction() as connection:
             row = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
@@ -746,10 +853,46 @@ class SessionStore:
             raise LookupError(tool_call_id)
         return self._tool_call_from_row(row)
 
+    def _mark_tool_call_status(self, tool_call_id: str, status: ToolCallStatus) -> Any:
+        with self.database.transaction() as connection:
+            connection.execute(
+                "UPDATE tool_calls SET status = ?, updated_at = ? WHERE tool_call_id = ?",
+                (status, now_iso(), tool_call_id),
+            )
+            row = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
+        if row is None:
+            raise LookupError(tool_call_id)
+        return row
+
     def get_tool_result_by_call(self, tool_call_id: str) -> ToolResultRecord | None:
         with self.database.transaction() as connection:
             row = connection.execute("SELECT * FROM tool_results WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
         return self._tool_result_from_row(row) if row is not None else None
+
+    def list_tool_calls(self, session_id: str) -> list[ToolCallRecord]:
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM tool_calls WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id = ?) ORDER BY created_at, tool_call_id",
+                (session_id,),
+            ).fetchall()
+        return [self._tool_call_from_row(row) for row in rows]
+
+    def list_tool_results(self, session_id: str) -> list[ToolResultRecord]:
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT tr.* FROM tool_results tr JOIN tool_calls tc ON tc.tool_call_id = tr.tool_call_id "
+                "JOIN turns t ON t.turn_id = tc.turn_id WHERE t.session_id = ? ORDER BY tr.created_at, tr.tool_result_id",
+                (session_id,),
+            ).fetchall()
+        return [self._tool_result_from_row(row) for row in rows]
+
+    def list_permission_requests(self, session_id: str) -> list[PermissionRequestRecord]:
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM permission_requests WHERE session_id = ? ORDER BY created_at, request_id",
+                (session_id,),
+            ).fetchall()
+        return [self._permission_request_from_row(row) for row in rows]
 
     def mark_tool_execution_started(self, tool_call_id: str) -> ToolCallRecord:
         now = now_iso()
@@ -913,6 +1056,56 @@ class SessionStore:
             rows = connection.execute("SELECT * FROM context_summaries WHERE session_id = ? ORDER BY created_at, summary_id", (session_id,)).fetchall()
         return [self._context_summary_from_row(row) for row in rows]
 
+    def get_latest_context_summary(self, session_id: str) -> ContextSummaryRecord | None:
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM context_summaries
+                WHERE session_id = ? AND COALESCE(status, 'completed') = 'completed'
+                ORDER BY COALESCE(source_end_sequence, -1) DESC, created_at DESC, summary_id DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        return self._context_summary_from_row(row) if row is not None else None
+
+    def get_user_message_for_turn(self, turn_id: str) -> MessageRecord | None:
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at, message_id LIMIT 1",
+                (turn_id,),
+            ).fetchone()
+        return self._message_from_row(row) if row is not None else None
+
+    def get_permission_request(self, request_id: str) -> PermissionRequestRecord:
+        with self.database.transaction() as connection:
+            row = connection.execute("SELECT * FROM permission_requests WHERE request_id = ?", (request_id,)).fetchone()
+        if row is None:
+            raise LookupError(request_id)
+        return self._permission_request_from_row(row)
+
+    def get_permission_response_by_request(self, request_id: str) -> PermissionResponseRecord | None:
+        with self.database.transaction() as connection:
+            row = connection.execute("SELECT * FROM permission_responses WHERE request_id = ? ORDER BY responded_at DESC, response_id DESC LIMIT 1", (request_id,)).fetchone()
+        return self._permission_response_from_row(row) if row is not None else None
+
+    def get_permission_grant(self, session_id: str, scope_key: str) -> PermissionGrantRecord | None:
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM permission_grants WHERE session_id = ? AND scope_key = ? AND revoked_at IS NULL ORDER BY created_at DESC, grant_id DESC LIMIT 1",
+                (session_id, scope_key),
+            ).fetchone()
+        return self._permission_grant_from_row(row) if row is not None else None
+
+    def list_pending_permission_requests(self, session_id: str) -> list[PermissionRequestRecord]:
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM permission_requests WHERE session_id = ? AND status = 'pending' ORDER BY created_at, request_id",
+                (session_id,),
+            ).fetchall()
+        return [self._permission_request_from_row(row) for row in rows]
+
     def create_permission_request(
         self,
         *,
@@ -955,6 +1148,200 @@ class SessionStore:
             )
             row = connection.execute("SELECT * FROM permission_requests WHERE request_id = ?", (request_id,)).fetchone()
         return self._permission_request_from_row(row)
+
+    def persist_permission_request_and_pending_call(self, request: PermissionRequest) -> PermissionRequestRecord:
+        """一次性写入 pending 权限请求和对应 ToolCall 的 pending 状态。"""
+
+        with self.database.transaction() as connection:
+            if connection.execute("SELECT 1 FROM permission_requests WHERE request_id = ?", (request.request_id,)).fetchone() is None:
+                connection.execute(
+                    """
+                    INSERT INTO permission_requests(
+                        request_id, session_id, turn_id, attempt_id, tool_call_id, scope_key, tool_name,
+                        arguments_json, reason, status, created_at, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request.request_id,
+                        request.session_id,
+                        request.turn_id,
+                        request.attempt_id,
+                        request.tool_call_id,
+                        request.scope_key,
+                        request.tool_name,
+                        _json_dumps(request.arguments_preview),
+                        request.reason,
+                        request.status,
+                        request.created_at,
+                    _json_dumps(
+                        {
+                            "run_id": request.run_id,
+                            "action_id": request.action_id,
+                            "risk": request.risk,
+                            "side_effect": request.side_effect,
+                            "matched_rule": request.matched_rule,
+                            "scope_json": request.scope_json,
+                        }
+                    ),
+                ),
+            )
+            if request.tool_call_id is not None:
+                connection.execute(
+                    "UPDATE tool_calls SET status = 'approval_pending', updated_at = ? WHERE tool_call_id = ?",
+                    (request.created_at, request.tool_call_id),
+                )
+            if request.turn_id is not None:
+                # 权限请求、ToolCall 和 Turn 必须在同一事务中进入等待态，确保重启后
+                # RecoveryService 看到的是完整状态，而不是仅有一条 pending 事件。
+                connection.execute(
+                    "UPDATE turns SET status = 'waiting_permission', updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'running'",
+                    (request.created_at, request.created_at, request.turn_id),
+                )
+            if request.session_id is not None:
+                connection.execute(
+                    "UPDATE sessions SET updated_at = ?, last_activity_at = ? WHERE session_id = ?",
+                    (request.created_at, request.created_at, request.session_id),
+                )
+            connection.execute(
+                "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) "
+                "VALUES (?, ?, (SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?), 'permission_pending', ?, ?, ?, ?, ?)",
+                (
+                    make_event_id(),
+                    request.session_id,
+                    request.session_id,
+                    request.created_at,
+                    request.turn_id,
+                    request.attempt_id,
+                    _json_dumps(
+                        {
+                            "request_id": request.request_id,
+                            "tool_name": request.tool_name,
+                            "tool_call_id": request.tool_call_id,
+                            "scope_key": request.scope_key,
+                        }
+                    ),
+                    _json_dumps({"source": "permission_broker"}),
+                ),
+            )
+            row = connection.execute("SELECT * FROM permission_requests WHERE request_id = ?", (request.request_id,)).fetchone()
+        return self._permission_request_from_row(row)
+
+    def persist_permission_resolution(
+        self,
+        request_id: str,
+        decision: str,
+        reason: str | None,
+        *,
+        create_grant: bool,
+        source: str,
+    ) -> PermissionResponseRecord:
+        """原子写入权限响应、请求状态、Grant 和唯一领域事件。"""
+
+        responded_at = permission_now_iso()
+        with self.database.transaction() as connection:
+            request_row = connection.execute("SELECT * FROM permission_requests WHERE request_id = ?", (request_id,)).fetchone()
+            if request_row is None:
+                raise LookupError(request_id)
+            request = self._permission_request_from_row(request_row)
+            existing = connection.execute("SELECT * FROM permission_responses WHERE request_id = ? ORDER BY responded_at DESC, response_id DESC LIMIT 1", (request_id,)).fetchone()
+            if existing is not None:
+                return self._permission_response_from_row(existing)
+            if request.status != "pending":
+                raise RuntimeError("permission request is no longer pending")
+            response_id = f"response-{request_id}"
+            connection.execute(
+                """
+                INSERT INTO permission_responses(response_id, request_id, decision, reason, responded_at, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    response_id,
+                    request_id,
+                    decision,
+                    reason,
+                    responded_at,
+                    _json_dumps({"source": source}),
+                ),
+            )
+            request_status = "approved" if decision in {"approve_once", "approve_session"} else "denied"
+            connection.execute(
+                "UPDATE permission_requests SET status = ? WHERE request_id = ?",
+                (request_status, request_id),
+            )
+            grant_id: str | None = None
+            if create_grant and decision == "approve_session" and request.scope_key is not None and request.session_id is not None:
+                grant_row = connection.execute(
+                    "SELECT * FROM permission_grants WHERE session_id = ? AND scope_key = ? AND revoked_at IS NULL ORDER BY created_at DESC, grant_id DESC LIMIT 1",
+                    (request.session_id, request.scope_key),
+                ).fetchone()
+                if grant_row is None:
+                    grant_id = _make_local_id("grant")
+                    connection.execute(
+                        """
+                        INSERT INTO permission_grants(grant_id, session_id, scope_key, tool_name, scope_json, created_at, revoked_at, metadata_json)
+                        VALUES (?, ?, ?, ?, ?, ?, NULL, ?)
+                        """,
+                        (
+                            grant_id,
+                            request.session_id,
+                            request.scope_key,
+                            request.tool_name,
+                            _json_dumps(request.metadata.get("scope_json")) if request.metadata.get("scope_json") is not None else None,
+                            responded_at,
+                            _json_dumps({"request_id": request_id, "source": source}),
+                        ),
+                    )
+                else:
+                    grant_id = str(grant_row["grant_id"])
+            if request.tool_call_id is not None:
+                connection.execute(
+                    "UPDATE tool_calls SET status = ?, completed_at = CASE WHEN ? = 'denied' THEN COALESCE(completed_at, ?) ELSE NULL END, updated_at = ? WHERE tool_call_id = ?",
+                    (
+                        "approved" if decision in {"approve_once", "approve_session"} else "denied",
+                        "approved" if decision in {"approve_once", "approve_session"} else "denied",
+                        responded_at,
+                        responded_at,
+                        request.tool_call_id,
+                    ),
+                )
+            if request.turn_id is not None:
+                # 活跃 Worker 在收到响应后仍需写入 ToolResult 或继续执行，所以审批完成先
+                # 恢复 running；重启恢复路径会随后由 RecoveryService 原子创建新 Attempt。
+                connection.execute(
+                    "UPDATE turns SET status = 'running', updated_at = ?, last_activity_at = ? WHERE turn_id = ? AND status = 'waiting_permission'",
+                    (responded_at, responded_at, request.turn_id),
+                )
+            if request.session_id is not None:
+                connection.execute(
+                    "UPDATE sessions SET updated_at = ?, last_activity_at = ? WHERE session_id = ?",
+                    (responded_at, responded_at, request.session_id),
+                )
+            connection.execute(
+                "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) "
+                "VALUES (?, ?, (SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?), 'permission_resolved', ?, ?, ?, ?, ?)",
+                (
+                    make_event_id(),
+                    request.session_id,
+                    request.session_id,
+                    responded_at,
+                    request.turn_id,
+                    request.attempt_id,
+                    _json_dumps(
+                        {
+                            "request_id": request_id,
+                            "decision": decision,
+                            "reason": reason,
+                            "source": source,
+                            "scope_key": request.scope_key,
+                            "grant_id": grant_id,
+                            "tool_call_id": request.tool_call_id,
+                        }
+                    ),
+                    _json_dumps({}),
+                ),
+            )
+            row = connection.execute("SELECT * FROM permission_responses WHERE request_id = ? ORDER BY responded_at DESC, response_id DESC LIMIT 1", (request_id,)).fetchone()
+        return self._permission_response_from_row(row)
 
     def create_permission_response(
         self,
@@ -1007,6 +1394,11 @@ class SessionStore:
         session_id: str,
         content: Any,
         turn_id: str | None = None,
+        source_start_sequence: int | None = None,
+        source_end_sequence: int | None = None,
+        summary_message_id: str | None = None,
+        model: str | None = None,
+        status: str = "completed",
         metadata: dict[str, Any] | None = None,
     ) -> ContextSummaryRecord:
         created_at = now_iso()
@@ -1014,10 +1406,62 @@ class SessionStore:
         with self.database.transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO context_summaries(summary_id, session_id, turn_id, created_at, content_json, metadata_json)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO context_summaries(
+                    summary_id, session_id, turn_id, created_at, content_json,
+                    source_start_sequence, source_end_sequence, summary_message_id, model, status, metadata_json
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (summary_id, session_id, turn_id, created_at, _json_dumps(content), _json_dumps(metadata or {})),
+                (
+                    summary_id,
+                    session_id,
+                    turn_id,
+                    created_at,
+                    _json_dumps(content),
+                    source_start_sequence,
+                    source_end_sequence,
+                    summary_message_id,
+                    model,
+                    status,
+                    _json_dumps(metadata or {}),
+                ),
+            )
+            row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
+        return self._context_summary_from_row(row)
+
+    def create_context_summary_with_message(
+        self,
+        *,
+        session_id: str,
+        turn_id: str | None,
+        content: str,
+        source_start_sequence: int | None,
+        source_end_sequence: int | None,
+        model: str | None,
+        metadata: dict[str, Any] | None = None,
+    ) -> ContextSummaryRecord:
+        """在同一事务中写入 Summary Message、Summary Part 和摘要索引。"""
+
+        timestamp = now_iso()
+        message_id = make_message_id()
+        part_id = make_part_id()
+        summary_id = _make_local_id("summary")
+        with self.database.transaction() as connection:
+            summary_turn_id = turn_id or connection.execute(
+                "SELECT turn_id FROM turns WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO messages(message_id, session_id, turn_id, attempt_id, role, status, content_json, created_at, updated_at, interrupted_at, metadata_json) VALUES (?, ?, ?, NULL, 'system', 'completed', ?, ?, ?, NULL, ?)",
+                (message_id, session_id, summary_turn_id, _json_dumps(content), timestamp, timestamp, _json_dumps({"summary_id": summary_id})),
+            )
+            connection.execute(
+                "INSERT INTO message_parts(part_id, message_id, sequence, type, content_json, provider_format, replayable, created_at, artifact_id, metadata_json) VALUES (?, ?, 1, 'summary', ?, NULL, 1, ?, NULL, ?)",
+                (part_id, message_id, _json_dumps(content), timestamp, _json_dumps({"summary_id": summary_id})),
+            )
+            connection.execute(
+                "INSERT INTO context_summaries(summary_id, session_id, turn_id, created_at, content_json, source_start_sequence, source_end_sequence, summary_message_id, model, status, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)",
+                (summary_id, session_id, summary_turn_id, timestamp, _json_dumps(content), source_start_sequence, source_end_sequence, message_id, model, _json_dumps(metadata or {})),
             )
             row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
         return self._context_summary_from_row(row)
@@ -1099,6 +1543,9 @@ class SessionStore:
             last_activity_at=data["last_activity_at"],
             created_at=data["created_at"],
             updated_at=data["updated_at"],
+            project_path=Path(data["project_path"]),
+            project_exists=Path(data["project_path"]).exists(),
+            last_user_preview=_content_preview(_json_loads(data["last_user_content"])) if data.get("last_user_content") is not None else None,
         )
 
     def _turn_from_row(self, row: Any) -> TurnRecord:
@@ -1116,6 +1563,10 @@ class SessionStore:
             created_at=data["created_at"],
             updated_at=data["updated_at"],
             last_activity_at=data["last_activity_at"],
+            user_message_id=data.get("user_message_id"),
+            started_at=data.get("started_at"),
+            completed_at=data.get("completed_at"),
+            error_code=data.get("error_code"),
             metadata=_json_loads(data["metadata_json"]),
         )
 
@@ -1237,10 +1688,10 @@ class SessionStore:
             grant_id=data["grant_id"],
             session_id=data["session_id"],
             scope_key=data["scope_key"],
-            tool_name=data["tool_name"],
-            scope_json=_json_loads(data["scope_json"]) if data["scope_json"] is not None else None,
             created_at=data["created_at"],
             revoked_at=data["revoked_at"],
+            tool_name=data["tool_name"],
+            scope_json=_json_loads(data["scope_json"]) if data["scope_json"] is not None else None,
             metadata=_json_loads(data["metadata_json"]),
         )
 
@@ -1266,6 +1717,11 @@ class SessionStore:
             turn_id=data["turn_id"],
             created_at=data["created_at"],
             content=_json_loads(data["content_json"]),
+            source_start_sequence=data.get("source_start_sequence"),
+            source_end_sequence=data.get("source_end_sequence"),
+            summary_message_id=data.get("summary_message_id"),
+            model=data.get("model"),
+            status=data.get("status") or "completed",
             metadata=_json_loads(data["metadata_json"]),
         )
 

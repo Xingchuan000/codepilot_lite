@@ -6,15 +6,16 @@ from pathlib import Path
 from typing import Literal
 
 from codepilot.agent.runner import build_codepilot_llm
+from codepilot.permissions import PermissionResponse
 from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
-from codepilot.session.models import BranchConfirmationRequired, PendingTurnSubmission
+from codepilot.session.models import BranchConfirmationRequired, PendingTurnSubmission, SessionRecord
 from codepilot.session.permission import SessionPermissionBroker
 from codepilot.session.runtime import SessionRuntime
 from codepilot.trace.events import TraceEvent
 from codepilot.tui_agent.event_stream import MemoryEventStream, trace_event_to_tui_event
-from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent, TUISession
+from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent
 from codepilot.tui_agent.permission_broker import AutoApproveLocalWriteBroker, PermissionBroker, NonInteractiveBroker
 from codepilot.tui_agent.session_store import SessionStore, now_iso
 
@@ -56,7 +57,7 @@ def _policy_context_for_mode(mode: PermissionMode, repo: Path) -> PolicyContext:
 class TUIAgentRunner:
     """TUI 到 SessionRuntime 的单线程适配器，不拥有第二份 Session 状态。"""
 
-    def __init__(self, *, project: ProjectContext, session: TUISession | None, session_store: SessionStore, event_stream: MemoryEventStream, permission_broker: PermissionBroker | None, config: TUIRunnerConfig) -> None:
+    def __init__(self, *, project: ProjectContext, session: SessionRecord | None, session_store: SessionStore, event_stream: MemoryEventStream, permission_broker: PermissionBroker | None, config: TUIRunnerConfig) -> None:
         self.project = project
         self.session = session
         self.session_store = session_store
@@ -100,6 +101,14 @@ class TUIAgentRunner:
             )
 
         return SessionRuntime(self.session_store.database, llm, router_factory, max_steps=self.config.max_steps, trace_hook=self._publish_trace_event)
+
+    def _session_broker(self) -> SessionPermissionBroker:
+        if self.active_session_id is None:
+            raise RuntimeError("select or create a session before accessing permission state")
+        if self.session_permission_broker is None or self.session_permission_broker.session_id != self.active_session_id:
+            self.session_permission_broker = SessionPermissionBroker(self.session_store.database, self.active_session_id, self.mode_permission_broker)
+        self.permission_broker = self.session_permission_broker
+        return self.session_permission_broker
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self.config = replace(self.config, permission_mode=mode)
@@ -226,6 +235,15 @@ class TUIAgentRunner:
     def cancel_current(self) -> None:
         self.cancellation_token.cancel()
         self.permission_broker.cancel_all("cancelled from TUI")
+
+    def restore_pending_permission(self, request_id: str):
+        return self._session_broker().restore_pending_request(request_id)
+
+    def resolve_permission(self, response: PermissionResponse) -> None:
+        self._session_broker().resolve(response)
+
+    def abort_pending_permission(self, request_id: str) -> None:
+        self._session_broker().resolve(PermissionResponse(request_id=request_id, decision="deny", reason="aborted from TUI", responded_at=now_iso()))
 
     def is_running(self) -> bool:
         with self._lock:

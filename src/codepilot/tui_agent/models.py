@@ -4,7 +4,6 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from codepilot.agent.outcome import RunOutcomeSnapshot
 from codepilot.permissions import PermissionRequest
 
 
@@ -83,98 +82,6 @@ class ProjectContext:
     mcp_config_path: Path | None = None
     instructions_files: tuple[Path, ...] = ()
     warnings: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class TUISessionRunRef:
-    run_id: str
-    task_preview: str
-    status: str
-    trace_path: str | None = None
-    report_path: str | None = None
-    report_json_path: str | None = None
-    started_at: str | None = None
-    ended_at: str | None = None
-    completion_kind: str | None = None
-    assistant_stop_reason: str | None = None
-    delivery_kind: str | None = None
-    requires_evidence: bool | None = None
-    evidence_reasons: tuple[str, ...] = ()
-    write_attempted: bool | None = None
-    write_executed: bool | None = None
-    written_files: tuple[str, ...] = ()
-    changed_files: tuple[str, ...] = ()
-    tests_required: bool | None = None
-    diff_required: bool | None = None
-    diff_checked: bool | None = None
-    missing_evidence: tuple[str, ...] = ()
-    tests: str | None = None
-
-    @classmethod
-    def from_outcome(
-        cls,
-        *,
-        run_id: str,
-        task_preview: str,
-        outcome: RunOutcomeSnapshot,
-        trace_path: str | None,
-        report_path: str | None,
-        report_json_path: str | None,
-        started_at: str,
-        ended_at: str,
-    ) -> "TUISessionRunRef":
-        """从统一运行结果构造 Session 索引项。
-
-        Session v1 的字段名和层级保持不变；这里只负责将不可变 Outcome 映射到已有
-        持久化模型，避免 Runner 再逐项复制 Evidence 字段。
-        """
-
-        evidence = outcome.evidence
-        return cls(
-            run_id=run_id,
-            task_preview=task_preview,
-            status=outcome.status,
-            trace_path=trace_path,
-            report_path=report_path,
-            report_json_path=report_json_path,
-            started_at=started_at,
-            ended_at=ended_at,
-            completion_kind=outcome.completion_kind,
-            assistant_stop_reason=outcome.assistant_stop_reason,
-            delivery_kind=outcome.delivery_kind,
-            requires_evidence=evidence.requires_evidence,
-            evidence_reasons=evidence.reasons,
-            write_attempted=evidence.write_attempted,
-            write_executed=evidence.write_executed,
-            written_files=evidence.written_files,
-            changed_files=outcome.changed_files,
-            tests_required=evidence.tests_required,
-            diff_required=evidence.diff_required,
-            diff_checked=evidence.diff_checked,
-            missing_evidence=evidence.missing,
-            tests=outcome.last_test_status,
-        )
-
-
-@dataclass(frozen=True)
-class TUISession:
-    schema_version: str
-    session_id: str
-    project_path: Path
-    git_root: Path | None
-    workspace_root: Path
-    created_at: str
-    updated_at: str
-    title: str
-    model: str | None
-    permission_mode: PermissionMode
-    runs_dir: Path
-    session_dir: Path
-    messages_path: Path
-    runs_index_path: Path
-    runs: tuple[TUISessionRunRef, ...] = ()
-    last_run_id: str | None = None
-    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

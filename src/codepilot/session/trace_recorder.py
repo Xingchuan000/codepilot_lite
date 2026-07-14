@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
+from codepilot.session.ids import now_iso
 from codepilot.session.store import SessionStore
 from codepilot.trace.events import TraceEvent
 
@@ -34,6 +35,12 @@ class SessionTraceRecorder:
         self._step += 1
         return self._step
 
+    @property
+    def current_assistant_message_id(self) -> str | None:
+        """返回当前 Action 所属 Assistant Message，供 ToolCall 建立稳定关联。"""
+
+        return self._last_message_id
+
     def assistant_message_started(self, **_: Any) -> None:
         self._streaming_message = bool(_.get("streaming", True))
         message = self.store.create_message(session_id=self.session_id, turn_id=self.turn_id or "", attempt_id=self.attempt_id, role="assistant", status="in_progress", content="")
@@ -42,8 +49,10 @@ class SessionTraceRecorder:
     def assistant_message_completed(self, *, content: str, **_: Any) -> None:
         if self._last_message_id is None:
             self.assistant_message_started()
-        persisted = self.artifacts.persist_content(self.session_id, "assistant_message", content)
         if not self._streaming_message:
+            # 流式消息已经逐段关联 MessagePart；只有非流式消息才持久化完整正文，避免
+            # 创建一条没有任何 MessagePart 引用的孤儿 Artifact。
+            persisted = self.artifacts.persist_content(self.session_id, "assistant_message", content)
             self.store.append_message_part(
                 self._last_message_id,
                 type="text",
@@ -57,10 +66,13 @@ class SessionTraceRecorder:
         if self._last_message_id is None:
             self.assistant_message_started()
         content = str(_.get("content", ""))
+        delta_type = str(_.get("type", "text"))
+        if delta_type not in {"text", "reasoning"}:
+            delta_type = "text"
         persisted = self.artifacts.persist_content(self.session_id, "assistant_message_delta", content)
         self.store.append_message_part(
             self._last_message_id,
-            type=str(_.get("type", "text")),
+            type=delta_type,
             content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
             provider_format=_.get("provider_format"),
             replayable=bool(_.get("replayable", True)),
@@ -69,28 +81,53 @@ class SessionTraceRecorder:
 
     def assistant_message_interrupted(self, **_: Any) -> None:
         if self._last_message_id is not None:
-            self.store.update_message_status(self._last_message_id, "interrupted")
+            self.store.update_message_status(self._last_message_id, "interrupted", interrupted_at=now_iso())
 
     def tool_call_created(self, *, tool_name: str, arguments: dict[str, Any], **_: Any) -> None:
         # ToolCall 业务表只允许 Router Lifecycle 写入；此入口保留给 Loop/UI 事件协议。
         return None
 
+    def attach_tool_call(self, tool_call_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
+        """把 Router 创建的 ToolCall 投影到产生该调用的 Assistant Message。"""
+
+        if self._last_message_id is None:
+            raise RuntimeError("tool call requires an assistant message")
+        self.store.append_message_part(
+            self._last_message_id,
+            type="tool_call",
+            content={"tool_name": tool_name, "arguments": arguments},
+            metadata={"tool_call_id": tool_call_id, "tool_name": tool_name},
+        )
+
     def tool_result_created(self, *, tool_name: str, success: bool, content: Any, **_: Any) -> None:
-        persisted = self.artifacts.persist_content(self.session_id, "tool_result", content)
+        tool_call_id = _.get("tool_call_id")
+        result = self.store.get_tool_result_by_call(str(tool_call_id)) if tool_call_id else None
+        observation = _.get("observation") or content or ""
+        artifact_id = result.artifact_id if result is not None else None
+        message_content = observation
+        if artifact_id is None and isinstance(content, str):
+            persisted = self.artifacts.persist_content(self.session_id, "tool_result", content)
+            artifact_id = persisted.artifact_id
+            message_content = persisted.inline_content if persisted.inline_content is not None else persisted.preview
+        elif result is not None and result.output_preview is not None:
+            message_content = result.output_preview
         message = self.store.create_message(
             session_id=self.session_id,
             turn_id=self.turn_id or "",
             attempt_id=self.attempt_id,
             role="tool",
             status="completed",
-            content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+            content=message_content,
+            metadata={"tool_name": tool_name, "success": success, "tool_call_id": tool_call_id},
         )
         self.store.append_message_part(
             message.message_id,
             type="tool_result",
-            content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
-            artifact_id=persisted.artifact_id,
-            metadata={"tool_call_id": _.get("tool_call_id")},
+            # replayable 正文保存 Loop 实际看到的规范 observation；Artifact 仅引用业务
+            # ToolResult 已持久化的原始大输出，不在消息层重复创建第二份内容。
+            content=message_content,
+            artifact_id=artifact_id,
+            metadata={"tool_call_id": tool_call_id, "tool_name": tool_name, "success": success},
         )
 
     def agent_finished(self, **_: Any) -> None:
@@ -128,7 +165,17 @@ class SessionTraceRecorder:
         return self._record("run_cancelled", success=False, metadata=metadata or {})
 
     def record_llm_call(self, **kwargs: Any) -> TraceEvent:
-        return self._record("llm_call", **kwargs)
+        response_text = str(kwargs.pop("response_text", ""))
+        metadata = dict(kwargs.pop("metadata", {}) or {})
+        metadata.update(
+            {
+                "response_length": len(response_text),
+                "assistant_message_id": self._last_message_id,
+            }
+        )
+        # Event 只承担时间线索引职责。完整响应已经由 Message/Part/Artifact 保存，这里仅
+        # 保留有限预览和稳定 Message 引用，避免 SQLite Event 再复制一份大正文。
+        return self._record("llm_call", output_preview=response_text[:1500], metadata=metadata, **kwargs)
 
     def record_agent_action(self, **kwargs: Any) -> TraceEvent:
         return self._record("agent_action", **kwargs)

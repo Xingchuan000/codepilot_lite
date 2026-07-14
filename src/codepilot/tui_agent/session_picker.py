@@ -26,6 +26,7 @@ class SessionPickerItem:
     last_activity_at: str
     status: str
     missing_project: bool
+    last_user_preview: str | None
 
 
 @dataclass(frozen=True)
@@ -43,11 +44,7 @@ class SessionPicker:
         self.service = service
 
     def items(self, include_archived: bool = False) -> list[SessionPickerItem]:
-        result: list[SessionPickerItem] = []
-        for summary in self.service.list_all_sessions(include_archived=include_archived):
-            opened = self.service.open_session(summary.session_id)
-            result.append(_to_item(summary, opened.project_path, not opened.project_exists))
-        return result
+        return [_to_item(summary, summary.project_path or Path("."), not summary.project_exists) for summary in self.service.list_all_sessions(include_archived=include_archived)]
 
     def select(self, session_id: str) -> tuple[SessionSummary, Path, bool]:
         opened = self.service.open_session(session_id)
@@ -104,11 +101,12 @@ class SessionPickerScreen(ModalScreen[SessionPickerResult]):
 
         table = self.query_one("#session-picker-table", DataTable)
         table.clear(columns=True)
-        table.add_columns("Title", "ID", "Project", "Branch", "Last activity", "Status")
+        table.add_columns("Title", "Last user message", "ID", "Project", "Branch", "Last activity", "Status")
         for item in self.items():
             marker = " [missing]" if item.missing_project else ""
             table.add_row(
                 item.title,
+                item.last_user_preview or "(no messages)",
                 item.short_id,
                 f"{item.project_path}{marker}",
                 item.branch or "(none)",
@@ -137,4 +135,4 @@ class SessionPickerScreen(ModalScreen[SessionPickerResult]):
 
 
 def _to_item(summary: SessionSummary, project_path: Path, missing: bool) -> SessionPickerItem:
-    return SessionPickerItem(summary.session_id, summary.session_id[:12], summary.title, project_path, summary.current_branch, summary.last_activity_at, summary.status, missing)
+    return SessionPickerItem(summary.session_id, summary.session_id[:12], summary.title, project_path, summary.current_branch, summary.last_activity_at, summary.status, missing, summary.last_user_preview)

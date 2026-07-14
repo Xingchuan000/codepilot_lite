@@ -104,6 +104,86 @@ class RecoveryService:
             tuple(dict.fromkeys((*inspected.resumable_attempt_ids, *created))),
         )
 
+    def resume_after_permission(self, request_id: str) -> RunAttemptRecord | None:
+        """在重启后的权限决定完成后，为同一 Turn 建立确定的恢复状态。
+
+        原 Worker 的同步等待栈已经不存在，因此绝不能尝试唤醒旧 Attempt。批准时会将
+        旧 Attempt 标为 interrupted 并创建下一编号 Attempt；拒绝时则原子终止 Turn。
+        """
+
+        timestamp = now_iso()
+        new_attempt_id = make_attempt_id()
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT pr.turn_id, pr.attempt_id, pr.tool_call_id, pr.status, t.session_id "
+                "FROM permission_requests pr JOIN turns t ON t.turn_id = pr.turn_id WHERE pr.request_id = ?",
+                (request_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError(request_id)
+            response = connection.execute(
+                "SELECT decision FROM permission_responses WHERE request_id = ? ORDER BY responded_at DESC, response_id DESC LIMIT 1",
+                (request_id,),
+            ).fetchone()
+            if response is None or row["status"] == "pending":
+                raise RuntimeError("restored permission request is not resolved")
+
+            if response["decision"] not in {"approve_once", "approve_session"}:
+                connection.execute(
+                    "UPDATE run_attempts SET status = 'cancelled', ended_at = COALESCE(ended_at, ?), interruption_reason = 'permission denied after restart', worker_id = NULL, lease_expires_at = NULL, updated_at = ? "
+                    "WHERE attempt_id = ? AND status IN ('created', 'running', 'interrupted')",
+                    (timestamp, timestamp, row["attempt_id"]),
+                )
+                connection.execute(
+                    "UPDATE turns SET status = 'cancelled', completed_at = ?, updated_at = ?, last_activity_at = ? WHERE turn_id = ?",
+                    (timestamp, timestamp, timestamp, row["turn_id"]),
+                )
+                event_type = "permission_recovery_denied"
+                attempt_id = row["attempt_id"]
+            else:
+                # 批准只表示审计事实已经解决，不代表旧进程执行过工具。新的 Attempt 从
+                # SQLite 历史重新组装上下文，因此不会直接重放未知副作用。
+                connection.execute(
+                    "UPDATE run_attempts SET status = 'interrupted', ended_at = COALESCE(ended_at, ?), interruption_reason = 'permission resolved after restart', worker_id = NULL, lease_expires_at = NULL, updated_at = ? "
+                    "WHERE attempt_id = ? AND status IN ('created', 'running')",
+                    (timestamp, timestamp, row["attempt_id"]),
+                )
+                number = connection.execute(
+                    "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM run_attempts WHERE turn_id = ?",
+                    (row["turn_id"],),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT INTO run_attempts(attempt_id, turn_id, attempt_number, status, created_at, updated_at, started_at, ended_at, interruption_reason, metadata_json) "
+                    "VALUES (?, ?, ?, 'created', ?, ?, NULL, NULL, NULL, '{}')",
+                    (new_attempt_id, row["turn_id"], number, timestamp, timestamp),
+                )
+                connection.execute(
+                    "UPDATE turns SET status = 'queued', completed_at = NULL, updated_at = ?, last_activity_at = ? WHERE turn_id = ?",
+                    (timestamp, timestamp, row["turn_id"]),
+                )
+                event_type = "permission_recovery_resumed"
+                attempt_id = new_attempt_id
+
+            connection.execute(
+                "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) "
+                "VALUES (?, ?, (SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?), ?, ?, ?, ?, ?, '{}')",
+                (
+                    make_event_id(),
+                    row["session_id"],
+                    row["session_id"],
+                    event_type,
+                    timestamp,
+                    row["turn_id"],
+                    attempt_id,
+                    json.dumps({"request_id": request_id, "tool_call_id": row["tool_call_id"]}, separators=(",", ":")),
+                ),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ?, last_activity_at = ? WHERE session_id = ?",
+                (timestamp, timestamp, row["session_id"]),
+            )
+        return self.store.get_attempt(new_attempt_id) if response["decision"] in {"approve_once", "approve_session"} else None
+
     def _normalize_in_progress_messages(self, turn_ids: tuple[str, ...]) -> None:
         if not turn_ids:
             return

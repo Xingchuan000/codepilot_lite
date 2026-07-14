@@ -10,8 +10,9 @@ from pathlib import Path
 
 from codepilot.session.database import SessionDatabase
 from codepilot.session.paths import SessionPaths, resolve_session_paths
+from codepilot.session.models import SessionRecord
 from codepilot.session.service import SessionService
-from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUISession
+from codepilot.tui_agent.models import PermissionMode, ProjectContext
 
 
 def now_iso() -> str:
@@ -39,42 +40,38 @@ class SessionStore:
         self.database.initialize()
         self.service = SessionService(self.database, self.paths)
 
-    def create_session(self, *, model: str | None, permission_mode: PermissionMode, metadata: dict | None = None) -> TUISession:
+    def create_session(self, *, model: str | None, permission_mode: PermissionMode, metadata: dict | None = None) -> SessionRecord:
         record = self.service.create_session(self.project.resolved_project, "codepilot", model or "default", permission_mode)
         if metadata:
             record = self.service.store.update_session(record.session_id, metadata=metadata)
-        return self._to_tui_session(record)
+        return record
 
-    def load_session(self, session_id: str) -> TUISession:
-        return self._to_tui_session(self.service.store.get_session(session_id))
+    def load_session(self, session_id: str) -> SessionRecord:
+        return self.service.store.get_session(session_id)
 
-    def update_session(self, session: TUISession, **changes: object) -> TUISession:
+    def update_session(self, session: SessionRecord, **changes: object) -> SessionRecord:
         mapped = {"current_model": changes["model"]} if "model" in changes else {}
         mapped.update({key: value for key, value in changes.items() if key in {"title", "permission_mode", "metadata"}})
         record = self.service.store.update_session(session.session_id, **mapped)
-        return self._to_tui_session(record)
+        return record
+
+    def get_session(self, session_id: str):
+        return self.service.store.get_session(session_id)
+
+    def list_events(self, session_id: str):
+        return self.service.store.list_events(session_id)
+
+    def list_messages_with_parts(self, session_id: str, turn_id: str | None = None):
+        return self.service.store.list_messages_with_parts(session_id, turn_id)
+
+    def list_permission_requests(self, session_id: str):
+        return self.service.store.list_permission_requests(session_id)
+
+    def list_tool_calls(self, session_id: str):
+        return self.service.store.list_tool_calls(session_id)
+
+    def list_tool_results(self, session_id: str):
+        return self.service.store.list_tool_results(session_id)
 
     def append_message(self, *args: object, **kwargs: object) -> None:
         raise RuntimeError("append_message is removed; use SessionRuntime.submit_user_message")
-
-    def append_run(self, *args: object, **kwargs: object) -> TUISession:
-        raise RuntimeError("append_run is removed; SessionRuntime persists Turn and Attempt")
-
-    def _to_tui_session(self, record) -> TUISession:
-        return TUISession(
-            schema_version="session.sqlite.v1",
-            session_id=record.session_id,
-            project_path=self.project.resolved_project,
-            git_root=self.project.git_root,
-            workspace_root=self.project.workspace_root,
-            created_at=record.created_at,
-            updated_at=record.updated_at,
-            title=record.title,
-            model=record.current_model,
-            permission_mode=record.permission_mode,
-            runs_dir=self.project.default_runs_dir,
-            session_dir=self.paths.sessions_dir / record.session_id,
-            messages_path=self.database.path,
-            runs_index_path=self.database.path,
-            metadata=record.metadata,
-        )

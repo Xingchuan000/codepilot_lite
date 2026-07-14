@@ -72,6 +72,9 @@ class SessionSummary:
     last_activity_at: str
     created_at: str
     updated_at: str
+    project_path: Path | None = None
+    project_exists: bool = True
+    last_user_preview: str | None = None
 
 
 @dataclass(frozen=True)
@@ -133,6 +136,10 @@ class TurnRecord:
     created_at: str
     updated_at: str
     last_activity_at: str
+    user_message_id: str | None = None
+    started_at: str | None = None
+    completed_at: str | None = None
+    error_code: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -270,10 +277,10 @@ class PermissionGrantRecord:
     grant_id: str
     session_id: str
     scope_key: str
-    tool_name: str | None = None
-    scope_json: dict[str, Any] | None = None
     created_at: str
     revoked_at: str | None
+    tool_name: str | None = None
+    scope_json: dict[str, Any] | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -301,6 +308,11 @@ class ContextSummaryRecord:
     turn_id: str | None
     created_at: str
     content: Any
+    source_start_sequence: int | None = None
+    source_end_sequence: int | None = None
+    summary_message_id: str | None = None
+    model: str | None = None
+    status: str = "completed"
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

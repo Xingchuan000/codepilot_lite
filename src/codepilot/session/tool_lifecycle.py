@@ -23,18 +23,20 @@ class SQLiteToolLifecycleObserver:
     Token 和 `execution_started` 已经持久化之后。
     """
 
-    def __init__(self, database: SessionDatabase, session_id: str, turn_id: str, attempt_id: str) -> None:
+    def __init__(self, database: SessionDatabase, session_id: str, turn_id: str, attempt_id: str, message_recorder: Any | None = None) -> None:
         self.database = database
         self.store = SessionStore(database)
         self.artifacts = ArtifactStore(database)
         self.session_id = session_id
         self.turn_id = turn_id
         self.attempt_id = attempt_id
+        self.message_recorder = message_recorder
 
     def on_tool_call_created(self, action: ToolAction, spec: ToolSpec | None) -> str:
         record = self.store.create_tool_call(
             turn_id=self.turn_id,
             attempt_id=self.attempt_id,
+            message_id=getattr(self.message_recorder, "current_assistant_message_id", None),
             tool_name=action.tool_name,
             arguments=to_jsonable(action.arguments),
             side_effect=spec.side_effect.value if spec is not None else None,
@@ -42,6 +44,10 @@ class SQLiteToolLifecycleObserver:
             recovery_strategy=spec.recovery_strategy.value if spec is not None else None,
             metadata={"action_id": action.action_id},
         )
+        if self.message_recorder is not None:
+            # ToolCall 业务表与 Assistant MessagePart 使用同一个稳定 ID，禁止按工具名
+            # 或“最后一条调用”进行模糊配对。
+            self.message_recorder.attach_tool_call(record.tool_call_id, action.tool_name, to_jsonable(action.arguments))
         return record.tool_call_id
 
     def on_policy_denied(self, tool_call_id: str, result: ToolResult) -> None:
@@ -59,51 +65,23 @@ class SQLiteToolLifecycleObserver:
         )
 
     def on_permission_pending(self, tool_call_id: str, request: Any) -> None:
-        timestamp = now_iso()
-        with self.database.transaction() as connection:
-            connection.execute(
-                "UPDATE tool_calls SET status = 'approval_pending', updated_at = ? WHERE tool_call_id = ?",
-                (timestamp, tool_call_id),
-            )
-        self.store.append_event(
-            session_id=self.session_id,
-            event_type="permission_pending",
-            payload={"request_id": request.request_id, "tool_name": request.tool_name, "tool_call_id": tool_call_id},
-            turn_id=self.turn_id,
-            attempt_id=self.attempt_id,
-        )
+        return None
 
     def on_permission_resolved(self, tool_call_id: str, request: Any, response: Any, result: ToolResult | None = None) -> None:
-        self.store.append_event(
-            session_id=self.session_id,
-            event_type="permission_resolved",
-            payload={
-                "request_id": request.request_id,
-                "decision": response.decision if response is not None else "deny",
-                "tool_call_id": tool_call_id,
-            },
-            turn_id=self.turn_id,
-            attempt_id=self.attempt_id,
-        )
-        if result is not None:
-            persisted = self.artifacts.persist_content(self.session_id, "tool_result", result.error or "permission denied")
-            self.store.persist_tool_result(
-                tool_call_id,
-                call_status="denied",
-                result_status="denied",
-                content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
-                output_preview=persisted.preview,
-                artifact_id=persisted.artifact_id,
-                error=result.error,
-                success=False,
-                metadata={**result.metadata, "executed": False},
-            )
+        if result is None:
             return
-        with self.database.transaction() as connection:
-            connection.execute(
-                "UPDATE tool_calls SET status = 'approved', updated_at = ? WHERE tool_call_id = ?",
-                (now_iso(), tool_call_id),
-            )
+        persisted = self.artifacts.persist_content(self.session_id, "tool_result", result.error or "permission denied")
+        self.store.persist_tool_result(
+            tool_call_id,
+            call_status="denied",
+            result_status="denied",
+            content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+            output_preview=persisted.preview,
+            artifact_id=persisted.artifact_id,
+            error=result.error,
+            success=False,
+            metadata={**result.metadata, "executed": False},
+        )
 
     def build_recovery_token(self, action: ToolAction, spec: ToolSpec | None) -> dict[str, Any]:
         """根据执行前事实生成 Token；不从恢复时的当前内容反推原状态。"""
@@ -209,18 +187,7 @@ class SQLiteToolLifecycleObserver:
     def on_execution_exception(self, tool_call_id: str, error: Exception) -> None:
         """保留无结果的 uncertain 调用，交由 RecoveryService 对账。"""
 
-        with self.database.transaction() as connection:
-            connection.execute(
-                "UPDATE tool_calls SET status = 'execution_uncertain', updated_at = ? WHERE tool_call_id = ?",
-                (now_iso(), tool_call_id),
-            )
-        self.store.append_event(
-            session_id=self.session_id,
-            event_type="tool_execution_uncertain",
-            payload={"tool_call_id": tool_call_id, "error": str(error)},
-            turn_id=self.turn_id,
-            attempt_id=self.attempt_id,
-        )
+        self.store.mark_tool_execution_uncertain_with_event(tool_call_id, str(error))
 
 
 def _sha256_bytes(value: bytes) -> str:

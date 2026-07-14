@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 
 
 class SessionDatabase:
@@ -34,12 +34,18 @@ class SessionDatabase:
             connection.executescript(_schema_sql())
             row = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
             version = int(row[0]) if row is not None else SCHEMA_VERSION
-            if version in {1, 2, 3} and version < 2:
+            if version < 2:
                 _migrate_v1_to_v2(connection)
                 version = 2
-            if version in {2, 3} and version < 3:
+            if version < 3:
                 _migrate_v2_to_v3(connection)
                 version = 3
+            if version < 4:
+                _migrate_v3_to_v4(connection)
+                version = 4
+            if version < 5:
+                _migrate_v4_to_v5(connection)
+                version = 5
             if version != SCHEMA_VERSION:
                 raise RuntimeError(f"unsupported Session schema version: {version}")
             connection.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)", (str(version),))
@@ -112,6 +118,83 @@ def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
             if column not in existing:
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_name}")
 
+
+def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
+    """补齐 turn / summary 字段与权限查询索引。"""
+
+    additions = {
+        "turns": {
+            "user_message_id": "TEXT",
+            "started_at": "TEXT",
+            "completed_at": "TEXT",
+            "error_code": "TEXT",
+        },
+        "context_summaries": {
+            "source_start_sequence": "INTEGER",
+            "source_end_sequence": "INTEGER",
+            "summary_message_id": "TEXT",
+            "model": "TEXT",
+            "status": "TEXT",
+        },
+        "permission_requests": {
+            "session_id": "TEXT",
+            "turn_id": "TEXT",
+            "attempt_id": "TEXT",
+            "tool_call_id": "TEXT",
+        },
+    }
+    for table, columns in additions.items():
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column, type_name in columns.items():
+            if column not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_name}")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_permission_requests_session_status ON permission_requests(session_id, status)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_tool_results_tool_call_id ON tool_results(tool_call_id)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_messages_session_status ON messages(session_id, status)")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_context_summaries_session_status_end ON context_summaries(session_id, status, source_end_sequence)")
+
+
+def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
+    """重建权限请求表，使升级库与新建库拥有相同的外键约束。"""
+
+    connection.execute("PRAGMA foreign_keys = OFF")
+    connection.execute(
+        """CREATE TABLE permission_requests_v5 (
+            request_id TEXT PRIMARY KEY,
+            session_id TEXT,
+            turn_id TEXT,
+            attempt_id TEXT,
+            tool_call_id TEXT,
+            scope_key TEXT,
+            tool_name TEXT NOT NULL,
+            arguments_json TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            metadata_json TEXT NOT NULL,
+            FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+            FOREIGN KEY(turn_id) REFERENCES turns(turn_id),
+            FOREIGN KEY(attempt_id) REFERENCES run_attempts(attempt_id),
+            FOREIGN KEY(tool_call_id) REFERENCES tool_calls(tool_call_id)
+        )"""
+    )
+    connection.execute(
+        """INSERT INTO permission_requests_v5
+        SELECT request_id,
+               CASE WHEN session_id IN (SELECT session_id FROM sessions) THEN session_id END,
+               CASE WHEN turn_id IN (SELECT turn_id FROM turns) THEN turn_id END,
+               CASE WHEN attempt_id IN (SELECT attempt_id FROM run_attempts) THEN attempt_id END,
+               CASE WHEN tool_call_id IN (SELECT tool_call_id FROM tool_calls) THEN tool_call_id END,
+               scope_key, tool_name, arguments_json, reason, status, created_at, metadata_json
+        FROM permission_requests"""
+    )
+    connection.execute("DROP TABLE permission_requests")
+    connection.execute("ALTER TABLE permission_requests_v5 RENAME TO permission_requests")
+    connection.execute("CREATE INDEX IF NOT EXISTS idx_permission_requests_session_status ON permission_requests(session_id, status)")
+    connection.execute("PRAGMA foreign_keys = ON")
+    if connection.execute("PRAGMA foreign_key_check").fetchall():
+        raise RuntimeError("Session schema migration left invalid foreign keys")
+
 def _schema_sql() -> str:
     return """
     CREATE TABLE IF NOT EXISTS schema_meta (
@@ -160,9 +243,14 @@ def _schema_sql() -> str:
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         last_activity_at TEXT NOT NULL,
+        user_message_id TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        error_code TEXT,
         metadata_json TEXT NOT NULL,
         UNIQUE(session_id, sequence),
-        FOREIGN KEY(session_id) REFERENCES sessions(session_id)
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(user_message_id) REFERENCES messages(message_id)
     );
 
     CREATE TABLE IF NOT EXISTS run_attempts (
@@ -211,7 +299,8 @@ def _schema_sql() -> str:
         artifact_id TEXT,
         metadata_json TEXT NOT NULL,
         UNIQUE(message_id, sequence),
-        FOREIGN KEY(message_id) REFERENCES messages(message_id)
+        FOREIGN KEY(message_id) REFERENCES messages(message_id),
+        FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
     );
 
     CREATE TABLE IF NOT EXISTS tool_calls (
@@ -247,7 +336,8 @@ def _schema_sql() -> str:
         error TEXT,
         success INTEGER,
         metadata_json TEXT NOT NULL,
-        FOREIGN KEY(tool_call_id) REFERENCES tool_calls(tool_call_id)
+        FOREIGN KEY(tool_call_id) REFERENCES tool_calls(tool_call_id),
+        FOREIGN KEY(artifact_id) REFERENCES artifacts(artifact_id)
     );
 
     CREATE TABLE IF NOT EXISTS permission_requests (
@@ -262,7 +352,11 @@ def _schema_sql() -> str:
         reason TEXT NOT NULL,
         status TEXT NOT NULL,
         created_at TEXT NOT NULL,
-        metadata_json TEXT NOT NULL
+        metadata_json TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(turn_id) REFERENCES turns(turn_id),
+        FOREIGN KEY(attempt_id) REFERENCES run_attempts(attempt_id),
+        FOREIGN KEY(tool_call_id) REFERENCES tool_calls(tool_call_id)
     );
 
     CREATE TABLE IF NOT EXISTS permission_responses (
@@ -309,9 +403,15 @@ def _schema_sql() -> str:
         turn_id TEXT,
         created_at TEXT NOT NULL,
         content_json TEXT NOT NULL,
+        source_start_sequence INTEGER,
+        source_end_sequence INTEGER,
+        summary_message_id TEXT,
+        model TEXT,
+        status TEXT NOT NULL DEFAULT 'completed',
         metadata_json TEXT NOT NULL,
         FOREIGN KEY(session_id) REFERENCES sessions(session_id),
-        FOREIGN KEY(turn_id) REFERENCES turns(turn_id)
+        FOREIGN KEY(turn_id) REFERENCES turns(turn_id),
+        FOREIGN KEY(summary_message_id) REFERENCES messages(message_id)
     );
 
     CREATE TABLE IF NOT EXISTS artifacts (
@@ -335,7 +435,11 @@ def _schema_sql() -> str:
     CREATE INDEX IF NOT EXISTS idx_messages_session_turn_created_at ON messages(session_id, turn_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_message_parts_message_sequence ON message_parts(message_id, sequence);
     CREATE INDEX IF NOT EXISTS idx_tool_calls_turn_status ON tool_calls(turn_id, status);
+    CREATE INDEX IF NOT EXISTS idx_tool_results_tool_call_id ON tool_results(tool_call_id);
+    CREATE INDEX IF NOT EXISTS idx_permission_requests_session_status ON permission_requests(session_id, status);
     CREATE INDEX IF NOT EXISTS idx_session_events_session_sequence ON session_events(session_id, sequence);
     CREATE INDEX IF NOT EXISTS idx_permission_grants_session_scope_revoked ON permission_grants(session_id, scope_key, revoked_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_session_status ON messages(session_id, status);
+    CREATE INDEX IF NOT EXISTS idx_context_summaries_session_status_end ON context_summaries(session_id, status, source_end_sequence);
     CREATE INDEX IF NOT EXISTS idx_artifacts_session_created_at ON artifacts(session_id, created_at);
     """

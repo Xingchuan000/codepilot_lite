@@ -2,10 +2,8 @@ from __future__ import annotations
 
 from typing import get_args
 
-from codepilot.agent.evidence import EvidenceSnapshot
-from codepilot.agent.outcome import RunOutcomeSnapshot
 from codepilot.permissions import PermissionRequest
-from codepilot.tui_agent.models import AgentRunView, TranscriptItem, TUIEventType, TUISessionRunRef, to_jsonable
+from codepilot.tui_agent.models import AgentRunView, TranscriptItem, TUIEventType, to_jsonable
 
 
 def test_transcript_item_can_be_constructed() -> None:
@@ -66,61 +64,8 @@ def test_permission_request_comes_from_codepilot_permissions() -> None:
     assert AgentRunView(permission_requests=(request,)).permission_requests[0].request_id == "perm-1"
 
 
-def test_session_run_ref_from_outcome_keeps_session_v1_json_shape() -> None:
-    outcome = RunOutcomeSnapshot(
-        status="success",
-        completion_kind="task_success",
-        assistant_stop_reason="structured_finish",
-        delivery_kind="code_change",
-        evidence=EvidenceSnapshot(
-            requires_evidence=True,
-            reasons=("write_executed", "written_files"),
-            write_attempted=True,
-            write_executed=True,
-            written_files=("src/calc.py",),
-            observed_changed_files=("src/calc.py",),
-            claimed_changed_files=("src/calc.py",),
-            tests_required=True,
-            diff_required=True,
-            diff_checked=True,
-            missing=(),
-        ),
-        changed_files=("src/calc.py",),
-        last_test_status="passed",
-    )
+def test_legacy_session_models_are_removed() -> None:
+    import codepilot.tui_agent.models as models
 
-    run_ref = TUISessionRunRef.from_outcome(
-        run_id="run-1",
-        task_preview="fix add",
-        outcome=outcome,
-        trace_path="runs/run-1/trace.jsonl",
-        report_path="runs/run-1/report.md",
-        report_json_path="runs/run-1/report.json",
-        started_at="2024-01-01T00:00:00Z",
-        ended_at="2024-01-01T00:01:00Z",
-    )
-
-    assert to_jsonable(run_ref) == {
-        "run_id": "run-1",
-        "task_preview": "fix add",
-        "status": "success",
-        "trace_path": "runs/run-1/trace.jsonl",
-        "report_path": "runs/run-1/report.md",
-        "report_json_path": "runs/run-1/report.json",
-        "started_at": "2024-01-01T00:00:00Z",
-        "ended_at": "2024-01-01T00:01:00Z",
-        "completion_kind": "task_success",
-        "assistant_stop_reason": "structured_finish",
-        "delivery_kind": "code_change",
-        "requires_evidence": True,
-        "evidence_reasons": ["write_executed", "written_files"],
-        "write_attempted": True,
-        "write_executed": True,
-        "written_files": ["src/calc.py"],
-        "changed_files": ["src/calc.py"],
-        "tests_required": True,
-        "diff_required": True,
-        "diff_checked": True,
-        "missing_evidence": [],
-        "tests": "passed",
-    }
+    assert not hasattr(models, "TUISession")
+    assert not hasattr(models, "TUISessionRunRef")

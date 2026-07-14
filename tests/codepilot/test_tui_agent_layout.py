@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from codepilot.session.database import SessionDatabase
+from codepilot.session.service import SessionService
 from codepilot.tui_agent.layout import (
     format_side_status,
     format_result_panel,
@@ -9,7 +11,7 @@ from codepilot.tui_agent.layout import (
     format_transcript_plain,
     transcript_item_to_copy_text,
 )
-from codepilot.tui_agent.models import AgentRunView, ProjectContext, TUISession, TranscriptItem
+from codepilot.tui_agent.models import AgentRunView, ProjectContext, TranscriptItem
 
 
 def _project(tmp_path: Path) -> ProjectContext:
@@ -26,23 +28,10 @@ def _project(tmp_path: Path) -> ProjectContext:
     )
 
 
-def _session(tmp_path: Path) -> TUISession:
-    return TUISession(
-        schema_version="session.v1",
-        session_id="session-1",
-        project_path=tmp_path,
-        git_root=tmp_path,
-        workspace_root=tmp_path,
-        created_at="2024-01-01T00:00:00Z",
-        updated_at="2024-01-01T00:00:00Z",
-        title="demo",
-        model="gpt-4.1",
-        permission_mode="manual",
-        runs_dir=tmp_path / "runs",
-        session_dir=tmp_path / ".codepilot" / "sessions" / "session-1",
-        messages_path=tmp_path / ".codepilot" / "sessions" / "session-1" / "messages.jsonl",
-        runs_index_path=tmp_path / ".codepilot" / "sessions" / "session-1" / "runs.jsonl",
-    )
+def _session(tmp_path: Path):
+    database = SessionDatabase(tmp_path / "sessions.sqlite3")
+    database.initialize()
+    return SessionService(database).create_session(tmp_path, "codepilot", "gpt-4.1", "manual")
 
 
 def test_each_transcript_kind_formats_to_non_empty_text() -> None:

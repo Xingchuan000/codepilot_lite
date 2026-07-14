@@ -176,8 +176,7 @@ def test_export_transcript_is_deprecated_and_does_not_write_file(tmp_path: Path,
 
     app.on_input_submitted(SimpleNamespace(value="/export-transcript"))
 
-    transcript_path = app.session.session_dir / "transcript.md"
-    assert transcript_path.exists() is False
+    assert list((tmp_path / "data").glob("**/transcript.md")) == []
     assert app._reducer.view.transcript[-1].kind == "command_output"
     assert app._reducer.view.transcript[-1].body == "/export-transcript is deprecated; use /export-session"
     assert len(widgets["#transcript"].mounted) == 2

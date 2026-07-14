@@ -79,9 +79,10 @@ def test_v1_database_migrates_recovery_fields_without_losing_rows(tmp_path: Path
     database.initialize()
 
     with database.connect() as connection:
-        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "2"
+        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
         assert connection.execute("SELECT interruption_reason FROM run_attempts WHERE attempt_id = 'attempt-1'").fetchone()[0] is None
         assert {row[1] for row in connection.execute("PRAGMA table_info(run_attempts)")} >= {"interruption_reason", "worker_id", "lease_expires_at"}
+        assert {row[1] for row in connection.execute("PRAGMA table_info(turns)")} >= {"user_message_id", "started_at", "completed_at", "error_code"}
         row = connection.execute(
             "SELECT side_effect, idempotency, recovery_strategy, recovery_token_json FROM tool_calls WHERE tool_call_id = 'call-1'"
         ).fetchone()

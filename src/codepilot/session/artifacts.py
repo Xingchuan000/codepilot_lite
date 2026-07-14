@@ -3,10 +3,10 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from shutil import copy2
 from typing import Any
 
 from codepilot.session.database import SessionDatabase
@@ -90,30 +90,34 @@ class ArtifactStore:
         return self._put_external(session_id, kind, content, mime_type=mime_type)
 
     def read_text(self, artifact_id: str) -> str:
+        return self.read_bytes(artifact_id).decode("utf-8")
+
+    def read_bytes(self, artifact_id: str) -> bytes:
         artifact = self._get_artifact(artifact_id)
         if artifact.storage_path == "inline":
             if isinstance(artifact.content, str):
-                return artifact.content
-            if isinstance(artifact.content, dict) and artifact.content.get("encoding") == "base64":
-                return base64.b64decode(str(artifact.content["data"])).decode("utf-8")
-            raise ValueError(f"Artifact {artifact_id} has unsupported inline content")
-        path = Path(artifact.storage_path)
-        if not path.exists():
-            raise FileNotFoundError(f"Artifact file missing: {path}")
-        return path.read_text(encoding="utf-8")
+                content = artifact.content.encode("utf-8")
+            elif isinstance(artifact.content, dict) and artifact.content.get("encoding") == "base64":
+                content = base64.b64decode(str(artifact.content["data"]))
+            else:
+                raise ValueError(f"Artifact {artifact_id} has unsupported inline content")
+        else:
+            path = Path(artifact.storage_path)
+            if not path.exists():
+                raise FileNotFoundError(f"Artifact file missing: {path}")
+            content = path.read_bytes()
+        if len(content) != artifact.size_bytes:
+            raise ValueError(f"Artifact size mismatch: {artifact_id}")
+        if _sha256_bytes(content) != artifact.sha256:
+            raise ValueError(f"Artifact hash mismatch: {artifact_id}")
+        return content
 
     def copy_to_export(self, artifact_id: str, target_dir: Path) -> Path:
         artifact = self._get_artifact(artifact_id)
         target_dir.mkdir(parents=True, exist_ok=True)
         suffix = ".txt" if artifact.mime_type.startswith("text/") else ".bin"
         target_path = target_dir / f"{artifact.artifact_id}{suffix}"
-        if artifact.storage_path == "inline":
-            target_path.write_text(self.read_text(artifact_id), encoding="utf-8")
-            return target_path
-        source_path = Path(artifact.storage_path)
-        if not source_path.exists():
-            raise FileNotFoundError(f"Artifact file missing: {source_path}")
-        copy2(source_path, target_path)
+        target_path.write_bytes(self.read_bytes(artifact_id))
         return target_path
 
     def _put_external(self, session_id: str, kind: str, content: bytes, *, mime_type: str) -> ArtifactRecord:
@@ -124,7 +128,15 @@ class ArtifactStore:
         with tempfile.NamedTemporaryFile(prefix=f"{artifact_id}.", suffix=".tmp", dir=artifact_dir, delete=False) as file:
             tmp_path = Path(file.name)
             file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
         try:
+            tmp_path.replace(final_path)
+            dir_fd = os.open(artifact_dir, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
             record = self.store.create_artifact(
                 session_id=session_id,
                 kind=kind,
@@ -135,9 +147,9 @@ class ArtifactStore:
                 artifact_id=artifact_id,
             )
         except Exception:
+            final_path.unlink(missing_ok=True)
             tmp_path.unlink(missing_ok=True)
             raise
-        tmp_path.replace(final_path)
         return record
 
     def _get_artifact(self, artifact_id: str) -> ArtifactRecord:

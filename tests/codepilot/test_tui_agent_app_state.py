@@ -137,7 +137,7 @@ def test_app_permissions_updates_runner_and_session(tmp_path: Path, monkeypatch)
     assert app.runner.session.permission_mode == "read_only"
 
 
-def test_app_move_updates_project_context_and_runner(tmp_path: Path, monkeypatch) -> None:
+def test_app_move_only_updates_next_session_project(tmp_path: Path, monkeypatch) -> None:
     other = tmp_path / "other"
     other.mkdir()
     app = _create_app(tmp_path, monkeypatch)
@@ -147,10 +147,11 @@ def test_app_move_updates_project_context_and_runner(tmp_path: Path, monkeypatch
 
     app.on_input_submitted(SimpleNamespace(value="/move other"))
 
-    assert app._project_context.resolved_project == other.resolve()
-    assert app.runner.project.resolved_project == other.resolve()
-    assert app.session.project_path == other.resolve()
-    assert other.resolve().name in widgets["#top-status"].text
+    assert app._project_context.resolved_project == tmp_path.resolve()
+    assert app.runner.project.resolved_project == tmp_path.resolve()
+    with app._session_database.connect() as connection:
+        assert connection.execute("SELECT path FROM projects WHERE project_id = ?", (app.session.project_id,)).fetchone()[0] == str(tmp_path.resolve())
+    assert app._new_session_project_context.resolved_project == other.resolve()
 
 
 def test_app_copy_to_clipboard_writes_system_clipboard(tmp_path: Path, monkeypatch) -> None:

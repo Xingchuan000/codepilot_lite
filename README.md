@@ -262,12 +262,33 @@ turn = store.create_turn(
 )
 ```
 
+### CodePilot Lite Session TUI 使用说明
+
+启动 TUI 后，先通过 Session Picker 选择已有 Session，或者按 `n` 新建一个 Session。
+输入框始终可用，普通文本会作为新任务提交，带 `/` 前缀的内容会被当成命令处理。
+
+常用命令如下：
+
+- `/sessions` 打开 Session Picker
+- `/switch <session-id>` 切换到指定 Session
+- `/new` 新建一个 Session
+- `/archive` 归档当前 Session
+- `/unarchive <session-id>` 取消归档指定 Session
+- `/compact` 先执行上下文压缩，再继续当前 Session
+- `/export-session [path]` 导出当前 Session 到指定目录
+- `/move <path>` 把后续新建 Session 的项目目录切换到指定路径
+
+导出目录只影响导出结果，不会自动切换当前 Project、Session 或 Transcript。
+Session 的历史内容、权限请求和工具结果都以 SQLite 为唯一事实来源，切换 Session 后会自动从数据库重新挂载。
+
 说明：
 
 * `resolve_session_paths(...)` 默认会指向用户级 `codepilot` 数据目录，也可以在测试里显式传入 `tmp_path`。
 * `SessionDatabase.initialize()` 会创建 SQLite schema，重复调用是安全的。
 * `SessionStore` 负责创建和读取 `projects`、`sessions`、`turns`、`messages`、`tool_calls`、`session_events` 等核心记录。
 * 这一阶段不会创建旧的 `session.json`、`messages.jsonl` 或 `runs.jsonl`。
+
+当前这版 Session 的推荐入口是先创建数据库和 Store，再按需接入 `SessionService`、`SessionRuntime` 和 `SessionPermissionBroker`。`codepilot.session` 包已经改成轻量导出，导入它不会再强制加载 runtime，适合在 CLI、TUI 和测试里直接使用。
 
 ### Session 生命周期与多轮执行（Step3–Step5）
 
@@ -313,7 +334,7 @@ if isinstance(submission, TurnSubmission):
 
 #### Attempt、工具生命周期与恢复（P0 3.4–3.8）
 
-Session SQLite Schema 当前为 v2。已有 v1 数据库会在 `SessionDatabase.initialize()` 时原地增加 Attempt 中断原因以及以下 ToolCall 恢复字段，原 Session、Turn、Message、Attempt 和 ToolCall 记录会保留：
+Session SQLite Schema 当前为 v4。已有 v1/v2/v3 数据库会在 `SessionDatabase.initialize()` 时原地升级并补齐下面这些字段，原 Session、Turn、Message、Attempt、ToolCall、Permission 和 Summary 记录会保留：
 
 ```text
 tool_calls.side_effect
@@ -323,6 +344,15 @@ tool_calls.recovery_token_json
 run_attempts.interruption_reason
 run_attempts.worker_id
 run_attempts.lease_expires_at
+turns.user_message_id
+turns.started_at
+turns.completed_at
+turns.error_code
+context_summaries.source_start_sequence
+context_summaries.source_end_sequence
+context_summaries.summary_message_id
+context_summaries.model
+context_summaries.status
 ```
 
 `SessionRuntime.submit_user_message()` 原子创建的 Attempt 由 `run_turn(turn_id, attempt_id)` 精确执行。模型调用前，Turn 和 Attempt 在同一事务中进入 `running`；结束状态映射如下：
@@ -393,7 +423,7 @@ TUI、Runner、Picker 和 Exporter 共用 `resolve_session_paths()` 返回的用
 
 Session Runtime 的事实来源始终是 SQLite；旧的文件型 Trace/Report 仍只服务于非 Session 的 `agent-run`、GitHub/PR/CI 等既有入口。Session 导出文件不能被当作恢复状态，也不会在正常 Session 运行时自动生成。
 
-Step12 已将 TUI 的 `SessionStore` 改为 SQLite 适配层，`TUIAgentRunner` 通过 `SessionRuntime` 创建 Turn/Attempt，不再构造 `TraceLogger` 或调用 `generate_report()`。`append_message()` 和 `append_run()` 仅保留为明确报错的兼容接口，避免旧调用悄悄重新写入 JSON。
+Step12 已将 TUI 的 Session 主类型切换为 SQLite `SessionRecord`，`TUIAgentRunner` 通过 `SessionRuntime` 创建 Turn/Attempt，不再构造 `TraceLogger` 或调用 `generate_report()`。旧的 Run 索引写入接口已移除，避免旧调用悄悄重新写入 JSON。
 
 这次还把大输出统一切到 artifact 入口：消息分片和 Tool Result 现在只保留 `preview` 和 `artifact_id`，完整内容会落到 Session artifact store。想查看完整文本时，可以直接用 `ArtifactStore.read_text(artifact_id)` 读取；TUI 默认显示的是 preview。
 
@@ -625,7 +655,7 @@ codepilot report --trace runs/<run_id>/trace.jsonl --json --overwrite
 - 对于真正的代码交付任务，`finish` 需要配合真实写入、测试和 `git_diff` 证据；TUI 右侧状态栏会显示 `Tests: passed` 和 `Diff: checked`。
 - 对于普通聊天或只读分析任务，`Tests` 和 `Diff` 会显示为 `not required`，报告里也会显示 `Status: not required` 和 `Diff was not required.`。
 - 你可以通过查看 `report.md` 的 `Evidence Gate`、`Test Result` 和 `Diff Summary` 小节，确认这轮运行到底是代码交付还是普通回复。
-- 如果想检查最终落盘结果，可以直接看会话目录里的 `session.json`、`runs.jsonl`、`trace.jsonl` 和生成的 `report.md`。
+- 如果想检查最终落盘结果，请执行 `/export-session`；正常 Session 运行不会生成项目内 `session.json`、`runs.jsonl`、trace 或 report 文件。
 
 ### MCP 工具接入使用说明
 
@@ -1301,6 +1331,13 @@ codepilot tui /path/to/project --model gpt-4.1-mini --max-steps 12
 ### 常用命令
 
 - `/help`：查看命令列表
+- `/sessions`：打开跨项目 SQLite Session Picker
+- `/switch <session-id>`：切换 Session（当前 Turn 运行时不可用）
+- `/new`：创建新的 SQLite Session
+- `/archive`、`/unarchive <session-id>`：归档或恢复 Session
+- `/move <path>`：只设置下一次新建 Session 的项目，不改变当前 Session
+- `/compact`：在空闲时手动压缩上下文；运行中的 Turn 会拒绝该命令
+- `/export-session [path]`：显式导出当前 Session；省略路径时使用默认 exports 目录
 - `/status`：查看项目、Git、模型和权限状态
 - `/permissions`：查看或切换权限模式
 - `/diff`：查看变更摘要
@@ -1309,15 +1346,13 @@ codepilot tui /path/to/project --model gpt-4.1-mini --max-steps 12
 - `/cancel`：取消当前运行
 - `/exit`：退出 TUI
 
-### 会话文件
+### 会话存储和导出
 
-TUI 会把会话写入 `<workspace_root>/.codepilot/sessions/<session_id>/`，其中包含：
+TUI 使用用户级 SQLite 数据库作为 Session 唯一事实来源；Turn、Attempt、消息、权限、工具调用、摘要和 Artifact 都写入数据库，不依赖 TUI Run 索引或运行中的 trace/report 文件。
 
-- `session.json`
-- `messages.jsonl`
-- `runs.jsonl`
+只有显式执行 `/export-session` 才会生成导出目录。导出包含 `session.json`、`turns.jsonl`、`messages.jsonl`、`events.jsonl`、`trace.jsonl`、`report.json`、递归 Artifact 文件和带 SHA-256/大小校验的 `manifest.json`。导出失败会清理临时目录。
 
-每次运行的 trace 和 report 仍然写入 `runs/<run_id>/`，以兼容现有 dashboard。
+运行中的 Turn 不能切换、创建、归档、移动或手动 Compact Session；请先等待完成或使用 `/cancel`。缺失项目路径和归档 Session 会以只读方式打开，任务输入框保持禁用。
 
 ### 第18步语义说明
 

@@ -15,6 +15,16 @@ def test_session_permission_broker_persists_request_response_grant_and_event(tmp
     database.initialize()
     store = SessionStore(database)
     session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.create_turn(
+        session_id=session.session_id,
+        title="Turn 1",
+        provider_snapshot="openai",
+        model_snapshot="fake",
+        permission_mode_snapshot="manual",
+        branch_snapshot=None,
+    )
+    attempt = store.create_attempt(turn_id=turn.turn_id)
+    call = store.create_tool_call(turn_id=turn.turn_id, attempt_id=attempt.attempt_id, tool_name="replace_range", arguments={"path": "src/demo.py"})
     broker = SessionPermissionBroker(database, session.session_id, TestBroker())
     request = PermissionRequest(
         request_id="perm-1",
@@ -28,9 +38,9 @@ def test_session_permission_broker_persists_request_response_grant_and_event(tmp
         matched_rule="tool.default_permission.ask",
         created_at="2024-01-01T00:00:00Z",
         session_id=session.session_id,
-        turn_id="turn-1",
-        attempt_id="attempt-1",
-        tool_call_id="call-1",
+        turn_id=turn.turn_id,
+        attempt_id=attempt.attempt_id,
+        tool_call_id=call.tool_call_id,
         scope_key='{"tool":"replace_range","workspace":"/tmp/demo"}',
         scope_json={"tool": "replace_range", "workspace": "/tmp/demo"},
     )
@@ -52,7 +62,6 @@ def test_session_permission_broker_persists_request_response_grant_and_event(tmp
         grant_row = connection.execute("SELECT tool_name, scope_json FROM permission_grants WHERE session_id = ?", (session.session_id,)).fetchone()
         assert grant_row["tool_name"] == "replace_range"
         assert json.loads(grant_row["scope_json"]) == {"tool": "replace_range", "workspace": "/tmp/demo"}
-        event_row = connection.execute("SELECT event_type, payload_json FROM session_events WHERE session_id = ?", (session.session_id,)).fetchone()
-        assert event_row["event_type"] == "permission_resolved"
-        assert json.loads(event_row["payload_json"])["decision"] == "approve_session"
-
+        event_rows = connection.execute("SELECT event_type, payload_json FROM session_events WHERE session_id = ? ORDER BY sequence", (session.session_id,)).fetchall()
+        assert [row["event_type"] for row in event_rows] == ["permission_pending", "permission_resolved"]
+        assert json.loads(event_rows[-1]["payload_json"])["decision"] == "approve_session"

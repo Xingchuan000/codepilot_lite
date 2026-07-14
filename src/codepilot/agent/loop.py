@@ -272,10 +272,13 @@ class MinimalAgentLoop:
         if self.event_sink is not None:
             self.event_sink.assistant_message_started(turn_id=context.turn_id, attempt_id=context.attempt_id, streaming=True)
         for event in stream(messages):
-            if event.type in {"text_delta", "reasoning_delta"}:
+            if event.type == "text_delta":
                 content.append(event.content)
                 if self.event_sink is not None:
-                    self.event_sink.assistant_text_delta(content=event.content, type=event.type, provider_format=event.provider_format, replayable=event.replayable)
+                    self.event_sink.assistant_text_delta(content=event.content, type="text", provider_format=event.provider_format, replayable=event.replayable)
+            elif event.type == "reasoning_delta":
+                if self.event_sink is not None:
+                    self.event_sink.assistant_text_delta(content=event.content, type="reasoning", provider_format=event.provider_format, replayable=event.replayable)
             elif event.type == "usage":
                 usage = event.usage
             elif event.type == "error":
@@ -707,21 +710,22 @@ class MinimalAgentLoop:
                         error=exc,
                     )
                     continue
+                observation = format_observation(route_result)
                 if self.event_sink is not None:
                     self.event_sink.tool_result_created(
                         tool_name=route_result.tool_name,
                         success=route_result.success,
-                        content=route_result.result.output,
+                        content=route_result.result.output or route_result.result.error or "",
                         turn_id=context.turn_id,
                         attempt_id=context.attempt_id,
                         tool_call_id=route_result.metadata.get("tool_call_id"),
+                        observation=observation,
                     )
                 update_state_from_route_result(state, route_result)
                 refresh_evidence_state(state)
                 # 权限等待或工具执行结束后再次检查，取消结果优先于工具 observation。
                 if self._cancel_requested():
                     return self._cancelled_result(state)
-                observation = format_observation(route_result)
                 state.messages.append(ChatMessage(role="assistant", content=response.content))
                 state.messages.append(ChatMessage(role="user", content=observation))
                 self.trace_logger.record_agent_observation(

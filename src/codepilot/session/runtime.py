@@ -11,10 +11,12 @@ from uuid import uuid4
 from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop, TurnExecutionContext
 from codepilot.llm.types import CodePilotLLMClient
 from codepilot.router import ToolRouter
+from codepilot.session.compaction import CompactionService
 from codepilot.session.context import ContextAssembler
 from codepilot.session.database import SessionDatabase
 from codepilot.session.git_context import read_git_context
 from codepilot.session.models import BranchConfirmationRequired, TurnRecord, TurnSubmission
+from codepilot.session.model_capabilities import resolve_model_context_profile
 from codepilot.session.permission import PermissionRequestContext
 from codepilot.session.service import SessionService
 from codepilot.session.store import SessionStore
@@ -23,6 +25,7 @@ from codepilot.session.trace_recorder import SessionTraceRecorder
 
 
 _UNCONFIRMED_BRANCH = object()
+BLOCKING_TURN_STATUSES = {"queued", "running", "waiting_permission", "recovery_required"}
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,7 @@ class TurnExecutionResult:
     """Runtime 对一次 Turn 的执行结果和 Agent 结果的薄封装。"""
 
     turn: TurnRecord
+    attempt_id: str
     result: AgentRunResult
 
 
@@ -41,6 +45,7 @@ class SessionRuntime:
         self.store = SessionStore(database)
         self.service = SessionService(database)
         self.assembler = ContextAssembler(database, self.store)
+        self.compaction_service = CompactionService(database)
         self.llm = llm
         self.router_factory = router_factory
         self.max_steps = max_steps
@@ -64,7 +69,7 @@ class SessionRuntime:
             raise ValueError("archived session is read-only")
         if not opened.project_exists:
             raise FileNotFoundError(opened.project_path)
-        if any(turn.status in {"queued", "running", "waiting_permission"} for turn in self.store.list_turns(session_id)):
+        if any(turn.status in BLOCKING_TURN_STATUSES for turn in self.store.list_turns(session_id)):
             raise RuntimeError("session already has a running turn")
         branch = self.service.validate_branch_before_turn(session_id)
         branch_confirmation_provided = confirmed_branch is not _UNCONFIRMED_BRANCH
@@ -107,7 +112,7 @@ class SessionRuntime:
             if hasattr(router, "permission_request_context"):
                 router.permission_request_context = PermissionRequestContext(session.session_id, turn_id, attempt.attempt_id, None)
             # Trace 只记录事件；业务表由稳定 ID 的 Lifecycle Observer 单独维护。
-            router.lifecycle_observer = SQLiteToolLifecycleObserver(self.database, session.session_id, turn_id, attempt_id)
+            router.lifecycle_observer = SQLiteToolLifecycleObserver(self.database, session.session_id, turn_id, attempt_id, trace)
             loop = MinimalAgentLoop(
                 llm=self.llm,
                 router=router,
@@ -116,13 +121,23 @@ class SessionRuntime:
                 cancellation_token=_LeaseAwareCancellationToken(cancellation_token, lease_lost),
                 event_sink=trace,
             )
-            task = next(message.content for message, _ in self.store.list_messages_with_parts(session.session_id, turn_id) if message.role == "user")
-            context = ContextAssembler(self.database, self.store).build(session.session_id, turn_id, turn.provider_snapshot, turn.model_snapshot)
-            result = loop.run_turn(TurnExecutionContext(session.session_id, turn_id, attempt.attempt_id, str(task), opened.project_path, context))
+            user_message = self.store.get_user_message_for_turn(turn_id)
+            if user_message is None:
+                raise LookupError(turn_id)
+            profile = resolve_model_context_profile(turn.provider_snapshot, turn.model_snapshot)
+            try:
+                self.compaction_service.ensure_context_budget(session.session_id, turn_id, profile)
+                context = self.assembler.build(session.session_id, turn_id, turn.provider_snapshot, turn.model_snapshot)
+            except Exception:
+                self.store.interrupt_turn_attempt(turn_id, attempt_id, "context compaction failed", worker_id=worker_id)
+                self.store.update_turn_status(turn_id, "recovery_required")
+                raise
+            result = loop.run_turn(TurnExecutionContext(session.session_id, turn_id, attempt.attempt_id, str(user_message.content), opened.project_path, context))
         except Exception as exc:
             heartbeat_stop.set()
             heartbeat.join()
-            self.store.interrupt_turn_attempt(turn_id, attempt_id, str(exc), worker_id=worker_id)
+            if self.store.get_turn(turn_id).status == "running":
+                self.store.interrupt_turn_attempt(turn_id, attempt_id, str(exc), worker_id=worker_id)
             raise
         heartbeat_stop.set()
         heartbeat.join()
@@ -132,7 +147,7 @@ class SessionRuntime:
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="cancelled", turn_status="cancelled", worker_id=worker_id)
         else:
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="failed", turn_status="failed", worker_id=worker_id)
-        return TurnExecutionResult(self.store.get_turn(turn_id), result)
+        return TurnExecutionResult(self.store.get_turn(turn_id), attempt_id, result)
 
 
 def _lease_expiry() -> str:

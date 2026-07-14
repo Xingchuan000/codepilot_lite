@@ -143,6 +143,7 @@ def test_run_turn_sets_precise_attempt_times_and_terminal_status(tmp_path: Path)
     attempt = service.store.get_attempt(submission.attempt.attempt_id)
 
     assert execution.result.status == "message_complete"
+    assert execution.attempt_id == submission.attempt.attempt_id
     assert execution.result.trace_path is None
     assert attempt.status == "completed"
     assert attempt.started_at is not None
@@ -151,6 +152,23 @@ def test_run_turn_sets_precise_attempt_times_and_terminal_status(tmp_path: Path)
     with pytest.raises(RuntimeError, match="created state"):
         runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
     assert service.store.get_attempt(submission.attempt.attempt_id).status == "completed"
+
+
+def test_submit_user_message_blocks_recovery_required_turns(tmp_path: Path) -> None:
+    _, service, session_id, _ = _runtime(tmp_path)
+    turn = service.store.create_turn(
+        session_id=session_id,
+        title="Turn 1",
+        provider_snapshot="openai",
+        model_snapshot="gpt-4.1",
+        permission_mode_snapshot="manual",
+        branch_snapshot="main",
+    )
+    service.store.update_turn_status(turn.turn_id, "recovery_required")
+    runtime = SessionRuntime(service.database, FakeLLMClient(["hello"]), lambda trace: ToolRouter(trace))
+
+    with pytest.raises(RuntimeError, match="running turn"):
+        runtime.submit_user_message(session_id, "new task")
 
 
 def test_run_turn_maps_cancelled_and_llm_error_explicitly(tmp_path: Path) -> None:
