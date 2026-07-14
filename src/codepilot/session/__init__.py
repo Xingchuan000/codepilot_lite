@@ -1,5 +1,5 @@
 from codepilot.session.database import SessionDatabase
-from codepilot.session.artifacts import ArtifactStore, INLINE_CONTENT_MAX_CHARS
+from codepilot.session.artifacts import ArtifactStore, INLINE_CONTENT_MAX_CHARS, PersistedContent
 from codepilot.session.ids import (
     make_artifact_id,
     make_attempt_id,
@@ -21,6 +21,7 @@ from codepilot.session.models import (
     PermissionGrantRecord,
     PermissionRequestRecord,
     PermissionResponseRecord,
+    PendingTurnSubmission,
     ProjectRecord,
     RunAttemptRecord,
     SessionEventRecord,
@@ -32,6 +33,7 @@ from codepilot.session.models import (
     ToolResultRecord,
     ToolResultStatus,
     TurnRecord,
+    TurnSubmission,
 )
 from codepilot.session.paths import SessionPaths, resolve_session_paths
 from codepilot.session.context import ContextAssembler
@@ -40,7 +42,7 @@ from codepilot.session.models import BranchCheckResult, BranchConfirmationRequir
 from codepilot.session.runtime import SessionRuntime, TurnExecutionResult
 from codepilot.session.service import SessionService
 from codepilot.session.trace_recorder import SessionTraceRecorder
-from codepilot.session.permission import PermissionScope, PermissionScopeBuilder, SessionPermissionBroker
+from codepilot.session.permission import PermissionRequestContext, PermissionScope, PermissionScopeBuilder, SessionPermissionBroker
 from codepilot.session.recovery import RecoveryPlan, RecoveryService
 from codepilot.session.reconcilers import RecoveryDecision, ReconciliationResult
 from codepilot.session.compaction import CompactionService
@@ -48,10 +50,12 @@ from codepilot.session.model_capabilities import ModelContextProfile, resolve_mo
 from codepilot.session.service import CrossProviderSwitchNotSupported
 from codepilot.session.exporter import SessionExporter
 from codepilot.session.store import SessionStore
+from codepilot.session.tool_lifecycle import SQLiteToolLifecycleObserver
 
 __all__ = [
     "ArtifactRecord",
     "ArtifactStore",
+    "PersistedContent",
     "BranchCheckResult",
     "BranchConfirmationRequired",
     "ContextSummaryRecord",
@@ -59,8 +63,10 @@ __all__ = [
     "MessagePartRecord",
     "MessageRecord",
     "PermissionGrantRecord",
+    "PermissionRequestContext",
     "PermissionRequestRecord",
     "PermissionResponseRecord",
+    "PendingTurnSubmission",
     "ProjectRecord",
     "RunAttemptRecord",
     "SessionDatabase",
@@ -84,12 +90,14 @@ __all__ = [
     "SessionExporter",
     "SessionStatus",
     "SessionStore",
+    "SQLiteToolLifecycleObserver",
     "SessionSummary",
     "ToolCallRecord",
     "ToolCallStatus",
     "ToolResultRecord",
     "ToolResultStatus",
     "TurnRecord",
+    "TurnSubmission",
     "TurnExecutionResult",
     "OpenedSession",
     "GitContext",

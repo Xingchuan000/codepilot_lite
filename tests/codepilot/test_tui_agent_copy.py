@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from codepilot.session.database import SessionDatabase
 from codepilot.tui_agent import app as app_module
 from codepilot.tui_agent.app import create_tui_agent_app
 from codepilot.tui_agent.layout import format_transcript_plain
@@ -16,6 +17,7 @@ class _FakeWidget:
     def __init__(self, *args, **kwargs) -> None:
         self.updated: list[str] = []
         self.value = kwargs.get("value", "")
+        self.disabled = kwargs.get("disabled", False)
         self.text = args[0] if args else ""
 
     def update(self, text: str) -> None:
@@ -63,7 +65,7 @@ class _FakeApp:
     def set_interval(self, *args, **kwargs) -> None:
         return None
 
-    def push_screen(self, screen) -> None:
+    def push_screen(self, screen, callback=None) -> None:
         self.last_screen = screen
 
     def exit(self) -> None:
@@ -119,9 +121,10 @@ def _widgets() -> dict[str, _FakeWidget]:
 
 def _app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    app = create_tui_agent_app(project=tmp_path, session_database=SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+    app._create_new_session()
     return app, widgets
 
 
@@ -164,7 +167,7 @@ def test_copy_command_without_history_shows_empty_state(tmp_path: Path, monkeypa
     assert app.last_screen.text == "Transcript is empty."
 
 
-def test_export_transcript_writes_file_and_appends_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_export_transcript_is_deprecated_and_does_not_write_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     app, widgets = _app(tmp_path, monkeypatch)
     app._reducer.view = replace(
         app._reducer.view,
@@ -174,7 +177,7 @@ def test_export_transcript_writes_file_and_appends_output(tmp_path: Path, monkey
     app.on_input_submitted(SimpleNamespace(value="/export-transcript"))
 
     transcript_path = app.session.session_dir / "transcript.md"
-    assert transcript_path.exists()
-    assert transcript_path.read_text(encoding="utf-8") == "• ready"
+    assert transcript_path.exists() is False
     assert app._reducer.view.transcript[-1].kind == "command_output"
+    assert app._reducer.view.transcript[-1].body == "/export-transcript is deprecated; use /export-session"
     assert len(widgets["#transcript"].mounted) == 2

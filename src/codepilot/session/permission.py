@@ -16,6 +16,15 @@ from codepilot.tools.base import ToolSpec
 @dataclass(frozen=True)
 class PermissionScope:
     key: str
+    data: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PermissionRequestContext:
+    session_id: str
+    turn_id: str | None
+    attempt_id: str | None
+    tool_call_id: str | None
 
 
 class PermissionScopeBuilder:
@@ -28,7 +37,7 @@ class PermissionScopeBuilder:
             value = {"tool": tool_name, "command_hash": _hash_text(_normalize_command(str(arguments.get("command", ""))))}
         else:
             value = {"tool": tool_name, "server": spec.metadata.get("server_name"), "arguments_hash": _hash_json(arguments), "policy_rule": policy_rule}
-        return PermissionScope(json.dumps(value, sort_keys=True, separators=(",", ":")))
+        return PermissionScope(json.dumps(value, sort_keys=True, separators=(",", ":")), value)
 
 
 class SessionPermissionBroker:
@@ -58,36 +67,79 @@ class SessionPermissionBroker:
             status="pending",
             created_at=request.created_at,
         )
-        if scope_key and self._has_grant(scope_key):
-            response = PermissionResponse(request.request_id, "approve_session", "approved by session grant", permission_now_iso())
-            self.resolve(response)
-            return request
         self.inner.request(request)
+        if scope_key and self._has_grant(scope_key):
+            self.resolve(
+                PermissionResponse(request.request_id, "approve_session", "approved by session grant", permission_now_iso())
+            )
+            return request
         return request
 
     def wait(self, request_id: str) -> PermissionResponse | None:
         response = self.inner.wait(request_id)
         if response is not None:
-            self.resolve(response)
+            self._record_response(response, notify_inner=False)
         return response
 
     def resolve(self, response: PermissionResponse) -> None:
+        self._record_response(response, notify_inner=True)
+
+    def _record_response(self, response: PermissionResponse, *, notify_inner: bool) -> None:
         request = self._requests.get(response.request_id)
         response_id = f"response-{response.request_id}-{response.responded_at}"
         if response_id in self._persisted_responses:
-            self.inner.resolve(response)
+            if notify_inner:
+                self.inner.resolve(response)
             return
-        self.store.create_permission_response(
-            response_id=response_id,
-            request_id=response.request_id,
-            decision=response.decision,
-            reason=response.reason,
-            responded_at=response.responded_at,
-        )
+        # 同一条响应先完整写库，再按需唤醒底层 broker，避免 UI 线程和 SQLite 状态错位。
+        with self.store.database.transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO permission_responses(response_id, request_id, decision, reason, responded_at, metadata_json)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (response_id, response.request_id, response.decision, response.reason, response.responded_at, json.dumps({}, ensure_ascii=False, separators=(",", ":"))),
+            )
+            if request is not None:
+                status = "approved" if response.decision in {"approve_once", "approve_session"} else "denied"
+                connection.execute(
+                    "UPDATE permission_requests SET status = ? WHERE request_id = ?",
+                    (status, response.request_id),
+                )
+                if response.decision == "approve_session" and request.scope_key:
+                    connection.execute(
+                        """
+                        INSERT INTO permission_grants(grant_id, session_id, scope_key, tool_name, scope_json, created_at, revoked_at, metadata_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            f"grant-{response.request_id}",
+                            self.session_id,
+                            request.scope_key,
+                            request.tool_name,
+                            json.dumps(request.scope_json or {}, ensure_ascii=False, separators=(",", ":")),
+                            response.responded_at,
+                            None,
+                            json.dumps({}, ensure_ascii=False, separators=(",", ":")),
+                        ),
+                    )
+            connection.execute(
+                "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) VALUES (?, ?, (SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?), ?, ?, ?, ?, ?, ?)",
+                (
+                    f"event-{response.request_id}-{response.responded_at}",
+                    self.session_id,
+                    self.session_id,
+                    "permission_resolved",
+                    response.responded_at,
+                    request.turn_id if request is not None else None,
+                    request.attempt_id if request is not None else None,
+                    json.dumps({"request_id": response.request_id, "decision": response.decision, "reason": response.reason, "scope_key": request.scope_key if request is not None else None, "tool_call_id": request.tool_call_id if request is not None else None}, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps({}, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
         self._persisted_responses.add(response_id)
-        if request is not None and response.decision == "approve_session" and request.scope_key:
-            self.store.create_permission_grant(session_id=self.session_id, scope_key=request.scope_key)
-        self.inner.resolve(response)
+        if notify_inner:
+            self.inner.resolve(response)
 
     def cancel_all(self, reason: str = "cancelled") -> None:
         self.inner.cancel_all(reason)

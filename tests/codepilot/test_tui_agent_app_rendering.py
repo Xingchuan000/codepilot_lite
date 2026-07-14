@@ -6,15 +6,17 @@ from types import SimpleNamespace
 
 import pytest
 
+from codepilot.session.database import SessionDatabase
 from codepilot.tui_agent import app as app_module
 from codepilot.tui_agent.app import create_tui_agent_app
-from codepilot.tui_agent.models import TranscriptItem
+from codepilot.tui_agent.models import TUIEvent, TranscriptItem
 
 
 class _FakeWidget:
     def __init__(self, *args, **kwargs) -> None:
         self.updated: list[str] = []
         self.value = kwargs.get("value", "")
+        self.disabled = kwargs.get("disabled", False)
         self.text = args[0] if args else ""
         self.clear_count = 0
 
@@ -60,14 +62,16 @@ class _FakeContainer:
 class _FakeApp:
     def __init__(self, *args, **kwargs) -> None:
         self.last_screen = None
+        self.last_screen_callback = None
         self.exited = False
         self.clipboard = ""
 
     def set_interval(self, *args, **kwargs) -> None:
         return None
 
-    def push_screen(self, screen) -> None:
+    def push_screen(self, screen, callback=None) -> None:
         self.last_screen = screen
+        self.last_screen_callback = callback
 
     def exit(self) -> None:
         self.exited = True
@@ -120,9 +124,13 @@ def _widgets() -> dict[str, _FakeWidget]:
     }
 
 
-def test_append_new_transcript_items_is_append_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _create_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    return create_tui_agent_app(project=tmp_path, session_database=SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
+
+
+def test_append_new_transcript_items_is_append_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _create_app(tmp_path, monkeypatch)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
     app._reducer.view = replace(
@@ -142,8 +150,7 @@ def test_append_new_transcript_items_is_append_only(tmp_path: Path, monkeypatch:
 
 
 def test_append_new_transcript_items_does_not_force_bottom_when_user_scrolled_up(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    app = _create_app(tmp_path, monkeypatch)
     widgets = _widgets()
     widgets["#transcript"].is_vertical_scroll_end = False
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
@@ -162,8 +169,7 @@ def test_append_new_transcript_items_does_not_force_bottom_when_user_scrolled_up
 
 
 def test_refresh_does_not_clear_transcript_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    app = _create_app(tmp_path, monkeypatch)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
     app._reducer.view = replace(
@@ -178,8 +184,7 @@ def test_refresh_does_not_clear_transcript_container(tmp_path: Path, monkeypatch
 
 
 def test_app_css_allocates_transcript_width(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    app = _create_app(tmp_path, monkeypatch)
 
     assert "#transcript" in app.__class__.CSS
     assert "width: 1fr;" in app.__class__.CSS
@@ -187,10 +192,10 @@ def test_app_css_allocates_transcript_width(tmp_path: Path, monkeypatch: pytest.
 
 
 def test_status_command_appends_transcript_without_overwriting_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    app = _create_app(tmp_path, monkeypatch)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+    app._create_new_session()
     app._reducer.view = replace(
         app._reducer.view,
         transcript=(TranscriptItem(id="1", kind="system_status", timestamp="t", body="first"),),
@@ -203,15 +208,18 @@ def test_status_command_appends_transcript_without_overwriting_history(tmp_path:
     assert len(widgets["#transcript"].mounted) == 2
 
 
-def test_user_message_submitted_appends_transcript(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+def test_user_message_is_rendered_only_after_committed_event(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    app = _create_app(tmp_path, monkeypatch)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+    app._create_new_session()
     app.runner.start_task = lambda text: "run-1"  # type: ignore[method-assign]
     app.runner.is_running = lambda: False  # type: ignore[method-assign]
 
     app.on_input_submitted(SimpleNamespace(value="请列出项目结构"))
 
+    assert app._reducer.view.transcript == ()
+    app._event_stream.publish(TUIEvent(type="user_message", timestamp="t", payload={"text": "请列出项目结构"}))
+    app._drain_events()
     assert app._reducer.view.transcript[0].kind == "user_message"
     assert widgets["#transcript"].mounted[0].text.startswith("You: ")

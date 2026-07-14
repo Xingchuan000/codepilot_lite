@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from codepilot.llm.types import ChatMessage, LLMResponse
+from codepilot.llm.types import ChatMessage, LLMResponse, RichChatMessage
+from codepilot.session.provider_messages import to_provider_messages
 
 
 def _preview_text(text: str, max_chars: int) -> str:
@@ -95,10 +96,10 @@ class SweAgentModelAdapter:
 
     model: Any
 
-    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
+    def complete(self, messages: list[ChatMessage | RichChatMessage]) -> LLMResponse:
         """只取纯文本响应，不允许走工具调用解析或执行路径。"""
 
-        provider_messages = [{"role": message.role, "content": message.content} for message in messages]
+        provider_messages = to_provider_messages(messages)
         if hasattr(self.model, "query_without_default_tools"):
             raw = self.model.query_without_default_tools(provider_messages)
         else:

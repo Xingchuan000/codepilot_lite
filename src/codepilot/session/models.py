@@ -20,8 +20,10 @@ ToolCallStatus = Literal[
     "completed",
     "failed",
     "execution_uncertain",
+    "recovery_required",
+    "recovery_aborted",
 ]
-ToolResultStatus = Literal["success", "failed", "denied", "interrupted", "execution_uncertain", "recovered_completed", "recovered_not_executed"]
+ToolResultStatus = Literal["success", "failed", "denied", "interrupted", "execution_uncertain", "recovered_completed", "recovered_not_executed", "recovery_aborted"]
 
 
 @dataclass(frozen=True)
@@ -102,6 +104,20 @@ class BranchConfirmationRequired:
 
 
 @dataclass(frozen=True)
+class PendingTurnSubmission:
+    """等待用户确认分支变化的原始提交。
+
+    文本保存在提交对象中，而不是从 TUI 已截断的 Transcript 反推，确保确认后提交的仍是
+    用户最初输入的完整内容。该对象只表示待确认状态，本身不会写入 SQLite。
+    """
+
+    session_id: str
+    text: str
+    old_branch: str | None
+    new_branch: str | None
+
+
+@dataclass(frozen=True)
 class TurnRecord:
     """一次用户提交对应的 Turn 主记录。"""
 
@@ -132,7 +148,18 @@ class RunAttemptRecord:
     updated_at: str
     started_at: str | None
     ended_at: str | None
+    interruption_reason: str | None = None
+    worker_id: str | None = None
+    lease_expires_at: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class TurnSubmission:
+    """一次已原子持久化的 Turn 及其首个执行 Attempt。"""
+
+    turn: TurnRecord
+    attempt: RunAttemptRecord
 
 
 @dataclass(frozen=True)
@@ -164,6 +191,7 @@ class MessagePartRecord:
     provider_format: str | None
     replayable: bool
     created_at: str
+    artifact_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -182,6 +210,10 @@ class ToolCallRecord:
     updated_at: str
     started_at: str | None
     completed_at: str | None
+    side_effect: str | None
+    idempotency: str | None
+    recovery_strategy: str | None
+    recovery_token: dict[str, Any] | None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -194,6 +226,10 @@ class ToolResultRecord:
     status: ToolResultStatus
     content: Any
     created_at: str
+    output_preview: str | None = None
+    artifact_id: str | None = None
+    error: str | None = None
+    success: bool | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
@@ -234,6 +270,8 @@ class PermissionGrantRecord:
     grant_id: str
     session_id: str
     scope_key: str
+    tool_name: str | None = None
+    scope_json: dict[str, Any] | None = None
     created_at: str
     revoked_at: str | None
     metadata: dict[str, Any] = field(default_factory=dict)

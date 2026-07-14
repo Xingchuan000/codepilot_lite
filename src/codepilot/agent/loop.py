@@ -315,7 +315,7 @@ class MinimalAgentLoop:
             steps=state.step,
             outcome=build_run_outcome(state, status=status),
             task_intent=state.task_intent,
-            trace_path=str(self.trace_logger.trace_path),
+            trace_path=str(self.trace_logger.trace_path) if self.trace_logger.trace_path is not None else None,
             error=error,
             policy_violations=state.policy_violations,
         )
@@ -714,6 +714,7 @@ class MinimalAgentLoop:
                         content=route_result.result.output,
                         turn_id=context.turn_id,
                         attempt_id=context.attempt_id,
+                        tool_call_id=route_result.metadata.get("tool_call_id"),
                     )
                 update_state_from_route_result(state, route_result)
                 refresh_evidence_state(state)

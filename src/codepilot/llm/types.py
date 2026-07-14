@@ -59,7 +59,7 @@ class LLMStreamEvent:
 class CodePilotLLMClient(Protocol):
     """MinimalAgentLoop 依赖的最小 LLM 协议。"""
 
-    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
+    def complete(self, messages: list[ChatMessage | RichChatMessage]) -> LLMResponse:
         ...
 
 

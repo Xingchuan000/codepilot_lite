@@ -4,6 +4,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from codepilot.session.database import SessionDatabase
 from codepilot.tui_agent.event_stream import MemoryEventStream
 from codepilot.tui_agent.models import TUISessionRunRef
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker, NonInteractiveBroker
@@ -31,7 +32,7 @@ def _wait_for_runner(runner: TUIAgentRunner) -> None:
 
 def test_set_permission_mode_switches_broker_and_persists_session(tmp_path: Path) -> None:
     project = resolve_project(_make_repo(tmp_path))
-    store = SessionStore(project)
+    store = SessionStore(project, SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
     session = store.create_session(model=None, permission_mode="manual")
     event_stream = MemoryEventStream()
     runner = TUIAgentRunner(
@@ -64,7 +65,7 @@ def test_set_permission_mode_switches_broker_and_persists_session(tmp_path: Path
 
 def test_cancel_current_does_not_poison_next_task(tmp_path: Path) -> None:
     project = resolve_project(_make_repo(tmp_path))
-    store = SessionStore(project)
+    store = SessionStore(project, SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
     session = store.create_session(model=None, permission_mode="unsafe_auto")
     event_stream = MemoryEventStream()
     runner = TUIAgentRunner(
@@ -105,7 +106,7 @@ def test_cancel_current_does_not_poison_next_task(tmp_path: Path) -> None:
 
 def test_cancel_current_wakes_pending_permission(tmp_path: Path) -> None:
     project = resolve_project(_make_repo(tmp_path))
-    store = SessionStore(project)
+    store = SessionStore(project, SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
     session = store.create_session(model=None, permission_mode="manual")
     event_stream = MemoryEventStream()
     runner = TUIAgentRunner(
@@ -141,7 +142,7 @@ def test_cancel_current_wakes_pending_permission(tmp_path: Path) -> None:
 
 def test_session_round_trip_preserves_validation_state(tmp_path: Path) -> None:
     project = resolve_project(_make_repo(tmp_path))
-    store = SessionStore(project)
+    store = SessionStore(project, SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
     session = store.create_session(model=None, permission_mode="manual")
 
     updated = store.append_run(

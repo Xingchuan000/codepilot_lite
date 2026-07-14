@@ -50,3 +50,39 @@ def test_foreign_keys_are_enforced(tmp_path: Path) -> None:
             pass
         else:
             raise AssertionError("foreign key should be enforced")
+
+
+def test_v1_database_migrates_recovery_fields_without_losing_rows(tmp_path: Path) -> None:
+    path = tmp_path / "session.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO schema_meta VALUES ('schema_version', '1');
+            CREATE TABLE run_attempts(
+                attempt_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL, attempt_number INTEGER NOT NULL,
+                status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                started_at TEXT, ended_at TEXT, metadata_json TEXT NOT NULL, interruption_reason TEXT
+            );
+            CREATE TABLE tool_calls(
+                tool_call_id TEXT PRIMARY KEY, turn_id TEXT NOT NULL, attempt_id TEXT, message_id TEXT,
+                status TEXT NOT NULL, tool_name TEXT NOT NULL, arguments_json TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL, started_at TEXT, completed_at TEXT,
+                metadata_json TEXT NOT NULL
+            );
+            INSERT INTO run_attempts VALUES ('attempt-1', 'turn-1', 1, 'running', 't', 't', 't', NULL, '{}', NULL);
+            INSERT INTO tool_calls VALUES ('call-1', 'turn-1', 'attempt-1', NULL, 'execution_started', 'replace_range', '{}', 't', 't', 't', NULL, '{}');
+            """
+        )
+
+    database = SessionDatabase(path)
+    database.initialize()
+
+    with database.connect() as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "2"
+        assert connection.execute("SELECT interruption_reason FROM run_attempts WHERE attempt_id = 'attempt-1'").fetchone()[0] is None
+        assert {row[1] for row in connection.execute("PRAGMA table_info(run_attempts)")} >= {"interruption_reason", "worker_id", "lease_expires_at"}
+        row = connection.execute(
+            "SELECT side_effect, idempotency, recovery_strategy, recovery_token_json FROM tool_calls WHERE tool_call_id = 'call-1'"
+        ).fetchone()
+        assert tuple(row) == (None, None, None, None)

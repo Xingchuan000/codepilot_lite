@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from codepilot.session.database import SessionDatabase
+from codepilot.session.paths import SessionPaths, resolve_session_paths
 from codepilot.session.service import SessionService
 from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUISession
 
@@ -25,11 +26,18 @@ def task_preview(text: str, max_chars: int = 120) -> str:
 class SessionStore:
     """保留旧构造接口，但底层唯一写入 SQLite。"""
 
-    def __init__(self, project: ProjectContext) -> None:
+    def __init__(
+        self,
+        project: ProjectContext,
+        database: SessionDatabase | None = None,
+        paths: SessionPaths | None = None,
+    ) -> None:
         self.project = project
-        self.database = SessionDatabase(project.workspace_root / ".codepilot" / "sessions.sqlite")
+        # TUI Session 必须共享用户级数据库；项目路径只作为 projects.path 写入数据库。
+        self.paths = paths or resolve_session_paths(database.path.parent if database is not None else None)
+        self.database = database or SessionDatabase(self.paths.database_path)
         self.database.initialize()
-        self.service = SessionService(self.database)
+        self.service = SessionService(self.database, self.paths)
 
     def create_session(self, *, model: str | None, permission_mode: PermissionMode, metadata: dict | None = None) -> TUISession:
         record = self.service.create_session(self.project.resolved_project, "codepilot", model or "default", permission_mode)
@@ -65,7 +73,7 @@ class SessionStore:
             model=record.current_model,
             permission_mode=record.permission_mode,
             runs_dir=self.project.default_runs_dir,
-            session_dir=self.project.workspace_root / ".codepilot" / "sessions" / record.session_id,
+            session_dir=self.paths.sessions_dir / record.session_id,
             messages_path=self.database.path,
             runs_index_path=self.database.path,
             metadata=record.metadata,

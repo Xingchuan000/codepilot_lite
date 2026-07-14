@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from codepilot.llm.types import ChatMessage, LLMResponse
+from codepilot.llm.types import ChatMessage, LLMResponse, RichChatMessage
 
 
 class FakeLLMExhaustedError(RuntimeError):
@@ -23,7 +23,7 @@ class FakeLLMClient:
         self.responses = responses
         self.model = model
         self.index = 0
-        self.calls: list[list[ChatMessage]] = []
+        self.calls: list[list[ChatMessage | RichChatMessage]] = []
 
     @classmethod
     def from_jsonl(cls, path: str | Path) -> "FakeLLMClient":
@@ -49,7 +49,7 @@ class FakeLLMClient:
             responses.append(line)
         return cls(responses)
 
-    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
+    def complete(self, messages: list[ChatMessage | RichChatMessage]) -> LLMResponse:
         """返回下一个固定响应，并记录这次调用的消息快照。"""
 
         self.calls.append(list(messages))

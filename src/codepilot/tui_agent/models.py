@@ -12,6 +12,7 @@ PermissionMode = Literal["manual", "read_only", "accept_edits", "unsafe_auto"]
 RunStatus = Literal[
     "idle",
     "running",
+    "waiting_branch_confirmation",
     "waiting_permission",
     "message_complete",
     "success",
@@ -56,6 +57,7 @@ TUIEventType = Literal[
     "policy_decision",
     "permission_requested",
     "permission_resolved",
+    "branch_confirmation_required",
     "test_status_changed",
     "file_changed",
     "run_finished",

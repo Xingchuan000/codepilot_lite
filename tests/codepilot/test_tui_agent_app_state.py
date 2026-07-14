@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
+from codepilot.session.database import SessionDatabase
 from codepilot.tui_agent import app as app_module
 from codepilot.tui_agent.app import create_tui_agent_app
+from codepilot.tui_agent.models import TUIEvent
+from codepilot.tui_agent.session_store import now_iso
 
 
 class _FakeWidget:
     def __init__(self, *args, **kwargs) -> None:
         self.updated: list[str] = []
         self.value = kwargs.get("value", "")
+        self.disabled = kwargs.get("disabled", False)
         self.text = args[0] if args else ""
 
     def update(self, text: str) -> None:
@@ -53,13 +58,15 @@ class _FakeContainer:
 class _FakeApp:
     def __init__(self, *args, **kwargs) -> None:
         self.last_screen = None
+        self.last_screen_callback = None
         self.clipboard = ""
 
     def set_interval(self, *args, **kwargs) -> None:
         return None
 
-    def push_screen(self, screen) -> None:
+    def push_screen(self, screen, callback=None) -> None:
         self.last_screen = screen
+        self.last_screen_callback = callback
 
     def exit(self) -> None:
         return None
@@ -112,11 +119,16 @@ def _widgets() -> dict[str, _FakeWidget]:
     }
 
 
-def test_app_permissions_updates_runner_and_session(tmp_path: Path, monkeypatch) -> None:
+def _create_app(tmp_path: Path, monkeypatch):
     _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    return create_tui_agent_app(project=tmp_path, session_database=SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
+
+
+def test_app_permissions_updates_runner_and_session(tmp_path: Path, monkeypatch) -> None:
+    app = _create_app(tmp_path, monkeypatch)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+    app._create_new_session()
 
     app.on_input_submitted(type("Submitted", (), {"value": "/permissions read_only"})())
 
@@ -126,12 +138,12 @@ def test_app_permissions_updates_runner_and_session(tmp_path: Path, monkeypatch)
 
 
 def test_app_move_updates_project_context_and_runner(tmp_path: Path, monkeypatch) -> None:
-    _install_fake_textual(monkeypatch)
     other = tmp_path / "other"
     other.mkdir()
-    app = create_tui_agent_app(project=tmp_path)
+    app = _create_app(tmp_path, monkeypatch)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+    app._create_new_session()
 
     app.on_input_submitted(SimpleNamespace(value="/move other"))
 
@@ -142,8 +154,7 @@ def test_app_move_updates_project_context_and_runner(tmp_path: Path, monkeypatch
 
 
 def test_app_copy_to_clipboard_writes_system_clipboard(tmp_path: Path, monkeypatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    app = _create_app(tmp_path, monkeypatch)
     monkeypatch.setattr("codepilot.tui_agent.app.sys.platform", "darwin")
     monkeypatch.setattr("codepilot.tui_agent.app.shutil.which", lambda name: "/usr/bin/pbcopy" if name == "pbcopy" else None)
     calls: list[tuple[list[str], str]] = []
@@ -159,8 +170,7 @@ def test_app_copy_to_clipboard_writes_system_clipboard(tmp_path: Path, monkeypat
 
 
 def test_exit_command_returns_without_refreshing_after_exit(tmp_path: Path, monkeypatch) -> None:
-    _install_fake_textual(monkeypatch)
-    app = create_tui_agent_app(project=tmp_path)
+    app = _create_app(tmp_path, monkeypatch)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
     exited = {"called": False}
@@ -178,3 +188,96 @@ def test_exit_command_returns_without_refreshing_after_exit(tmp_path: Path, monk
 
     assert exited["called"] is True
     assert len(widgets["#transcript"].mounted) == 0
+
+
+def test_branch_confirmation_modal_can_cancel_without_resubmitting(tmp_path: Path, monkeypatch) -> None:
+    app = _create_app(tmp_path, monkeypatch)
+    widgets = _widgets()
+    app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+    app._create_new_session()
+    app._event_stream.publish(
+        TUIEvent(
+            type="branch_confirmation_required",
+            timestamp=now_iso(),
+            session_id=app.session.session_id,
+            payload={"text": "完整原始任务", "old_branch": "main", "new_branch": "feature"},
+        )
+    )
+
+    app._drain_events()
+
+    assert app._reducer.view.status == "waiting_branch_confirmation"
+    assert app.last_screen.__class__.__name__ == "BranchConfirmationModal"
+    assert app.last_screen.pending.text == "完整原始任务"
+    assert app.last_screen_callback is not None
+    app.last_screen_callback(False)
+    assert app._reducer.view.status == "idle"
+
+    first_screen = app.last_screen
+    app._event_stream.publish(
+        TUIEvent(
+            type="branch_confirmation_required",
+            timestamp=now_iso(),
+            session_id=app.session.session_id,
+            payload={"text": "完整原始任务", "old_branch": "main", "new_branch": "feature"},
+        )
+    )
+    app._drain_events()
+    assert app.last_screen is not first_screen
+
+
+def test_branch_confirmation_modal_resubmits_complete_pending_text(tmp_path: Path, monkeypatch) -> None:
+    app = _create_app(tmp_path, monkeypatch)
+    widgets = _widgets()
+    app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+    app._create_new_session()
+    submitted = []
+    app.runner.resume_after_branch_confirmation = lambda pending: submitted.append(pending) or "turn-pending"  # type: ignore[method-assign]
+    app._event_stream.publish(
+        TUIEvent(
+            type="branch_confirmation_required",
+            timestamp=now_iso(),
+            session_id=app.session.session_id,
+            payload={"text": "不能被截断的完整任务", "old_branch": "main", "new_branch": "feature"},
+        )
+    )
+
+    app._drain_events()
+    app.last_screen_callback(True)
+
+    assert len(submitted) == 1
+    assert submitted[0].text == "不能被截断的完整任务"
+    assert submitted[0].new_branch == "feature"
+    assert app._reducer.view.status == "running"
+
+
+def test_open_session_shows_recovery_modal_for_unknown_side_effect(tmp_path: Path, monkeypatch) -> None:
+    app = _create_app(tmp_path, monkeypatch)
+    widgets = _widgets()
+    app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
+    session = app._session_service.create_session(tmp_path, "codepilot", "default", "manual")
+    store = app._session_service.store
+    turn = store.create_turn(
+        session_id=session.session_id,
+        title="Turn 1",
+        provider_snapshot="codepilot",
+        model_snapshot="default",
+        permission_mode_snapshot="manual",
+        branch_snapshot=None,
+        status="running",
+    )
+    attempt = store.create_attempt(turn_id=turn.turn_id, status="running", started_at="2024-01-01T00:00:00+00:00")
+    command = "git commit -m x"
+    call = store.create_tool_call(turn_id=turn.turn_id, attempt_id=attempt.attempt_id, tool_name="run_shell", arguments={"repo": str(tmp_path), "command": command})
+    store.persist_tool_execution_started(
+        call.tool_call_id,
+        {"command_sha256": hashlib.sha256(command.encode()).hexdigest(), "auto_retry_allowed": False},
+    )
+
+    app._activate_session(session.session_id)
+
+    assert app.last_screen.__class__.__name__ == "RecoveryModal"
+    assert app.last_screen.tool_call_id == call.tool_call_id
+    assert store.get_turn(turn.turn_id).status == "recovery_required"
+    app.last_screen_callback("abort")
+    assert store.get_turn(turn.turn_id).status == "cancelled"

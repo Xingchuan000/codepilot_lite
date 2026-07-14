@@ -5,6 +5,7 @@ import subprocess
 import time
 from pathlib import Path
 
+from codepilot.session.database import SessionDatabase
 from codepilot.tui_agent.event_stream import MemoryEventStream
 from codepilot.tui_agent.permission_broker import NonInteractiveBroker
 from codepilot.tui_agent.project_resolver import resolve_project
@@ -25,7 +26,7 @@ def _make_repo(tmp_path: Path) -> Path:
 
 def _make_runner(tmp_path: Path, *, fake_actions: str | Path | None, auto_report: bool = True) -> tuple[TUIAgentRunner, MemoryEventStream]:
     project = resolve_project(_make_repo(tmp_path))
-    store = SessionStore(project)
+    store = SessionStore(project, SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
     session = store.create_session(model=None, permission_mode="unsafe_auto")
     event_stream = MemoryEventStream()
     runner = TUIAgentRunner(

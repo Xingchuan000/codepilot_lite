@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+import os
+import socket
+import threading
 from dataclasses import dataclass
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 from typing import Any, Callable
+from uuid import uuid4
 
-from codepilot.agent.loop import MinimalAgentLoop, TurnExecutionContext, AgentRunResult
+from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop, TurnExecutionContext
 from codepilot.llm.types import CodePilotLLMClient
 from codepilot.router import ToolRouter
 from codepilot.session.context import ContextAssembler
 from codepilot.session.database import SessionDatabase
-from codepilot.session.models import BranchConfirmationRequired, TurnRecord
+from codepilot.session.git_context import read_git_context
+from codepilot.session.models import BranchConfirmationRequired, TurnRecord, TurnSubmission
+from codepilot.session.permission import PermissionRequestContext
 from codepilot.session.service import SessionService
 from codepilot.session.store import SessionStore
+from codepilot.session.tool_lifecycle import SQLiteToolLifecycleObserver
 from codepilot.session.trace_recorder import SessionTraceRecorder
+
+
+_UNCONFIRMED_BRANCH = object()
 
 
 @dataclass(frozen=True)
@@ -36,8 +46,18 @@ class SessionRuntime:
         self.max_steps = max_steps
         self.trace_hook = trace_hook
 
-    def submit_user_message(self, session_id: str, text: str) -> TurnRecord | BranchConfirmationRequired:
-        """提交用户消息；分支变化确认前不写入 Turn。"""
+    def submit_user_message(
+        self,
+        session_id: str,
+        text: str,
+        *,
+        confirmed_branch: str | None | object = _UNCONFIRMED_BRANCH,
+    ) -> TurnSubmission | BranchConfirmationRequired:
+        """提交用户消息；分支变化确认前不写入任何 Turn 业务记录。
+
+        用户确认后仍会重新读取 Git 的实际分支。只有确认值与本次读取值一致时，Store
+        才会在单个事务中创建 Turn、User Message、Attempt 和对应事件。
+        """
 
         opened = self.service.open_session(session_id)
         if opened.session.status != "active":
@@ -47,59 +67,103 @@ class SessionRuntime:
         if any(turn.status in {"queued", "running", "waiting_permission"} for turn in self.store.list_turns(session_id)):
             raise RuntimeError("session already has a running turn")
         branch = self.service.validate_branch_before_turn(session_id)
-        if branch.changed:
+        branch_confirmation_provided = confirmed_branch is not _UNCONFIRMED_BRANCH
+        if branch.changed and not branch_confirmation_provided:
             return BranchConfirmationRequired(session_id, branch.expected_branch, branch.actual_branch)
-        session = opened.session
-        first_user_message = not any(message.role == "user" for message, _ in self.store.list_messages_with_parts(session_id))
-        turn = self.store.create_turn(
+        return self.store.create_turn_submission(
             session_id=session_id,
-            title=f"Turn {len(self.store.list_turns(session_id)) + 1}",
-            provider_snapshot=session.provider,
-            model_snapshot=session.current_model,
-            permission_mode_snapshot=session.permission_mode,
-            branch_snapshot=branch.actual_branch,
+            text=text,
+            actual_branch_reader=lambda: read_git_context(opened.project_path).branch,
+            confirmed_branch=confirmed_branch if isinstance(confirmed_branch, str) or confirmed_branch is None else None,
+            branch_confirmation_provided=branch_confirmation_provided,
         )
-        self.store.create_message(session_id=session_id, turn_id=turn.turn_id, role="user", status="completed", content=text)
-        if session.title == "New session" and first_user_message:
-            self.store.update_session(session_id, title=_task_preview(text))
-        self.store.append_event(session_id=session_id, event_type="turn_created", payload={"turn_id": turn.turn_id}, turn_id=turn.turn_id)
-        self.store.append_event(session_id=session_id, event_type="user_message_created", payload={"text": text}, turn_id=turn.turn_id)
-        return self.store.list_turns(session_id)[-1]
 
-    def run_turn(self, turn_id: str, cancellation_token: Any | None = None) -> TurnExecutionResult:
+    def run_turn(self, turn_id: str, attempt_id: str, cancellation_token: Any | None = None) -> TurnExecutionResult:
         """从持久化 Turn 组装上下文并执行；终态始终写回 SQLite。"""
 
-        turn = next(turn for session_id in self._session_ids_for_turn(turn_id) for turn in self.store.list_turns(session_id) if turn.turn_id == turn_id)
+        turn = self.store.get_turn(turn_id)
         session = self.store.get_session(turn.session_id)
         opened = self.service.open_session(session.session_id)
-        attempt = self.store.create_attempt(turn_id=turn_id)
-        self.store.update_turn_status(turn_id, "running")
-        trace = SessionTraceRecorder(self.database, session.session_id, turn_id, attempt.attempt_id, record_hook=self.trace_hook)
-        router = self.router_factory(trace)
-        # Session 模式必须在真实副作用前落 durable execution intent。
-        router.lifecycle_observer = trace
-        loop = MinimalAgentLoop(llm=self.llm, router=router, trace_logger=trace, max_steps=self.max_steps, cancellation_token=cancellation_token, event_sink=trace)
-        task = next(message.content for message, _ in self.store.list_messages_with_parts(session.session_id, turn_id) if message.role == "user")
-        context = ContextAssembler(self.database, self.store).build(session.session_id, turn_id, session.provider, session.current_model)
+        attempt = self.store.get_attempt(attempt_id)
+        if attempt.turn_id != turn_id:
+            raise ValueError("attempt does not belong to turn")
+        worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex}"
+        self.store.start_turn_attempt(
+            turn_id,
+            attempt_id,
+            worker_id=worker_id,
+            lease_expires_at=_lease_expiry(),
+        )
+        heartbeat_stop = threading.Event()
+        lease_lost = threading.Event()
+        heartbeat = threading.Thread(
+            target=lambda: _renew_lease_until_stopped(self.store, attempt_id, worker_id, heartbeat_stop, lease_lost),
+            daemon=True,
+        )
+        heartbeat.start()
         try:
+            trace = SessionTraceRecorder(self.database, session.session_id, turn_id, attempt.attempt_id, record_hook=self.trace_hook)
+            router = self.router_factory(trace)
+            if hasattr(router, "permission_request_context"):
+                router.permission_request_context = PermissionRequestContext(session.session_id, turn_id, attempt.attempt_id, None)
+            # Trace 只记录事件；业务表由稳定 ID 的 Lifecycle Observer 单独维护。
+            router.lifecycle_observer = SQLiteToolLifecycleObserver(self.database, session.session_id, turn_id, attempt_id)
+            loop = MinimalAgentLoop(
+                llm=self.llm,
+                router=router,
+                trace_logger=trace,
+                max_steps=self.max_steps,
+                cancellation_token=_LeaseAwareCancellationToken(cancellation_token, lease_lost),
+                event_sink=trace,
+            )
+            task = next(message.content for message, _ in self.store.list_messages_with_parts(session.session_id, turn_id) if message.role == "user")
+            context = ContextAssembler(self.database, self.store).build(session.session_id, turn_id, turn.provider_snapshot, turn.model_snapshot)
             result = loop.run_turn(TurnExecutionContext(session.session_id, turn_id, attempt.attempt_id, str(task), opened.project_path, context))
-        except Exception:
-            self.store.update_attempt_status(attempt.attempt_id, "interrupted")
-            self.store.update_turn_status(turn_id, "interrupted")
+        except Exception as exc:
+            heartbeat_stop.set()
+            heartbeat.join()
+            self.store.interrupt_turn_attempt(turn_id, attempt_id, str(exc), worker_id=worker_id)
             raise
-        self.store.update_attempt_status(attempt.attempt_id, "completed" if result.success else "failed")
-        self.store.update_turn_status(turn_id, "completed" if result.success else "failed")
-        return TurnExecutionResult(self.store.list_turns(session.session_id)[-1], result)
+        heartbeat_stop.set()
+        heartbeat.join()
+        if result.status in {"success", "message_complete"}:
+            self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="completed", turn_status="completed", worker_id=worker_id)
+        elif result.status == "cancelled":
+            self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="cancelled", turn_status="cancelled", worker_id=worker_id)
+        else:
+            self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="failed", turn_status="failed", worker_id=worker_id)
+        return TurnExecutionResult(self.store.get_turn(turn_id), result)
 
-    def _session_ids_for_turn(self, turn_id: str) -> list[str]:
-        with self.database.transaction() as connection:
-            row = connection.execute("SELECT session_id FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
-        if row is None:
-            raise LookupError(turn_id)
-        return [row[0]]
+
+def _lease_expiry() -> str:
+    return (datetime.now(UTC) + timedelta(minutes=2)).isoformat()
 
 
-def _task_preview(text: str) -> str:
-    """用第一条用户消息生成短标题。"""
+class _LeaseAwareCancellationToken:
+    def __init__(self, external: Any | None, lease_lost: threading.Event) -> None:
+        self.external = external
+        self.lease_lost = lease_lost
 
-    return " ".join(text.split())[:80] or "New session"
+    def is_cancelled(self) -> bool:
+        return self.lease_lost.is_set() or bool(self.external and self.external.is_cancelled())
+
+
+def _renew_lease_until_stopped(
+    store: SessionStore,
+    attempt_id: str,
+    worker_id: str,
+    stop: threading.Event,
+    lease_lost: threading.Event,
+) -> None:
+    while not stop.wait(30):
+        while not stop.is_set():
+            try:
+                store.renew_attempt_lease(attempt_id, worker_id, _lease_expiry())
+                break
+            except RuntimeError:
+                lease_lost.set()
+                return
+            except Exception:
+                # SQLite 短暂 busy/IO 错误每秒重试，不能让 heartbeat 静默消失。
+                if stop.wait(1):
+                    return

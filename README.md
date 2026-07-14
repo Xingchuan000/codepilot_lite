@@ -276,7 +276,14 @@ Step3–Step5 在 SQLite 核心之上提供 `SessionService`、`ContextAssembler
 ```python
 from pathlib import Path
 
-from codepilot.session import SessionDatabase, SessionRuntime, SessionService, resolve_session_paths
+from codepilot.session import (
+    BranchConfirmationRequired,
+    SessionDatabase,
+    SessionRuntime,
+    SessionService,
+    TurnSubmission,
+    resolve_session_paths,
+)
 
 paths = resolve_session_paths(Path("/tmp/codepilot-data"))
 database = SessionDatabase(paths.database_path)
@@ -288,14 +295,66 @@ session = service.create_session(Path("/tmp/repo"), "openai", "gpt-4.1", "manual
 # `router_factory(trace_recorder)`，以便工具路由与 SessionTraceRecorder 共用同一事实流。
 # runtime = SessionRuntime(database, llm, router_factory)
 
-# 如果返回 BranchConfirmationRequired，应先由用户确认，再调用
-# service.confirm_branch_change(session.session_id, result.new_branch)。
-turn = runtime.submit_user_message(session.session_id, "请检查项目状态")
-if hasattr(turn, "turn_id"):
-    result = runtime.run_turn(turn.turn_id)
+# 如果返回 BranchConfirmationRequired，界面应保留原始文本并询问用户；确认时把
+# new_branch 作为 confirmed_branch 再次提交。Runtime 会重新读取真实 Git 分支，
+# 不会把第一次检查结果当作执行依据。
+submission = runtime.submit_user_message(session.session_id, "请检查项目状态")
+if isinstance(submission, BranchConfirmationRequired):
+    submission = runtime.submit_user_message(
+        session.session_id,
+        "请检查项目状态",
+        confirmed_branch=submission.new_branch,
+    )
+if isinstance(submission, TurnSubmission):
+    result = runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
 ```
 
-`SessionService.open_session()` 在项目路径不存在时仍允许读取历史，但运行新 Turn 会拒绝。检测到 Git 分支变化时只返回确认信息，不会提前创建 Turn；确认事务会同时写入 `branch_changed` 事件和更新 Session 分支。Session 模式的 Trace 写入 `session_events`，不会创建 `trace.jsonl` 或 run 目录。
+`SessionService.open_session()` 在项目路径不存在时仍允许读取历史，但运行新 Turn 会拒绝。检测到 Git 分支变化时只返回确认信息，不会提前创建 Turn；用户确认后，`branch_changed`、Session 当前分支、Turn、User Message、Attempt 1、首条消息标题以及 `turn_created` / `user_message_created` 事件在同一个 SQLite 事务内提交。确认期间实际分支再次变化时会返回新的确认请求，取消确认不会写入上述任何记录。Session 模式的 Trace 写入 `session_events`，不会创建 `trace.jsonl` 或 run 目录。
+
+#### Attempt、工具生命周期与恢复（P0 3.4–3.8）
+
+Session SQLite Schema 当前为 v2。已有 v1 数据库会在 `SessionDatabase.initialize()` 时原地增加 Attempt 中断原因以及以下 ToolCall 恢复字段，原 Session、Turn、Message、Attempt 和 ToolCall 记录会保留：
+
+```text
+tool_calls.side_effect
+tool_calls.idempotency
+tool_calls.recovery_strategy
+tool_calls.recovery_token_json
+run_attempts.interruption_reason
+run_attempts.worker_id
+run_attempts.lease_expires_at
+```
+
+`SessionRuntime.submit_user_message()` 原子创建的 Attempt 由 `run_turn(turn_id, attempt_id)` 精确执行。模型调用前，Turn 和 Attempt 在同一事务中进入 `running`；结束状态映射如下：
+
+- `success` / `message_complete`：Attempt 和 Turn 均为 `completed`；
+- `cancelled`：Attempt 和 Turn 均为 `cancelled`；
+- `llm_error`、`llm_exhausted`、`max_steps_exceeded`、`task_incomplete` 等非成功结果：均为 `failed`；
+- Runner、Router 或上下文准备阶段的未捕获异常：均为 `interrupted`，错误写入 `run_attempts.interruption_reason`。
+
+Attempt 使用条件状态更新：只有 `created + queued` 可以进入执行，只有当前 `running` Attempt 可以写终态，已结束 Attempt 不能重复运行。每个 Attempt 使用唯一 Worker ID，并在执行期间定时续租；终态写入还会校验 Worker 所有权。Picker 打开同一 Session 时不会把 lease 仍有效的 Worker 误判成崩溃恢复。已经创建但尚未来得及启动的恢复 Attempt 会在下次打开 Session 时重新调度；多个恢复 Turn 按顺序逐个认领，不并行恢复。
+
+工具业务表由 `SQLiteToolLifecycleObserver` 维护。每次 Router 调用都会创建新的 `tool_call_id`，后续 policy、权限、执行开始、结果和执行异常都只通过该 ID 更新，因此同一 Turn 中重复调用相同工具和相同参数也不会串行。Policy deny 和 Permission deny 会产生 `denied` ToolCall 与 ToolResult，并记录 `executed=false`。
+
+写工具执行前会先保存恢复 Token：
+
+- `replace_range` 保存目标规范化路径、执行前全文件 SHA-256、预期全文件 SHA-256、行范围和 replacement SHA-256；
+- `apply_patch` 保存 patch SHA-256、仓库路径、可用时的 baseline HEAD 和执行前 forward check；
+- `run_shell` 保存命令 SHA-256，并只对严格只读 allowlist 标记可自动重试。`git commit`、`git checkout`、`git reset`、`git clean`、`find -delete` 和任何管道、重定向或复合 Shell 命令都不会自动重试。
+
+显式从 Picker 打开 active 且项目路径存在的 Session 时，`RecoveryService.recover_session()` 会：
+
+1. 将硬中断遗留的 `in_progress` Assistant Message 改为 `interrupted`；
+2. 对没有 ToolResult 的 uncertain ToolCall 使用持久化 Token 对账；
+3. `COMPLETED` 写入唯一的 `recovered_completed` Result；
+4. `NOT_EXECUTED` 写入唯一的 `recovered_not_executed` Result，并为原 Turn 创建新的 Attempt；
+5. `PARTIALLY_COMPLETED` / `UNKNOWN` 把 Turn 标记为 `recovery_required`，显示 Recovery Modal；
+6. 用户可选择 `Mark completed`、`Retry` 或 `Abort`。Retry 保留原 ToolCall 的 uncertain 历史，并明确记录用户接受重复副作用风险。
+
+`COMPLETED`、`NOT_EXECUTED` 和用户 `Mark completed` 还会写入可回放的 system Message，使新的 Attempt 在模型上下文中明确看到恢复事实，避免重复已经确认完成的写操作。`Abort` 以 Turn 为粒度终结该 Turn 下全部 uncertain ToolCall、旧 Attempt 和 pending permission request，不会留下可再次排队的半终态。
+
+项目路径缺失或 Session 已归档时只执行恢复检查，不自动执行恢复 Attempt。
+遗留的 pending permission request 和 `approval_pending` ToolCall 也会阻断自动恢复并在 TUI 中显示等待状态；在第 3.9 的 Session Permission Broker 接入完成前，不会用自动重试绕过旧审批。
 
 ### 工具恢复、Session 权限与流式消息（Step6–Step8）
 
@@ -303,13 +362,30 @@ Step6 为每个内置工具声明 `idempotency` 和 `recovery_strategy`。工具
 
 Step7 的 `SessionPermissionBroker` 将权限 Request、Response 和 `approve_session` Grant 写入 SQLite。授权范围按工具收窄：编辑工具绑定 workspace，Shell 绑定规范化命令哈希，外部/MCP 工具绑定 server、tool 和参数哈希。Policy deny 不会被 Session Grant 覆盖。
 
+在 TUI 的权限弹窗里，如果请求带有 `Session scope`，会额外显示 `Approve for session`。按 `S` 之后，本次 request、response、grant 和对应 Session Event 都会写入同一个 Session 数据库，后续相同 scope 的请求会直接复用这条授权。
+
 Step8 为 LLM 增加可选 `stream()` 接口，旧的 `complete()` 不变。流式文本和 reasoning delta 会按顺序持久化；进程中断时 Assistant 保持 `interrupted`，恢复时由新的 Attempt 重新生成完整回答，不从最后字符直接续写。
 
 ### Context Compact、模型切换与 Session Picker（Step9–Step10）
 
 `CompactionService` 使用有限的 `ModelContextProfile` 估算上下文，在达到阈值后生成结构化摘要并写入 `context_summaries`；原始消息不会删除，摘要失败会记录 `context_compaction_failed` 事件并阻断本次压缩。`SessionService.change_model()` 只允许同一 Provider 内切换，并且后续 Turn 继续保存真实模型快照。
 
-TUI 的 Session 辅助接口位于 `codepilot.tui_agent.session_picker` 和 `session_hydrator`：Picker 查询跨项目 Session，路径缺失的项目标记为只读；Hydrator 使用 message/part/event ID 从 SQLite 构建新的 Transcript View。命令层支持 `/sessions`、`/switch`、`/new`、`/rename`、`/archive`、`/unarchive`、`/compact` 和 `/export-session`，运行中的任务仍禁止切换。
+TUI 启动方式：
+
+```bash
+codepilot tui /path/to/project
+```
+
+启动后不会自动创建空 Session，而是先显示跨项目 Session Picker：
+
+- `Enter`：打开选中的已有 Session；
+- `n`：为命令行指定的项目创建新 Session；
+- `a`：切换是否显示归档 Session；
+- `Esc`：关闭 Picker，输入框继续保持禁用。
+
+TUI、Runner、Picker 和 Exporter 共用 `resolve_session_paths()` 返回的用户级 SQLite，项目目录只记录在 `projects.path`，不会再创建项目内 `.codepilot/sessions.sqlite`。显式传入 `session_database` 时，所有组件也会共用该数据库。打开项目路径已删除或已归档的 Session 时输入框禁用，只读状态不会被转成新的项目 Session。
+
+提交任务后如果 Git 分支与 Session 记录不一致，TUI 会显示分支确认弹窗。选择 Continue 会携带完整原始输入重新提交，并再次检查当前实际分支；选择 Cancel 不创建 Turn、User Message、Attempt 或 Session Event。
 
 ### 手动 Session 导出与旧存储边界（Step11–Step12）
 
@@ -318,6 +394,8 @@ TUI 的 Session 辅助接口位于 `codepilot.tui_agent.session_picker` 和 `ses
 Session Runtime 的事实来源始终是 SQLite；旧的文件型 Trace/Report 仍只服务于非 Session 的 `agent-run`、GitHub/PR/CI 等既有入口。Session 导出文件不能被当作恢复状态，也不会在正常 Session 运行时自动生成。
 
 Step12 已将 TUI 的 `SessionStore` 改为 SQLite 适配层，`TUIAgentRunner` 通过 `SessionRuntime` 创建 Turn/Attempt，不再构造 `TraceLogger` 或调用 `generate_report()`。`append_message()` 和 `append_run()` 仅保留为明确报错的兼容接口，避免旧调用悄悄重新写入 JSON。
+
+这次还把大输出统一切到 artifact 入口：消息分片和 Tool Result 现在只保留 `preview` 和 `artifact_id`，完整内容会落到 Session artifact store。想查看完整文本时，可以直接用 `ArtifactStore.read_text(artifact_id)` 读取；TUI 默认显示的是 preview。
 
 ### Chat-style TUI transcript helpers
 
@@ -386,7 +464,7 @@ print(result.outcome.to_payload())
 
 `outcome.to_payload()` 返回 TUI 结束事件使用的标准顶层字段，其中集合会在序列化边界转换为 list。为避免破坏已有调用，`result.changed_files`、`result.last_test_status` 和其他原有结果属性仍可只读访问；新代码应使用 `result.outcome`。
 
-TUI 的启动方式、权限模式和 Session 文件位置均未改变。已有的 `session.json` 仍由 `SessionStore.load_session()` 按原有 v1 Schema 读取，不需要迁移。
+TUI 的命令入口和权限模式保持不变；Session 事实统一保存在用户级 SQLite，不再读取或创建项目内 `session.json` 作为主存储。
 
 ### Phase 4 Agent 结束与异常状态说明
 

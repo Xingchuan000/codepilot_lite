@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Iterator
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 
 class SessionDatabase:
@@ -32,10 +32,17 @@ class SessionDatabase:
         connection = self.connect()
         try:
             connection.executescript(_schema_sql())
-            connection.execute(
-                "INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)",
-                ("schema_version", str(SCHEMA_VERSION)),
-            )
+            row = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
+            version = int(row[0]) if row is not None else SCHEMA_VERSION
+            if version in {1, 2, 3} and version < 2:
+                _migrate_v1_to_v2(connection)
+                version = 2
+            if version in {2, 3} and version < 3:
+                _migrate_v2_to_v3(connection)
+                version = 3
+            if version != SCHEMA_VERSION:
+                raise RuntimeError(f"unsupported Session schema version: {version}")
+            connection.execute("INSERT OR REPLACE INTO schema_meta(key, value) VALUES ('schema_version', ?)", (str(version),))
             connection.commit()
         except Exception:
             connection.rollback()
@@ -57,6 +64,53 @@ class SessionDatabase:
         finally:
             connection.close()
 
+
+def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
+    """幂等迁移 durable recovery 字段；部分迁移中断后可安全重入。"""
+
+    additions = {
+        "run_attempts": {
+            "interruption_reason": "TEXT",
+            "worker_id": "TEXT",
+            "lease_expires_at": "TEXT",
+        },
+        "tool_calls": {
+            "side_effect": "TEXT",
+            "idempotency": "TEXT",
+            "recovery_strategy": "TEXT",
+            "recovery_token_json": "TEXT",
+        },
+    }
+    for table, columns in additions.items():
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column, type_name in columns.items():
+            if column not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_name}")
+
+
+def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
+    """补齐权限、消息和结果链路需要的新列。"""
+
+    additions = {
+        "message_parts": {
+            "artifact_id": "TEXT",
+        },
+        "tool_results": {
+            "output_preview": "TEXT",
+            "artifact_id": "TEXT",
+            "error": "TEXT",
+            "success": "INTEGER",
+        },
+        "permission_grants": {
+            "tool_name": "TEXT",
+            "scope_json": "TEXT",
+        },
+    }
+    for table, columns in additions.items():
+        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+        for column, type_name in columns.items():
+            if column not in existing:
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_name}")
 
 def _schema_sql() -> str:
     return """
@@ -120,6 +174,9 @@ def _schema_sql() -> str:
         updated_at TEXT NOT NULL,
         started_at TEXT,
         ended_at TEXT,
+        interruption_reason TEXT,
+        worker_id TEXT,
+        lease_expires_at TEXT,
         metadata_json TEXT NOT NULL,
         UNIQUE(turn_id, attempt_number),
         FOREIGN KEY(turn_id) REFERENCES turns(turn_id)
@@ -151,6 +208,7 @@ def _schema_sql() -> str:
         provider_format TEXT,
         replayable INTEGER NOT NULL,
         created_at TEXT NOT NULL,
+        artifact_id TEXT,
         metadata_json TEXT NOT NULL,
         UNIQUE(message_id, sequence),
         FOREIGN KEY(message_id) REFERENCES messages(message_id)
@@ -168,6 +226,10 @@ def _schema_sql() -> str:
         updated_at TEXT NOT NULL,
         started_at TEXT,
         completed_at TEXT,
+        side_effect TEXT,
+        idempotency TEXT,
+        recovery_strategy TEXT,
+        recovery_token_json TEXT,
         metadata_json TEXT NOT NULL,
         FOREIGN KEY(turn_id) REFERENCES turns(turn_id),
         FOREIGN KEY(attempt_id) REFERENCES run_attempts(attempt_id),
@@ -180,6 +242,10 @@ def _schema_sql() -> str:
         status TEXT NOT NULL,
         content_json TEXT NOT NULL,
         created_at TEXT NOT NULL,
+        output_preview TEXT,
+        artifact_id TEXT,
+        error TEXT,
+        success INTEGER,
         metadata_json TEXT NOT NULL,
         FOREIGN KEY(tool_call_id) REFERENCES tool_calls(tool_call_id)
     );
@@ -213,6 +279,8 @@ def _schema_sql() -> str:
         grant_id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL,
         scope_key TEXT NOT NULL,
+        tool_name TEXT,
+        scope_json TEXT,
         created_at TEXT NOT NULL,
         revoked_at TEXT,
         metadata_json TEXT NOT NULL,

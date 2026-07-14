@@ -28,6 +28,7 @@ class PermissionRequest:
     attempt_id: str | None = None
     tool_call_id: str | None = None
     scope_key: str | None = None
+    scope_json: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)

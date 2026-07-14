@@ -7,21 +7,25 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from codepilot.permissions import PermissionResponse
+from codepilot.session.database import SessionDatabase
+from codepilot.session.exporter import SessionExporter
+from codepilot.session.models import BranchConfirmationRequired, PendingTurnSubmission
+from codepilot.session.paths import resolve_session_paths
+from codepilot.session.recovery import RecoveryPlan, RecoveryService
+from codepilot.session.service import SessionService
 from codepilot.tui_agent.commands import handle_command
 from codepilot.tui_agent.config import merge_config
 from codepilot.tui_agent.event_reducer import EventReducer
 from codepilot.tui_agent.event_stream import MemoryEventStream
 from codepilot.tui_agent.layout import format_header, format_side_status, format_transcript_item, format_transcript_plain
-from codepilot.permissions import PermissionResponse
 from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
+from codepilot.tui_agent.session_modals import format_branch_confirmation, format_recovery_modal
+from codepilot.tui_agent.session_picker import SessionPicker, SessionPickerResult, SessionPickerScreen
 from codepilot.tui_agent.session_store import SessionStore, now_iso
-from codepilot.session.database import SessionDatabase
-from codepilot.session.service import SessionService
-from codepilot.tui_agent.session_picker import SessionPickerScreen, SessionPicker
-from codepilot.session.exporter import SessionExporter
 
 
 def _load_textual():
@@ -59,19 +63,14 @@ def create_tui_agent_app(
         cli_max_steps=max_steps,
         project=project_context,
     )
-    session_store = SessionStore(project_context)
-    session = session_store.create_session(
-        model=merged.model,
-        permission_mode=merged.permission_mode,
-        metadata={
-            "config_source": merged.source,
-            "max_steps": merged.max_steps,
-            "auto_report": merged.auto_report,
-            "mcp_enabled": merged.mcp_config is not None,
-        },
-    )
-    if merged.runs_dir != session.runs_dir:
-        session = session_store.update_session(session, runs_dir=merged.runs_dir)
+    # TUI 的所有组件共享这一份用户级数据库；项目路径不再参与数据库位置计算。
+    paths = resolve_session_paths(session_database.path.parent if session_database is not None else None)
+    database = session_database or SessionDatabase(paths.database_path)
+    database.initialize()
+    service = SessionService(database, paths)
+    recovery_service = RecoveryService(database)
+    session_store = SessionStore(project_context, database, paths)
+    session = None
     event_stream = MemoryEventStream()
     broker = BlockingTUIBroker()
     runner = TUIAgentRunner(
@@ -91,9 +90,8 @@ def create_tui_agent_app(
         ),
     )
     reducer = EventReducer()
-    active_database = session_database or session_store.database
-    session_picker = SessionPickerScreen(SessionPicker(SessionService(active_database)))
-    session_exporter = SessionExporter(active_database)
+    session_picker = SessionPicker(service)
+    session_exporter = SessionExporter(database, paths)
 
     class SelectableStatic(Static):
         can_focus = True
@@ -126,13 +124,22 @@ def create_tui_agent_app(
             self.dismiss()
 
     class PermissionModal(ModalScreen[None]):
-        BINDINGS = [Binding("y", "approve", "Approve once"), Binding("n", "deny", "Deny"), Binding("escape", "deny", "Deny")]
+        BINDINGS = [
+            Binding("y", "approve_once", "Approve once"),
+            Binding("s", "approve_session", "Approve for session"),
+            Binding("n", "deny", "Deny"),
+            Binding("escape", "deny", "Deny"),
+        ]
 
         def __init__(self, request: dict[str, Any]) -> None:
             super().__init__()
             self.request = request
+            self.can_approve_session = bool(self.request.get("scope_key"))
 
         def compose(self) -> ComposeResult:
+            actions = "Actions: Y = once, N/Esc = deny"
+            if self.can_approve_session:
+                actions = "Actions: Y = once, S = session, N/Esc = deny"
             yield Static(
                 "\n".join(
                     [
@@ -141,41 +148,92 @@ def create_tui_agent_app(
                         f"Risk: {self.request.get('risk')} / {self.request.get('side_effect')}",
                         f"Matched rule: {self.request.get('matched_rule')}",
                         f"Arguments: {self.request.get('arguments_preview')}",
+                        f"Session scope: {self.request.get('scope_key') or '(none)'}",
+                        actions,
                     ]
                 )
             )
 
-        def action_approve(self) -> None:
+        def _resolve(self, decision: str, reason: str) -> None:
             request_id = self.request.get("request_id")
             if not request_id:
                 event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "permission request missing request_id"}))
                 self.dismiss()
                 return
-            broker.resolve(
+            runner.permission_broker.resolve(
                 PermissionResponse(
                     request_id=str(request_id),
-                    decision="approve_once",
-                    reason="approved from TUI",
+                    decision=decision,
+                    reason=reason,
                     responded_at=now_iso(),
                 )
             )
             self.dismiss()
 
-        def action_deny(self) -> None:
-            request_id = self.request.get("request_id")
-            if not request_id:
-                event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "permission request missing request_id"}))
-                self.dismiss()
+        def action_approve_once(self) -> None:
+            self._resolve("approve_once", "approved once from TUI")
+
+        def action_approve_session(self) -> None:
+            if not self.can_approve_session:
                 return
-            broker.resolve(
-                PermissionResponse(
-                    request_id=str(request_id),
-                    decision="deny",
-                    reason="denied from TUI",
-                    responded_at=now_iso(),
+            # 只有 scope_key 存在时才允许升级为会话级授权，避免把一次性请求误放大。
+            self._resolve("approve_session", "approved for session from TUI")
+
+        def action_deny(self) -> None:
+            self._resolve("deny", "denied from TUI")
+
+    class BranchConfirmationModal(ModalScreen[bool]):
+        """显示可恢复的分支变化确认；取消不会调用任何数据库写入方法。"""
+
+        BINDINGS = [Binding("y", "confirm", "Continue"), Binding("n", "cancel", "Cancel"), Binding("escape", "cancel", "Cancel")]
+
+        def __init__(self, pending: PendingTurnSubmission) -> None:
+            super().__init__()
+            self.pending = pending
+
+        def compose(self) -> ComposeResult:
+            yield Static(
+                format_branch_confirmation(
+                    BranchConfirmationRequired(
+                        session_id=self.pending.session_id,
+                        old_branch=self.pending.old_branch,
+                        new_branch=self.pending.new_branch,
+                    )
                 )
             )
-            self.dismiss()
+
+        def action_confirm(self) -> None:
+            self.dismiss(True)
+
+        def action_cancel(self) -> None:
+            self.dismiss(False)
+
+    class RecoveryModal(ModalScreen[str]):
+        """仅对自动对账无法确认的副作用显示人工恢复动作。"""
+
+        BINDINGS = [
+            Binding("m", "mark_completed", "Mark completed"),
+            Binding("r", "retry", "Retry"),
+            Binding("a", "abort", "Abort"),
+        ]
+
+        def __init__(self, tool_call_id: str) -> None:
+            super().__init__()
+            self.tool_call_id = tool_call_id
+            self.call = recovery_service.store.get_tool_call(tool_call_id)
+            self.result = recovery_service.reconcile_tool_call(tool_call_id)
+
+        def compose(self) -> ComposeResult:
+            yield Static(format_recovery_modal(self.call.tool_name, self.call.arguments, self.call.started_at, self.result))
+
+        def action_mark_completed(self) -> None:
+            self.dismiss("mark completed")
+
+        def action_retry(self) -> None:
+            self.dismiss("retry")
+
+        def action_abort(self) -> None:
+            self.dismiss("abort")
 
     class CodePilotTUIAgentApp(App):
         permission_mode = merged.permission_mode
@@ -207,7 +265,15 @@ def create_tui_agent_app(
             self._event_stream = event_stream
             self._project_context = project_context
             self._session_store = session_store
+            self._session_service = service
+            self._recovery_service = recovery_service
+            self._session_database = database
+            self._session_paths = paths
+            self._new_session_project_context = project_context
+            self._session_read_only = True
             self._shown_permission_request_ids: set[str] = set()
+            self._shown_branch_confirmations: set[tuple[str, str | None, str | None, str]] = set()
+            self._recovery_scan_pending = False
             self._rendered_transcript_ids: set[str] = set()
             self._auto_scroll = True
             self._last_top_status_text: str | None = None
@@ -228,6 +294,118 @@ def create_tui_agent_app(
 
         def on_mount(self) -> None:
             self.set_interval(0.2, self._drain_events)
+            # App 挂载前不创建 Session；输入保持禁用，直到用户从 Picker 打开或新建 Session。
+            self.query_one("#task-input", Input).disabled = True
+            self._refresh()
+            self.push_screen(SessionPickerScreen(self.session_picker), self._handle_session_picker_result)
+
+        def _handle_session_picker_result(self, result: SessionPickerResult | None) -> None:
+            """处理 Picker 的显式结果；仅 `new` 分支创建 Session。"""
+
+            if result is None or result.action == "cancel":
+                return
+            if result.action == "new":
+                self._create_new_session()
+                return
+            if result.session_id is None:
+                raise ValueError("session picker open result requires session_id")
+            self._activate_session(result.session_id)
+
+        def _create_new_session(self) -> None:
+            self._project_context = self._new_session_project_context
+            self._session_store = SessionStore(self._project_context, self._session_database, self._session_paths)
+            created = self._session_store.create_session(
+                model=merged.model,
+                permission_mode=merged.permission_mode,
+                metadata={
+                    "config_source": merged.source,
+                    "max_steps": merged.max_steps,
+                    "auto_report": merged.auto_report,
+                    "mcp_enabled": merged.mcp_config is not None,
+                },
+            )
+            self._bind_session(created, read_only=False)
+
+        def _activate_session(self, session_id: str) -> None:
+            opened = self._session_service.open_session(session_id)
+            recovery_plan = (
+                self._recovery_service.recover_session(session_id)
+                if opened.project_exists and opened.session.status == "active"
+                else self._recovery_service.inspect_session(session_id)
+            )
+            if opened.project_exists:
+                project_for_session = resolve_project(opened.project_path)
+            else:
+                # 路径缺失是计划内的只读状态：保留原路径用于展示，但绝不构造可执行仓库。
+                project_for_session = ProjectContext(
+                    schema_version=project_context.schema_version,
+                    project_path=opened.project_path,
+                    resolved_project=opened.project_path,
+                    git_root=None,
+                    is_git_repo=False,
+                    git_dirty_status="missing",
+                    workspace_root=opened.project_path,
+                    effective_repo_path=opened.project_path,
+                    default_runs_dir=opened.project_path / "runs",
+                    warnings=("project_path_missing",),
+                )
+            self._project_context = project_for_session
+            self._session_store = SessionStore(project_for_session, self._session_database, self._session_paths)
+            self._bind_session(
+                self._session_store.load_session(session_id),
+                read_only=opened.read_only or opened.session.status != "active",
+            )
+            self._handle_recovery_plan(recovery_plan)
+
+        def _handle_recovery_plan(self, plan: RecoveryPlan) -> None:
+            """自动恢复只执行已确认安全的 Attempt；未知副作用必须先弹窗。"""
+
+            if plan.pending_approval_request_ids:
+                # 3.9 接入 SessionPermissionBroker 前，旧审批必须保持阻塞，绝不能静默重试。
+                self._reducer.view = replace(self._reducer.view, status="waiting_permission")
+                self._publish_command_output(
+                    "recovery",
+                    f"Pending permission approval requires recovery: {plan.pending_approval_request_ids[0]}",
+                )
+                return
+            if plan.resumable_attempt_ids:
+                attempt = self._recovery_service.store.get_attempt(plan.resumable_attempt_ids[0])
+                self.runner.resume_turn(attempt.turn_id, attempt.attempt_id)
+                self._reducer.view = replace(self._reducer.view, status="running")
+                return
+            if plan.unresolved_tool_call_ids:
+                tool_call_id = plan.unresolved_tool_call_ids[0]
+                self.push_screen(
+                    RecoveryModal(tool_call_id),
+                    lambda decision, tool_call_id=tool_call_id: self._resolve_recovery(tool_call_id, decision),
+                )
+
+        def _resolve_recovery(self, tool_call_id: str, decision: str | None) -> None:
+            if decision is None:
+                return
+            attempt = self._recovery_service.resolve_unknown(tool_call_id, decision)
+            if attempt is not None:
+                self.runner.resume_turn(attempt.turn_id, attempt.attempt_id)
+                self._reducer.view = replace(self._reducer.view, status="running")
+                self._refresh()
+                return
+            self._handle_recovery_plan(self._recovery_service.inspect_session(self.session.session_id))
+
+        def _bind_session(self, selected_session, *, read_only: bool) -> None:
+            """让 App、Runner 和输入状态同时切换到同一个 SQLite Session。"""
+
+            self.session = selected_session
+            self.permission_mode = selected_session.permission_mode
+            self._session_read_only = read_only
+            self.runner.project = self._project_context
+            self.runner.session_store = self._session_store
+            self.runner.session = selected_session
+            self.runner.active_session_id = selected_session.session_id
+            self.runner.config = replace(self.runner.config, model=selected_session.model)
+            self.runner.set_permission_mode(selected_session.permission_mode)
+            self.query_one("#task-input", Input).disabled = read_only
+            self._last_top_status_text = None
+            self._last_side_status_text = None
             self._refresh()
 
         def _top_status_text(self) -> str:
@@ -289,8 +467,10 @@ def create_tui_agent_app(
                 self._event_stream.publish(TUIEvent(type="command_output", timestamp=now_iso(), payload={"command": command, "output": output}))
 
         def _switch_project(self, project_path: Path) -> None:
+            if self.session is None:
+                raise RuntimeError("select or create a session before switching project")
             self._project_context = resolve_project(project_path)
-            self._session_store = SessionStore(self._project_context)
+            self._session_store = SessionStore(self._project_context, self._session_database, self._session_paths)
             self.session = self._session_store.create_session(
                 model=self.session.model,
                 permission_mode=self.permission_mode,
@@ -299,6 +479,7 @@ def create_tui_agent_app(
             self.runner.project = self._project_context
             self.runner.session_store = self._session_store
             self.runner.session = self.session
+            self.runner.active_session_id = self.session.session_id
             self._reducer.view = replace(
                 self._reducer.view,
                 run_id=None,
@@ -331,6 +512,8 @@ def create_tui_agent_app(
             events = self._event_stream.drain()
             for event in events:
                 self._reducer.reduce(event)
+                if event.type == "run_finished":
+                    self._recovery_scan_pending = True
             pending_permission_ids = {
                 request.request_id
                 for request in self._reducer.view.permission_requests
@@ -349,6 +532,38 @@ def create_tui_agent_app(
                     continue
                 self._shown_permission_request_ids.add(request_id)
                 self.push_screen(PermissionModal(event.payload))
+            for event in events:
+                if event.type != "branch_confirmation_required" or event.session_id is None:
+                    continue
+                pending = PendingTurnSubmission(
+                    session_id=event.session_id,
+                    text=str(event.payload.get("text") or ""),
+                    old_branch=event.payload.get("old_branch"),
+                    new_branch=event.payload.get("new_branch"),
+                )
+                key = (pending.session_id, pending.old_branch, pending.new_branch, pending.text)
+                if key in self._shown_branch_confirmations:
+                    continue
+                self._shown_branch_confirmations.add(key)
+                self.push_screen(
+                    BranchConfirmationModal(pending),
+                    lambda confirmed, pending=pending: self._resolve_branch_confirmation(pending, bool(confirmed)),
+                )
+            if self._recovery_scan_pending and self.session is not None and not self.runner.is_running():
+                self._recovery_scan_pending = False
+                self._handle_recovery_plan(self._recovery_service.recover_session(self.session.session_id))
+            self._refresh()
+
+        def _resolve_branch_confirmation(self, pending: PendingTurnSubmission, confirmed: bool) -> None:
+            """确认时恢复原提交；取消只结束等待态，因此 SQLite 保持零写入。"""
+
+            self._shown_branch_confirmations.discard((pending.session_id, pending.old_branch, pending.new_branch, pending.text))
+            if not confirmed:
+                self._reducer.view = replace(self._reducer.view, status="idle")
+                self._refresh()
+                return
+            run_id = self.runner.resume_after_branch_confirmation(pending)
+            self._reducer.view = replace(self._reducer.view, run_id=run_id, task=pending.text, status="running")
             self._refresh()
 
         def action_copy_transcript(self) -> None:
@@ -360,6 +575,17 @@ def create_tui_agent_app(
         def on_input_submitted(self, event: Input.Submitted) -> None:
             text = event.value.strip()
             if not text:
+                return
+            if self.session is None:
+                if text == "/exit":
+                    self.exit()
+                    return
+                self._event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "请先在 Session Picker 中打开或新建 Session"}))
+                self._drain_events()
+                return
+            if self._session_read_only and not text.startswith("/"):
+                self._event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "项目路径不存在或 Session 已归档，当前 Session 只读"}))
+                self._drain_events()
                 return
             if text.startswith("/"):
                 result = handle_command(
@@ -412,7 +638,6 @@ def create_tui_agent_app(
                 self._event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "已有任务正在运行"}))
                 self._drain_events()
                 return
-            self._event_stream.publish(TUIEvent(type="user_message", timestamp=now_iso(), payload={"text": text}))
             try:
                 run_id = runner.start_task(text)
                 self._reducer.view = replace(self._reducer.view, run_id=run_id, task=text, status="running")

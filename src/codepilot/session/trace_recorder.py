@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
 
+from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
-from codepilot.session.ids import now_iso
 from codepilot.session.store import SessionStore
 from codepilot.trace.events import TraceEvent
 
@@ -16,6 +15,7 @@ class SessionTraceRecorder:
 
     def __init__(self, database: SessionDatabase, session_id: str, turn_id: str | None = None, attempt_id: str | None = None, record_hook: Callable[[TraceEvent], None] | None = None) -> None:
         self.store = SessionStore(database)
+        self.artifacts = ArtifactStore(database)
         self.session_id = session_id
         self.turn_id = turn_id
         self.attempt_id = attempt_id
@@ -36,77 +36,65 @@ class SessionTraceRecorder:
 
     def assistant_message_started(self, **_: Any) -> None:
         self._streaming_message = bool(_.get("streaming", True))
-        message = self.store.create_message(session_id=self.session_id, turn_id=self.turn_id or "", role="assistant", status="in_progress", content="")
+        message = self.store.create_message(session_id=self.session_id, turn_id=self.turn_id or "", attempt_id=self.attempt_id, role="assistant", status="in_progress", content="")
         self._last_message_id = message.message_id
 
     def assistant_message_completed(self, *, content: str, **_: Any) -> None:
         if self._last_message_id is None:
             self.assistant_message_started()
+        persisted = self.artifacts.persist_content(self.session_id, "assistant_message", content)
         if not self._streaming_message:
-            self.store.append_message_part(self._last_message_id, type="text", content=content)
+            self.store.append_message_part(
+                self._last_message_id,
+                type="text",
+                content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+                artifact_id=persisted.artifact_id,
+            )
         self.store.update_message_status(self._last_message_id, "completed")
         self._streaming_message = False
 
     def assistant_text_delta(self, **_: Any) -> None:
         if self._last_message_id is None:
             self.assistant_message_started()
-        self.store.append_message_part(self._last_message_id, type=str(_.get("type", "text")), content=str(_.get("content", "")), provider_format=_.get("provider_format"), replayable=bool(_.get("replayable", True)))
+        content = str(_.get("content", ""))
+        persisted = self.artifacts.persist_content(self.session_id, "assistant_message_delta", content)
+        self.store.append_message_part(
+            self._last_message_id,
+            type=str(_.get("type", "text")),
+            content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+            provider_format=_.get("provider_format"),
+            replayable=bool(_.get("replayable", True)),
+            artifact_id=persisted.artifact_id,
+        )
 
     def assistant_message_interrupted(self, **_: Any) -> None:
         if self._last_message_id is not None:
             self.store.update_message_status(self._last_message_id, "interrupted")
 
     def tool_call_created(self, *, tool_name: str, arguments: dict[str, Any], **_: Any) -> None:
-        self.store.create_tool_call(
-            turn_id=self.turn_id or "",
-            attempt_id=self.attempt_id,
-            message_id=self._last_message_id,
-            tool_name=tool_name,
-            arguments=arguments,
-        )
+        # ToolCall 业务表只允许 Router Lifecycle 写入；此入口保留给 Loop/UI 事件协议。
+        return None
 
     def tool_result_created(self, *, tool_name: str, success: bool, content: Any, **_: Any) -> None:
+        persisted = self.artifacts.persist_content(self.session_id, "tool_result", content)
         message = self.store.create_message(
             session_id=self.session_id,
             turn_id=self.turn_id or "",
+            attempt_id=self.attempt_id,
             role="tool",
             status="completed",
-            content=content,
+            content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
         )
-        self.store.append_message_part(message.message_id, type="tool_result", content=content)
+        self.store.append_message_part(
+            message.message_id,
+            type="tool_result",
+            content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+            artifact_id=persisted.artifact_id,
+            metadata={"tool_call_id": _.get("tool_call_id")},
+        )
 
     def agent_finished(self, **_: Any) -> None:
         return None
-
-    def on_tool_call_created(self, *, action: Any, **_: Any) -> None:
-        with self.store.database.transaction() as connection:
-            exists = connection.execute("SELECT 1 FROM tool_calls WHERE turn_id = ? AND tool_name = ? AND arguments_json = ?", (self.turn_id, action.tool_name, json.dumps(action.arguments, ensure_ascii=False, separators=(",", ":")))).fetchone()
-        if exists is None:
-            self.store.create_tool_call(turn_id=self.turn_id or "", attempt_id=self.attempt_id, tool_name=action.tool_name, arguments=action.arguments)
-
-    def on_permission_pending(self, *, request: Any, **_: Any) -> None:
-        self.store.append_event(session_id=self.session_id, event_type="permission_pending", payload={"request_id": request.request_id, "tool_name": request.tool_name}, turn_id=self.turn_id, attempt_id=self.attempt_id)
-
-    def on_permission_resolved(self, *, request: Any, response: Any, **_: Any) -> None:
-        self.store.append_event(session_id=self.session_id, event_type="permission_resolved", payload={"request_id": request.request_id, "decision": response.decision if response else None}, turn_id=self.turn_id, attempt_id=self.attempt_id)
-
-    def on_execution_started(self, *, action: Any, **_: Any) -> None:
-        with self.store.database.transaction() as connection:
-            timestamp = now_iso()
-            connection.execute("UPDATE tool_calls SET status = 'execution_started', started_at = ?, updated_at = ? WHERE turn_id = ? AND tool_name = ? AND status = 'created'", (timestamp, timestamp, self.turn_id, action.tool_name))
-
-    def on_execution_finished(self, *, action: Any, result: Any, **_: Any) -> None:
-        if result is None:
-            return
-        with self.store.database.transaction() as connection:
-            row = connection.execute("SELECT tool_call_id FROM tool_calls WHERE turn_id = ? AND tool_name = ? ORDER BY created_at DESC LIMIT 1", (self.turn_id, action.tool_name)).fetchone()
-        if row is not None:
-            with self.store.database.transaction() as connection:
-                exists = connection.execute("SELECT 1 FROM tool_results WHERE tool_call_id = ?", (row[0],)).fetchone()
-                timestamp = now_iso()
-                connection.execute("UPDATE tool_calls SET status = ?, completed_at = ?, updated_at = ? WHERE tool_call_id = ?", ("completed" if result.success else "failed", timestamp, timestamp, row[0]))
-            if exists is None:
-                self.store.create_tool_result(tool_call_id=row[0], status="success" if result.success else "failed", content=result.output, metadata=result.metadata)
 
     def _record(self, event_type: str, **data: Any) -> TraceEvent:
         self._step += 1

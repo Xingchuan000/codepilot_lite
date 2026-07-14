@@ -13,6 +13,7 @@ from codepilot.tui_agent.models import AgentRunView, TUIEvent, TimelineItem, Tra
 VALID_RUN_STATUSES = {
     "idle",
     "running",
+    "waiting_branch_confirmation",
     "waiting_permission",
     "message_complete",
     "success",
@@ -556,6 +557,9 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         return _reduce_permission_requested(view, event)
     if event.type == "permission_resolved":
         return _reduce_permission_resolved(view, event)
+    if event.type == "branch_confirmation_required":
+        # 分支变化是可恢复的等待状态，不应进入 fatal error 或污染错误 Transcript。
+        return replace(view, status="waiting_branch_confirmation")
     if event.type == "agent_finished":
         return _reduce_agent_finished(view, event)
     if event.type == "run_finished":

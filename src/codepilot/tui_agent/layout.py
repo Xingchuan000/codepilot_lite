@@ -16,12 +16,12 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
-def format_header(project: ProjectContext, session: TUISession, view: AgentRunView, permission_mode: PermissionMode) -> str:
+def format_header(project: ProjectContext, session: TUISession | None, view: AgentRunView, permission_mode: PermissionMode) -> str:
     return "\n".join(
         [
             f"Project: {project.resolved_project}",
             f"Git: {project.git_root or 'non-git'} ({project.git_dirty_status})",
-            f"Model: {model_label(session.model)}",
+            f"Model: {model_label(session.model) if session is not None else 'not selected'}",
             f"Permission: {permission_mode}",
             f"Run Status: {view.status}",
         ]
@@ -112,12 +112,12 @@ def _format_diff_state(view: AgentRunView) -> str:
     return "unknown"
 
 
-def format_side_status(project: ProjectContext, session: TUISession, view: AgentRunView, permission_mode: PermissionMode) -> str:
+def format_side_status(project: ProjectContext, session: TUISession | None, view: AgentRunView, permission_mode: PermissionMode) -> str:
     return "\n".join(
         [
             f"Project: {_short_project_path(project)}",
             f"Git: {(project.git_root.name if project.git_root else 'non-git')} ({project.git_dirty_status})",
-            f"Model: {model_label(session.model)}",
+            f"Model: {model_label(session.model) if session is not None else 'not selected'}",
             f"Permission: {permission_mode}",
             f"Status: {view.status}",
             f"Completion: {view.completion_kind or 'unknown'}",

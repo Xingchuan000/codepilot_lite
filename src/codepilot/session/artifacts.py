@@ -2,19 +2,46 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from shutil import copy2
 from typing import Any
 
 from codepilot.session.database import SessionDatabase
 from codepilot.session.ids import make_artifact_id
-from codepilot.session.models import ArtifactRecord
+from codepilot.session.models import ArtifactRecord, to_jsonable
 from codepilot.session.paths import SessionPaths, resolve_session_paths
 from codepilot.session.store import SessionStore
 
 
 INLINE_CONTENT_MAX_CHARS = 16_000
+PREVIEW_CONTENT_MAX_CHARS = 1_000
+
+
+def _preview_text(content: str) -> str:
+    if len(content) <= PREVIEW_CONTENT_MAX_CHARS:
+        return content
+    suffix = "... truncated"
+    return f"{content[: max(0, PREVIEW_CONTENT_MAX_CHARS - len(suffix))]}{suffix}"
+
+
+def _stringify_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    return json.dumps(to_jsonable(content), ensure_ascii=False, separators=(",", ":"))
+
+
+def _content_mime_type(content: Any) -> str:
+    return "text/plain" if isinstance(content, str) else "application/json"
+
+
+@dataclass(frozen=True)
+class PersistedContent:
+    inline_content: Any | None
+    preview: str
+    artifact_id: str | None
 
 
 class ArtifactStore:
@@ -27,6 +54,14 @@ class ArtifactStore:
         self.database = database
         self.paths = paths or resolve_session_paths(database.path.parent)
         self.store = SessionStore(database, self.paths)
+
+    def persist_content(self, session_id: str, kind: str, content: Any) -> PersistedContent:
+        # 先把内容规整成稳定文本，再按长度决定直接内联还是落盘成 artifact。
+        text = _stringify_content(content)
+        if len(text) <= INLINE_CONTENT_MAX_CHARS:
+            return PersistedContent(content, text, None)
+        artifact = self.put_text(session_id, kind, text, mime_type=_content_mime_type(content))
+        return PersistedContent(None, _preview_text(text), artifact.artifact_id)
 
     def put_text(self, session_id: str, kind: str, content: str, mime_type: str = "text/plain") -> ArtifactRecord:
         if len(content) <= INLINE_CONTENT_MAX_CHARS:
