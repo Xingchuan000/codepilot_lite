@@ -8,7 +8,7 @@ from codepilot.tui_agent.event_stream import MemoryEventStream
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
-from codepilot.tui_agent.session_store import SessionStore
+from codepilot.tui_agent.session_controller import SessionController
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -24,13 +24,13 @@ def _make_repo(tmp_path: Path) -> Path:
 
 def test_set_permission_mode_switches_broker_and_persists_session(tmp_path: Path) -> None:
     project = resolve_project(_make_repo(tmp_path))
-    store = SessionStore(project, SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
+    store = SessionController(project, SessionDatabase(tmp_path / "data" / "sessions.sqlite3"))
     session = store.create_session(model=None, permission_mode="manual")
     event_stream = MemoryEventStream()
     runner = TUIAgentRunner(
         project=project,
         session=session,
-        session_store=store,
+        session_controller=store,
         event_stream=event_stream,
         permission_broker=BlockingTUIBroker(),
         config=TUIRunnerConfig(
@@ -40,7 +40,6 @@ def test_set_permission_mode_switches_broker_and_persists_session(tmp_path: Path
             fake_actions=None,
             mcp_config=None,
             max_steps=1,
-            auto_report=False,
         ),
     )
 

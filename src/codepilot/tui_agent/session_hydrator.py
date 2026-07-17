@@ -24,9 +24,6 @@ class HydratedSessionView:
     last_tool_output: str | None = None
     changed_files: tuple[str, ...] = ()
     test_status: str | None = None
-    report_path: str | None = None
-    report_json_path: str | None = None
-    trace_path: str | None = None
     warnings: tuple[str, ...] = ()
     run_id: str | None = None
     task: str = ""
@@ -46,9 +43,6 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
     last_tool_output: str | None = None
     changed_files: list[str] = []
     test_status: str | None = None
-    report_path: str | None = None
-    report_json_path: str | None = None
-    trace_path: str | None = None
     warnings: list[str] = []
 
     for event in store.list_events(session_id):
@@ -68,11 +62,6 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
             status = event.payload.get("status")
             if isinstance(status, str):
                 test_status = status
-        if event.event_type == "run_finished":
-            trace_path = event.payload.get("trace_path") if isinstance(event.payload.get("trace_path"), str) else trace_path
-            report_path = event.payload.get("report_path") if isinstance(event.payload.get("report_path"), str) else report_path
-            report_json_path = event.payload.get("report_json_path") if isinstance(event.payload.get("report_json_path"), str) else report_json_path
-
     for request in store.list_permission_requests(session_id):
         if request.status != "pending":
             continue
@@ -168,9 +157,9 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
     transcript.sort(key=lambda item: (item.timestamp, _transcript_type_order(item.kind), item.id))
 
     session = store.get_session(session_id)
-    turns = store.service.store.list_turns(session_id)
+    turns = store.list_turns(session_id)
     latest_turn = turns[-1] if turns else None
-    attempts = store.service.store.list_attempts(latest_turn.turn_id) if latest_turn is not None else []
+    attempts = store.list_attempts(latest_turn.turn_id) if latest_turn is not None else []
     latest_attempt = attempts[-1] if attempts else None
     return HydratedSessionView(
         transcript=tuple(transcript),
@@ -184,9 +173,6 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
         last_tool_output=last_tool_output,
         changed_files=tuple(dict.fromkeys(changed_files)),
         test_status=test_status,
-        report_path=report_path,
-        report_json_path=report_json_path,
-        trace_path=trace_path,
         warnings=tuple(warnings),
         task=last_user_text,
     )

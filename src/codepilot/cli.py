@@ -140,7 +140,6 @@ def tui(
     model_config: list[str] = typer.Option([], "--model-config"),
     permission_mode: Literal["manual", "read_only", "accept_edits", "unsafe_auto"] | None = typer.Option(None, "--permission-mode"),
     mcp_config: str | None = typer.Option(None, "--mcp-config"),
-    runs_dir: str | None = typer.Option(None, "--runs-dir"),
     fake_actions: str | None = typer.Option(None, "--fake-actions"),
     max_steps: int | None = typer.Option(None, "--max-steps"),
 ) -> None:
@@ -154,7 +153,6 @@ def tui(
             model_config=model_config,
             permission_mode=permission_mode,
             mcp_config=mcp_config,
-            runs_dir=runs_dir,
             fake_actions=fake_actions,
             max_steps=max_steps,
         ).run()

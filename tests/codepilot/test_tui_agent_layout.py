@@ -24,7 +24,6 @@ def _project(tmp_path: Path) -> ProjectContext:
         git_dirty_status="clean",
         workspace_root=tmp_path,
         effective_repo_path=tmp_path,
-        default_runs_dir=tmp_path / "runs",
     )
 
 
@@ -76,9 +75,6 @@ def test_side_status_hides_report_paths(tmp_path: Path) -> None:
         tests_required=True,
         diff_required=True,
         diff_checked=True,
-        report_path="runs/run-1/report.md",
-        report_json_path="runs/run-1/report.json",
-        trace_path="runs/run-1/trace.jsonl",
     )
 
     text = format_side_status(project, session, view, "manual")

@@ -51,6 +51,3 @@ class SessionController:
         mapped = {"current_model": changes["model"]} if "model" in changes else {}
         mapped.update({key: value for key, value in changes.items() if key in {"title", "permission_mode", "metadata"}})
         return self.store.update_session(session.session_id, **mapped)
-
-    def __getattr__(self, name: str):
-        return getattr(self.store, name)

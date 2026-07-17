@@ -291,6 +291,21 @@ class SessionStore:
             row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
         return self._turn_from_row(row)
 
+    def update_turn_metadata(self, turn_id: str, metadata: dict[str, Any]) -> TurnRecord:
+        """把本次真实模型能力写入 Turn 快照，避免后续 registry 变化影响回放。"""
+
+        with self.database.transaction() as connection:
+            row = connection.execute("SELECT metadata_json FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
+            if row is None:
+                raise LookupError(turn_id)
+            current = _json_loads(row["metadata_json"]) or {}
+            current.update(metadata)
+            connection.execute(
+                "UPDATE turns SET metadata_json = ?, updated_at = ? WHERE turn_id = ?",
+                (_json_dumps(current), now_iso(), turn_id),
+            )
+        return self.get_turn(turn_id)
+
     def list_turns(self, session_id: str) -> list[TurnRecord]:
         with self.database.transaction() as connection:
             rows = connection.execute(
@@ -1516,6 +1531,72 @@ class SessionStore:
             connection.execute(
                 "INSERT INTO context_summaries(summary_id, session_id, turn_id, created_at, content_json, source_start_sequence, source_end_sequence, summary_message_id, model, status, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)",
                 (summary_id, session_id, summary_turn_id, timestamp, _json_dumps(content), source_start_sequence, source_end_sequence, message_id, model, _json_dumps(metadata or {})),
+            )
+            row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
+        return self._context_summary_from_row(row)
+
+    def replace_context_summary(
+        self,
+        *,
+        session_id: str,
+        previous_summary_id: str | None,
+        summary_content: str,
+        turn_id: str | None,
+        source_start_sequence: int | None,
+        source_end_sequence: int | None,
+        model: str | None,
+        metadata: dict[str, Any] | None,
+        event_payload: dict[str, Any],
+    ) -> ContextSummaryRecord:
+        """原子替换摘要、摘要消息和 Compact Event。
+
+        旧摘要只有在新消息、新摘要索引和事件都成功写入后才会标记为 superseded；
+        任意 SQL 失败都会由外层事务回滚，保证数据库中始终至少有一个有效摘要。
+        """
+
+        timestamp = now_iso()
+        message_id = make_message_id()
+        part_id = make_part_id()
+        summary_id = _make_local_id("summary")
+        with self.database.transaction() as connection:
+            if previous_summary_id is not None:
+                previous = connection.execute(
+                    "SELECT status FROM context_summaries WHERE summary_id = ? AND session_id = ?",
+                    (previous_summary_id, session_id),
+                ).fetchone()
+                if previous is None or previous["status"] not in {None, "completed"}:
+                    raise RuntimeError("previous context summary is no longer completed")
+            summary_turn_id = turn_id or connection.execute(
+                "SELECT turn_id FROM turns WHERE session_id = ? ORDER BY sequence DESC LIMIT 1",
+                (session_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO messages(message_id, session_id, turn_id, attempt_id, role, status, content_json, created_at, updated_at, interrupted_at, metadata_json) VALUES (?, ?, ?, NULL, 'system', 'completed', ?, ?, ?, NULL, ?)",
+                (message_id, session_id, summary_turn_id, _json_dumps(summary_content), timestamp, timestamp, _json_dumps({"summary_id": summary_id})),
+            )
+            connection.execute(
+                "INSERT INTO message_parts(part_id, message_id, sequence, type, content_json, provider_format, replayable, created_at, artifact_id, metadata_json) VALUES (?, ?, 1, 'summary', ?, NULL, 1, ?, NULL, ?)",
+                (part_id, message_id, _json_dumps(summary_content), timestamp, _json_dumps({"summary_id": summary_id})),
+            )
+            connection.execute(
+                "INSERT INTO context_summaries(summary_id, session_id, turn_id, created_at, content_json, source_start_sequence, source_end_sequence, summary_message_id, model, status, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'completed', ?)",
+                (summary_id, session_id, summary_turn_id, timestamp, _json_dumps(summary_content), source_start_sequence, source_end_sequence, message_id, model, _json_dumps(metadata or {})),
+            )
+            connection.execute(
+                "UPDATE context_summaries SET status = 'superseded' WHERE session_id = ? AND COALESCE(status, 'completed') = 'completed' AND summary_id != ?",
+                (session_id, summary_id),
+            )
+            sequence = connection.execute(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()[0]
+            connection.execute(
+                "INSERT INTO session_events(event_id, session_id, sequence, event_type, created_at, turn_id, attempt_id, payload_json, metadata_json) VALUES (?, ?, ?, 'context_compacted', ?, ?, NULL, ?, ?)",
+                (make_event_id(), session_id, sequence, timestamp, turn_id, _json_dumps(event_payload | {"summary_id": summary_id}), _json_dumps({"source": "compaction_service"})),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ?, last_activity_at = ? WHERE session_id = ?",
+                (timestamp, timestamp, session_id),
             )
             row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
         return self._context_summary_from_row(row)

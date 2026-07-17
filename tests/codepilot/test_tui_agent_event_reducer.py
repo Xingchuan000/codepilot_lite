@@ -340,18 +340,12 @@ def test_run_finished_keeps_paths_out_of_transcript() -> None:
             timestamp="2024-01-01T00:00:00Z",
             payload={
                 "status": "success",
-                "trace_path": "runs/run-1/trace.jsonl",
-                "report_path": "runs/run-1/report.md",
-                "report_json_path": "runs/run-1/report.json",
                 "changed_files": ["src/calc.py"],
                 "test_status": "passed",
             },
         )
     )
 
-    assert view.trace_path == "runs/run-1/trace.jsonl"
-    assert view.report_path == "runs/run-1/report.md"
-    assert view.report_json_path == "runs/run-1/report.json"
     assert _transcript_kinds(view) == ("system_status",)
     assert "trace.jsonl" not in view.transcript[0].body
     assert "report.md" not in view.transcript[0].body

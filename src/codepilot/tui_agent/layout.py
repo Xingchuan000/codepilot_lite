@@ -127,7 +127,7 @@ def format_side_status(project: ProjectContext, session: SessionRecord | None, v
             f"Evidence: {_format_requirement(view.requires_evidence)}",
             f"Tests: {_format_test_state(view)}",
             f"Diff: {_format_diff_state(view)}",
-            "Commands: /help /status /permissions /diff /report /trace /copy /move /export-transcript /cancel /exit",
+            "Commands: /help /status /permissions /diff /copy /move /export-session /cancel /exit",
         ]
     )
 
@@ -155,10 +155,7 @@ def format_result_panel(view: AgentRunView) -> str:
             f"Missing evidence: {', '.join(view.missing_evidence) if view.missing_evidence else 'none'}",
             f"Changed files: {', '.join(view.changed_files) if view.changed_files else 'none'}",
             f"Test status: {view.test_status or 'unknown'}",
-            f"Report: {view.report_path or 'none'}",
-            f"Report JSON: {view.report_json_path or 'none'}",
-            f"Trace: {view.trace_path or 'none'}",
-            "Next: /help /status /permissions /diff /report /new /cancel /exit",
+            "Next: /help /status /permissions /diff /export-session /new /cancel /exit",
             format_diff_summary(view),
         ]
     )

@@ -3,12 +3,15 @@ from __future__ import annotations
 import shutil
 import subprocess
 import sys
+import logging
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from codepilot.permissions import PermissionResponse
+from codepilot.agent.runner import ModelConfigurationRequired, get_minisweagent_model_names, resolve_codepilot_model_identity
 from codepilot.session.database import SessionDatabase
+from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.compaction import CompactionService
 from codepilot.session.exporter import SessionExporter
 from codepilot.session.models import BranchConfirmationRequired, PendingTurnSubmission
@@ -27,7 +30,8 @@ from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
 from codepilot.tui_agent.session_modals import format_branch_confirmation, format_recovery_modal
 from codepilot.tui_agent.session_hydrator import hydrate_session_view
 from codepilot.tui_agent.session_picker import SessionPicker, SessionPickerResult, SessionPickerScreen
-from codepilot.tui_agent.session_controller import SessionController as SessionStore, now_iso
+from codepilot.tui_agent.model_picker import ModelPickerResult, ModelPickerScreen
+from codepilot.tui_agent.session_controller import SessionController, now_iso
 
 
 SESSION_LIFECYCLE_COMMANDS = {"sessions", "switch", "new", "archive", "unarchive", "move", "compact", "export-session"}
@@ -45,6 +49,9 @@ def _load_textual():
     return App, ComposeResult, Horizontal, Vertical, VerticalScroll, Footer, Header, Input, Static, TextArea, ModalScreen, Binding
 
 
+logger = logging.getLogger(__name__)
+
+
 def create_tui_agent_app(
     *,
     project: str | Path | None = None,
@@ -52,7 +59,6 @@ def create_tui_agent_app(
     model_config: list[str] | None = None,
     permission_mode: PermissionMode | None = None,
     mcp_config: str | Path | None = None,
-    runs_dir: str | Path | None = None,
     fake_actions: str | Path | None = None,
     max_steps: int | None = None,
     session_database: SessionDatabase | None = None,
@@ -63,7 +69,6 @@ def create_tui_agent_app(
     merged = merge_config(
         cli_model=model,
         cli_permission_mode=permission_mode,
-        cli_runs_dir=runs_dir,
         cli_mcp_config=mcp_config,
         cli_max_steps=max_steps,
         project=project_context,
@@ -72,16 +77,22 @@ def create_tui_agent_app(
     paths = resolve_session_paths(session_database.path.parent if session_database is not None else None)
     database = session_database or SessionDatabase(paths.database_path)
     database.initialize()
+    try:
+        # 启动维护只清理至少一天前、且没有 SQLite 行的 art-* 文件，避免删除仍在落盘的临时产物。
+        ArtifactStore(database, paths).cleanup_orphans(older_than_seconds=24 * 3600)
+    except OSError as exc:
+        # 孤儿清理失败不能阻断数据库和 Session Picker；失败本身留在日志中供维护者处理。
+        logger.warning("Session artifact orphan cleanup failed: %s", exc)
     service = SessionService(database, paths)
     recovery_service = RecoveryService(database)
-    session_store = SessionStore(project_context, database, paths)
+    session_controller = SessionController(project_context, database, paths)
     session = None
     event_stream = MemoryEventStream()
     broker = BlockingTUIBroker()
     runner = TUIAgentRunner(
         project=project_context,
         session=session,
-        session_store=session_store,
+        session_controller=session_controller,
         event_stream=event_stream,
         permission_broker=broker,
         config=TUIRunnerConfig(
@@ -91,7 +102,6 @@ def create_tui_agent_app(
             fake_actions=fake_actions,
             mcp_config=merged.mcp_config,
             max_steps=merged.max_steps,
-            auto_report=merged.auto_report,
         ),
     )
     reducer = EventReducer()
@@ -278,7 +288,7 @@ def create_tui_agent_app(
             self._reducer = reducer
             self._event_stream = event_stream
             self._project_context = project_context
-            self._session_store = session_store
+            self._session_controller = session_controller
             self._session_service = service
             self._recovery_service = recovery_service
             self._compaction_service = compaction_service
@@ -290,6 +300,7 @@ def create_tui_agent_app(
             self._shown_branch_confirmations: set[tuple[str, str | None, str | None, str]] = set()
             self._recovery_scan_pending = False
             self._rendered_transcript_ids: set[str] = set()
+            self._session_generation = 0
             self._auto_scroll = True
             self._last_top_status_text: str | None = None
             self._last_side_status_text: str | None = None
@@ -313,7 +324,12 @@ def create_tui_agent_app(
             # 完成，不能依赖提交后才报错来表达只读状态。
             self.query_one("#task-input", Input).disabled = True
             self._refresh()
-            self.push_screen(SessionPickerScreen(self.session_picker), self._handle_session_picker_result)
+            self._show_session_picker()
+
+        def _show_session_picker(self, notice: str | None = None) -> None:
+            """显示 Picker，并统一绑定关闭回调，避免 Picker 失败后丢失操作入口。"""
+
+            self.push_screen(SessionPickerScreen(self.session_picker, notice=notice), self._handle_session_picker_result)
 
         def _handle_session_picker_result(self, result: SessionPickerResult | None) -> None:
             """处理 Picker 的显式结果；仅 `new` 分支创建 Session。"""
@@ -327,18 +343,69 @@ def create_tui_agent_app(
                 raise ValueError("session picker open result requires session_id")
             self._activate_session(result.session_id)
 
+        def _show_model_picker(self) -> None:
+            """只读读取 mini-swe-agent 模型配置，并打开 TUI 选择器。"""
+
+            model_names = list(get_minisweagent_model_names())
+            for model_name in (self.runner.config.model, self.session.current_model if self.session is not None else None):
+                if model_name and model_name not in model_names:
+                    model_names.append(model_name)
+            self.push_screen(
+                ModelPickerScreen(tuple(model_names), self.session.current_model if self.session is not None else self.runner.config.model),
+                self._handle_model_picker_result,
+            )
+
+        def _change_session_model(self, model_name: str) -> None:
+            """解析并持久化模型切换；模型配置文件仍由 mini-swe-agent 管理。"""
+
+            if self.session is None:
+                raise ValueError("请先在 Session Picker 中打开或新建 Session")
+            identity = resolve_codepilot_model_identity(
+                fake_actions=None,
+                model=model_name,
+                model_config=list(self.runner.config.model_config),
+            )
+            self.session = self._session_service.change_model(
+                self.session.session_id,
+                new_provider=identity.provider,
+                new_model=identity.model,
+            )
+            self.runner.session = self.session
+            self.runner.config = replace(self.runner.config, model=identity.model)
+
+        def _handle_model_picker_result(self, result: ModelPickerResult | None) -> None:
+            """处理模型选择结果；取消或空列表不触碰 Session 和配置。"""
+
+            if result is None or result.action == "cancel" or result.model_name is None:
+                return
+            try:
+                self._change_session_model(result.model_name)
+            except (LookupError, ValueError, RuntimeError, OSError) as exc:
+                self._event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": str(exc), "source": "command"}))
+            else:
+                self._publish_command_output("/model", f"模型已切换为 {result.model_name}")
+            self._drain_events()
+
         def _create_new_session(self) -> None:
             self._project_context = self._new_session_project_context
-            self._session_store = SessionStore(self._project_context, self._session_database, self._session_paths)
-            provider, resolved_model = self.runner.model_identity()
-            created = self._session_store.create_session(
+            self._session_controller = SessionController(self._project_context, self._session_database, self._session_paths)
+            try:
+                provider, resolved_model = self.runner.model_identity()
+            except ModelConfigurationRequired as exc:
+                error = str(exc)
+                self._event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": error, "source": "command/config"}))
+                self._drain_events()
+                # Picker 在回调执行前已经被 Textual 关闭；无模型时没有 Session 可绑定输入框，
+                # 因此必须重新打开 Picker，否则用户只能看到错误却没有任何可继续操作的入口。
+                self._show_session_picker(notice=error)
+                return
+            created = self._session_controller.create_session(
                 model=resolved_model,
                 provider=provider,
                 permission_mode=merged.permission_mode,
                 metadata={
                     "config_source": merged.source,
                     "max_steps": merged.max_steps,
-                    "auto_report": merged.auto_report,
                     "mcp_enabled": merged.mcp_config is not None,
                 },
             )
@@ -364,13 +431,12 @@ def create_tui_agent_app(
                     git_dirty_status="missing",
                     workspace_root=opened.project_path,
                     effective_repo_path=opened.project_path,
-                    default_runs_dir=opened.project_path / "runs",
                     warnings=("project_path_missing",),
                 )
             self._project_context = project_for_session
-            self._session_store = SessionStore(project_for_session, self._session_database, self._session_paths)
+            self._session_controller = SessionController(project_for_session, self._session_database, self._session_paths)
             self._bind_session(
-                self._session_store.load_session(session_id),
+                self._session_controller.load_session(session_id),
                 read_only=opened.read_only or opened.session.status != "active",
             )
             self._handle_recovery_plan(recovery_plan)
@@ -384,25 +450,25 @@ def create_tui_agent_app(
             if result.permission_mode is not None:
                 self.permission_mode = result.permission_mode
                 self.runner.set_permission_mode(result.permission_mode)
-                self.session = self._session_store.update_session(self.session, permission_mode=result.permission_mode)
+                self.session = self._session_controller.update_session(self.session, permission_mode=result.permission_mode)
                 self.runner.session = self.session
             if result.rename_title is not None:
-                self.session = self._session_store.update_session(self.session, title=result.rename_title)
+                self.session = self._session_controller.update_session(self.session, title=result.rename_title)
                 self.runner.session = self.session
             if result.model_name is not None:
-                self.session = self._session_service.change_model(self.session.session_id, self.session.provider, result.model_name)
-                self.runner.session = self.session
-                self.runner.config = replace(self.runner.config, model=result.model_name)
+                self._change_session_model(result.model_name)
+            if result.open_model_picker:
+                self._show_model_picker()
             if result.new_task_requested:
                 self._create_new_session()
             if result.open_session_picker:
-                self.push_screen(SessionPickerScreen(self.session_picker), self._handle_session_picker_result)
+                self._show_session_picker()
             if result.switch_session_id is not None:
                 self._activate_session(result.switch_session_id)
             if result.archive_current_session:
                 self.session = self._session_service.archive_session(self.session.session_id)
-                self._bind_session(self._session_store.load_session(self.session.session_id), read_only=True)
-                self.push_screen(SessionPickerScreen(self.session_picker), self._handle_session_picker_result)
+                self._bind_session(self._session_controller.load_session(self.session.session_id), read_only=True)
+                self._show_session_picker()
             if result.unarchive_session_id is not None:
                 self._session_service.unarchive_session(result.unarchive_session_id)
             if result.compact_requested:
@@ -463,28 +529,9 @@ def create_tui_agent_app(
                 return
             self._handle_recovery_plan(self._recovery_service.inspect_session(self.session.session_id))
 
-        def _bind_session(self, selected_session, *, read_only: bool) -> None:
-            """让 App、Runner 和输入状态同时切换到同一个 SQLite Session。"""
+        def _reset_session_view(self, hydrated) -> None:
+            """用 Hydration 快照重建 View，并清理所有只属于旧 Session 的内存状态。"""
 
-            self.session = selected_session
-            self.permission_mode = selected_session.permission_mode
-            self._session_read_only = read_only
-            transcript_panel = self.query_one("#transcript", VerticalScroll)
-            if hasattr(transcript_panel, "clear"):
-                transcript_panel.clear()
-            elif hasattr(transcript_panel, "mounted"):
-                transcript_panel.mounted.clear()
-            self.runner.project = self._project_context
-            self.runner.session_store = self._session_store
-            self.runner.session = selected_session
-            self.runner.active_session_id = selected_session.session_id
-            self.runner.config = replace(self.runner.config, model=selected_session.current_model)
-            self.runner.set_permission_mode(selected_session.permission_mode)
-            self.query_one("#task-input", Input).disabled = read_only
-            self._last_top_status_text = None
-            self._last_side_status_text = None
-            hydrated = hydrate_session_view(self._session_store, selected_session.session_id)
-            # Session 切换必须从空 View 开始，避免上一 Session 的证据、测试和完成状态串线。
             self._reducer.view = AgentRunView(
                 run_id=hydrated.run_id,
                 task=hydrated.task,
@@ -499,9 +546,6 @@ def create_tui_agent_app(
                 changed_files=hydrated.changed_files,
                 test_status=hydrated.test_status,
                 permission_requests=hydrated.permission_requests,
-                report_path=hydrated.report_path,
-                report_json_path=hydrated.report_json_path,
-                trace_path=hydrated.trace_path,
                 warnings=hydrated.warnings,
             )
             self._shown_permission_request_ids = {
@@ -509,8 +553,47 @@ def create_tui_agent_app(
             }
             self._shown_branch_confirmations.clear()
             self._recovery_scan_pending = False
-            self._rendered_transcript_ids = {item.id for item in hydrated.transcript}
-            self._refresh()
+            self._last_top_status_text = None
+            self._last_side_status_text = None
+
+        def _replace_transcript_dom(self) -> None:
+            """清空旧 DOM；新消息的 ID 只在后续 mount 成功后登记。"""
+
+            transcript_panel = self.query_one("#transcript", VerticalScroll)
+            if hasattr(transcript_panel, "remove_children"):
+                transcript_panel.remove_children()
+            elif hasattr(transcript_panel, "clear"):
+                transcript_panel.clear()
+            elif hasattr(transcript_panel, "mounted"):
+                transcript_panel.mounted.clear()
+            self._rendered_transcript_ids.clear()
+
+        def _bind_session(self, selected_session, *, read_only: bool) -> None:
+            """让 App、Runner 和输入状态同时切换到同一个 SQLite Session。"""
+
+            self._session_generation += 1
+            generation = self._session_generation
+            self.session = selected_session
+            self.permission_mode = selected_session.permission_mode
+            self._session_read_only = read_only
+            self._replace_transcript_dom()
+            self.runner.project = self._project_context
+            self.runner.session_controller = self._session_controller
+            self.runner.session = selected_session
+            self.runner.active_session_id = selected_session.session_id
+            self.runner.config = replace(self.runner.config, model=selected_session.current_model)
+            self.runner.set_permission_mode(selected_session.permission_mode)
+            self.query_one("#task-input", Input).disabled = read_only
+            hydrated = hydrate_session_view(self._session_controller.store, selected_session.session_id)
+            self._reset_session_view(hydrated)
+            if hasattr(self, "call_after_refresh"):
+                self.call_after_refresh(lambda: self._append_new_transcript_items(generation))
+                self._refresh_top_status()
+                self._refresh_side_status()
+            else:
+                self._append_new_transcript_items(generation)
+                self._refresh_top_status()
+                self._refresh_side_status()
 
         def _top_status_text(self) -> str:
             return format_header(self._project_context, self.session, self._reducer.view, self.permission_mode).replace("\n", " | ")
@@ -529,7 +612,9 @@ def create_tui_agent_app(
             self.query_one("#side-status", SelectableStatic).update(text)
             self._last_side_status_text = text
 
-        def _append_new_transcript_items(self) -> None:
+        def _append_new_transcript_items(self, generation: int | None = None) -> None:
+            if generation is not None and generation != self._session_generation:
+                return
             panel = self.query_one("#transcript", VerticalScroll)
             should_auto_scroll = self._auto_scroll and getattr(panel, "is_vertical_scroll_end", True)
             for item in self._reducer.view.transcript:
@@ -650,7 +735,10 @@ def create_tui_agent_app(
                 if text.startswith("/"):
                     command, _ = parse_slash_command(text)
                     if command == "sessions":
-                        self.push_screen(SessionPickerScreen(self.session_picker), self._handle_session_picker_result)
+                        self._show_session_picker()
+                        return
+                    if command == "model":
+                        self._show_model_picker()
                         return
                     if command == "new":
                         self._create_new_session()
@@ -724,4 +812,5 @@ def _changes_session_lifecycle(result: Any) -> bool:
         or result.next_new_session_project is not None
         or result.compact_requested
         or result.model_name is not None
+        or result.open_model_picker
     )

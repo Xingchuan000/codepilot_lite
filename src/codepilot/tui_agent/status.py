@@ -18,11 +18,9 @@ def format_project_status(context: ProjectContext) -> str:
         f"Project: {context.resolved_project}",
         f"Git: {context.git_root or 'non-git'} ({context.git_dirty_status})",
         f"Workspace: {context.workspace_root}",
-        f"Runs: {context.default_runs_dir}",
         f"MCP: {mcp_label(context.mcp_config_path)}",
     ]
     if context.warnings:
         lines.append("Warnings:")
         lines.extend(f"- {warning}" for warning in context.warnings)
     return "\n".join(lines)
-

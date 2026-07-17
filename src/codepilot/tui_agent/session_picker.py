@@ -80,17 +80,21 @@ class SessionPickerScreen(ModalScreen[SessionPickerResult]):
     }
     """
 
-    def __init__(self, picker: SessionPicker, include_archived: bool = False) -> None:
+    def __init__(self, picker: SessionPicker, include_archived: bool = False, notice: str | None = None) -> None:
         super().__init__()
         self.picker = picker
         self.include_archived = include_archived
+        self.notice = notice
 
     def items(self) -> list[SessionPickerItem]:
         return self.picker.items(include_archived=self.include_archived)
 
     def compose(self) -> ComposeResult:
         with Vertical(id="session-picker-panel"):
-            yield Static("Session Picker | Enter 打开 | n 新建 | a 显示/隐藏归档 | Esc 取消", id="session-picker-help")
+            help_text = "Session Picker | Enter 打开 | n 新建 | a 显示/隐藏归档 | Esc 取消"
+            if self.notice:
+                help_text += f"\n{self.notice}"
+            yield Static(help_text, id="session-picker-help")
             yield DataTable(id="session-picker-table", cursor_type="row")
 
     def on_mount(self) -> None:

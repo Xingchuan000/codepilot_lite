@@ -18,7 +18,6 @@ def _project(tmp_path: Path) -> ProjectContext:
         git_dirty_status="clean",
         workspace_root=tmp_path,
         effective_repo_path=tmp_path,
-        default_runs_dir=tmp_path / "runs",
     )
 
 
@@ -104,3 +103,16 @@ def test_exit_command_requests_exit(tmp_path: Path) -> None:
     )
 
     assert result.exit_requested is True
+
+
+def test_model_command_without_argument_opens_model_picker(tmp_path: Path) -> None:
+    result = handle_command(
+        "/model",
+        view=AgentRunView(),
+        project=_project(tmp_path),
+        session=_session(tmp_path),
+        permission_mode="manual",
+    )
+
+    assert result.open_model_picker is True
+    assert result.model_name is None

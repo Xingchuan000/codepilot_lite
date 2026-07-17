@@ -30,6 +30,7 @@ class CommandResult:
     export_target: Path | None = None
     next_new_session_project: Path | None = None
     model_name: str | None = None
+    open_model_picker: bool = False
 
 def parse_slash_command(text: str) -> tuple[str, list[str]]:
     parts = text.strip().split()
@@ -50,7 +51,7 @@ def handle_command(
     if not command:
         return CommandResult(handled=False)
     if command == "help":
-        return CommandResult(handled=True, output="/help /sessions /new /switch <session-id> /rename <title> /model <model-name> /archive /unarchive <session-id> /compact /export-session [path] /cancel /exit")
+        return CommandResult(handled=True, output="/help /sessions /new /switch <session-id> /rename <title> /model [model-name] /archive /unarchive <session-id> /compact /export-session [path] /cancel /exit")
     if command == "sessions":
         return CommandResult(handled=True, output="Session picker requested", open_session_picker=True)
     if command == "switch":
@@ -60,7 +61,12 @@ def handle_command(
         return CommandResult(handled=True, output="Session rename requested" if title else "Usage: /rename <title>", rename_title=title or None)
     if command == "model":
         model = " ".join(args).strip()
-        return CommandResult(handled=True, output="Session model change requested" if model else "Usage: /model <model-name>", model_name=model or None)
+        return CommandResult(
+            handled=True,
+            output="Session model change requested" if model else "Model picker requested",
+            model_name=model or None,
+            open_model_picker=not model,
+        )
     if command == "archive":
         return CommandResult(handled=True, output="Session archive requested", archive_current_session=True)
     if command == "unarchive":
@@ -95,27 +101,9 @@ def handle_command(
     if command == "diff":
         return CommandResult(handled=True, output=format_diff_summary(view))
     if command == "report":
-        return CommandResult(
-            handled=True,
-            output="\n".join(
-                [
-                    f"Report: {view.report_path or 'none'}",
-                    f"Report JSON: {view.report_json_path or 'none'}",
-                    f"Trace: {view.trace_path or 'none'}",
-                ]
-            ),
-        )
+        return CommandResult(handled=True, output="Session 模式不生成独立 Report/Trace，请使用 /export-session 导出 SQLite 快照。")
     if command == "trace":
-        return CommandResult(
-            handled=True,
-            output="\n".join(
-                [
-                    f"Trace: {view.trace_path or 'none'}",
-                    f"Report: {view.report_path or 'none'}",
-                    f"Report JSON: {view.report_json_path or 'none'}",
-                ]
-            ),
-        )
+        return CommandResult(handled=True, output="Session 模式不生成独立 Trace，请使用 /export-session 导出 SQLite 快照。")
     if command == "copy":
         target = args[0].lower() if args else "all"
         if target not in {"all", "last", "errors"}:

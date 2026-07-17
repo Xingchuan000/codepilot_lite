@@ -60,11 +60,11 @@ class SessionService:
     def unarchive_session(self, session_id: str) -> SessionRecord:
         return self.store.unarchive_session(session_id)
 
-    def change_model(self, session_id: str, provider: str, model: str) -> SessionRecord:
+    def change_model(self, session_id: str, *, new_provider: str, new_model: str) -> SessionRecord:
         session = self.store.get_session(session_id)
-        if provider != session.provider:
-            raise CrossProviderSwitchNotSupported(f"cannot switch {session.provider} session to {provider}")
-        return self.store.update_session(session_id, current_model=model)
+        if new_provider != session.provider:
+            raise CrossProviderSwitchNotSupported(f"cannot switch {session.provider} session to {new_provider}")
+        return self.store.update_session(session_id, current_model=new_model)
 
     def validate_branch_before_turn(self, session_id: str) -> BranchCheckResult:
         opened = self.open_session(session_id)

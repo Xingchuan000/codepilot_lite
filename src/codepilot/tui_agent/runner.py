@@ -5,11 +5,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from codepilot.agent.runner import build_codepilot_llm
+from codepilot.agent.runner import build_codepilot_llm, resolve_codepilot_model_identity
 from codepilot.permissions import PermissionResponse
 from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
+from codepilot.router.errors import ToolExecutionUncertainError
 from codepilot.session.models import BranchConfirmationRequired, PendingTurnSubmission, SessionRecord
 from codepilot.session.permission import SessionPermissionBroker
 from codepilot.session.runtime import SessionRuntime
@@ -17,7 +18,7 @@ from codepilot.trace.events import TraceEvent
 from codepilot.tui_agent.event_stream import MemoryEventStream, trace_event_to_tui_event
 from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent
 from codepilot.tui_agent.permission_broker import AutoApproveLocalWriteBroker, PermissionBroker, NonInteractiveBroker
-from codepilot.tui_agent.session_controller import SessionController as SessionStore, now_iso
+from codepilot.tui_agent.session_controller import SessionController, now_iso
 
 
 class CancellationToken:
@@ -39,7 +40,6 @@ class TUIRunnerConfig:
     fake_actions: str | Path | None
     mcp_config: str | Path | None
     max_steps: int
-    auto_report: bool = False
 
 
 RunnerFailureSource = Literal["runner_setup", "agent_runtime"]
@@ -57,10 +57,10 @@ def _policy_context_for_mode(mode: PermissionMode, repo: Path) -> PolicyContext:
 class TUIAgentRunner:
     """TUI 到 SessionRuntime 的单线程适配器，不拥有第二份 Session 状态。"""
 
-    def __init__(self, *, project: ProjectContext, session: SessionRecord | None, session_store: SessionStore, event_stream: MemoryEventStream, permission_broker: PermissionBroker | None, config: TUIRunnerConfig) -> None:
+    def __init__(self, *, project: ProjectContext, session: SessionRecord | None, session_controller: SessionController, event_stream: MemoryEventStream, permission_broker: PermissionBroker | None, config: TUIRunnerConfig) -> None:
         self.project = project
         self.session = session
-        self.session_store = session_store
+        self.session_controller = session_controller
         self.event_stream = event_stream
         self.base_permission_broker = permission_broker or NonInteractiveBroker()
         self.mode_permission_broker = self.base_permission_broker
@@ -83,9 +83,14 @@ class TUIAgentRunner:
         mcp_registry = MCPToolRegistry.from_config(self.config.mcp_config) if self.config.mcp_config else None
         policy_checker = PolicyChecker.default(extra_tool_specs={item.name: item for item in mcp_registry.list_specs()}) if mcp_registry else PolicyChecker.default()
         built_llm = build_codepilot_llm(fake_actions=self.config.fake_actions, model=self.config.model, model_config=list(self.config.model_config))
+        if self.session is not None and (built_llm.provider, built_llm.model) != (self.session.provider, self.session.current_model):
+            raise ValueError(
+                "模型身份与 Session 快照不一致："
+                f"{built_llm.provider}/{built_llm.model} != {self.session.provider}/{self.session.current_model}"
+            )
         self.mode_permission_broker = AutoApproveLocalWriteBroker(self.base_permission_broker) if self.config.permission_mode == "accept_edits" else self.base_permission_broker
         if self.active_session_id is not None:
-            self.session_permission_broker = SessionPermissionBroker(self.session_store.database, self.active_session_id, self.mode_permission_broker)
+            self.session_permission_broker = SessionPermissionBroker(self.session_controller.database, self.active_session_id, self.mode_permission_broker)
             self.permission_broker = self.session_permission_broker
         else:
             self.session_permission_broker = None
@@ -100,23 +105,30 @@ class TUIAgentRunner:
                 permission_broker=self.permission_broker,
             )
 
-        return SessionRuntime(self.session_store.database, built_llm.client, router_factory, max_steps=self.config.max_steps, trace_hook=self._publish_trace_event)
+        return SessionRuntime(
+            self.session_controller.database,
+            built_llm.client,
+            router_factory,
+            max_steps=self.config.max_steps,
+            trace_hook=self._publish_trace_event,
+            capabilities=getattr(built_llm, "capabilities", None),
+        )
 
     def model_identity(self) -> tuple[str, str]:
-        """返回当前配置解析出的真实模型身份，用于创建新 Session。"""
+        """返回纯解析得到的模型身份，不构造真实模型客户端。"""
 
-        built_llm = build_codepilot_llm(
+        identity = resolve_codepilot_model_identity(
             fake_actions=self.config.fake_actions,
             model=self.config.model,
             model_config=list(self.config.model_config),
         )
-        return built_llm.provider, built_llm.model
+        return identity.provider, identity.model
 
     def _session_broker(self) -> SessionPermissionBroker:
         if self.active_session_id is None:
             raise RuntimeError("select or create a session before accessing permission state")
         if self.session_permission_broker is None or self.session_permission_broker.session_id != self.active_session_id:
-            self.session_permission_broker = SessionPermissionBroker(self.session_store.database, self.active_session_id, self.mode_permission_broker)
+            self.session_permission_broker = SessionPermissionBroker(self.session_controller.database, self.active_session_id, self.mode_permission_broker)
         self.permission_broker = self.session_permission_broker
         return self.session_permission_broker
 
@@ -124,7 +136,7 @@ class TUIAgentRunner:
         self.config = replace(self.config, permission_mode=mode)
         self.mode_permission_broker = AutoApproveLocalWriteBroker(self.base_permission_broker) if mode == "accept_edits" else self.base_permission_broker
         if self.active_session_id is not None:
-            self.session_permission_broker = SessionPermissionBroker(self.session_store.database, self.active_session_id, self.mode_permission_broker)
+            self.session_permission_broker = SessionPermissionBroker(self.session_controller.database, self.active_session_id, self.mode_permission_broker)
             self.permission_broker = self.session_permission_broker
             return
         self.permission_broker = self.mode_permission_broker
@@ -170,6 +182,14 @@ class TUIAgentRunner:
             self.active_turn_id = turn_id
             execution = runtime.run_turn(turn_id, attempt_id, self.cancellation_token)
             self.event_stream.publish(TUIEvent(type="run_finished", timestamp=now_iso(), session_id=self.active_session_id, payload={"status": execution.result.status, "success": execution.result.success, "turn_id": turn_id, "attempt_id": attempt_id}))
+        except ToolExecutionUncertainError as exc:
+            self._publish_worker_failure(
+                session_id=self.active_session_id,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+                error=exc,
+                status="recovery_required",
+            )
         except Exception as exc:
             self._publish_worker_failure(
                 session_id=self.active_session_id,
@@ -200,6 +220,16 @@ class TUIAgentRunner:
     ) -> None:
         """统一发布失败终态，让 App 能结束 running 状态并重新扫描恢复计划。"""
 
+        if status == "recovery_required":
+            # 未知副作用不是普通可重试错误；先发布专用事件，让 UI 直接进入 Recovery 流程。
+            self.event_stream.publish(
+                TUIEvent(
+                    type="tool_execution_uncertain",
+                    timestamp=now_iso(),
+                    session_id=session_id,
+                    payload={"error": str(error), "turn_id": turn_id, "attempt_id": attempt_id},
+                )
+            )
         self.event_stream.publish(
             TUIEvent(
                 type="error",

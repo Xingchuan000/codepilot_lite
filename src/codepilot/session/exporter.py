@@ -63,6 +63,10 @@ class SessionExporter:
                     "schema_version": "codepilot.session.export.v2",
                     "session_id": session_id,
                     "exported_at": timestamp,
+                    "session_status_at_snapshot": session["status"],
+                    "active_turn_ids": [row["turn_id"] for row in turns if row["status"] in {"queued", "running", "waiting_permission", "recovery_required"}],
+                    "snapshot_schema_version": "codepilot.session.export.v2",
+                    "artifact_verification_status": "verified",
                     "files": [{"relative_path": path.relative_to(staging_dir).as_posix(), "size_bytes": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for path in sorted(files)],
                 },
             )

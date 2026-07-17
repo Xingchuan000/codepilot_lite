@@ -76,10 +76,8 @@ def resolve_project(project: str | Path | None = None) -> ProjectContext:
         git_dirty_status=git_dirty_status,
         workspace_root=workspace_root,
         effective_repo_path=workspace_root,
-        default_runs_dir=workspace_root / "runs",
         project_config_path=project_config_path if project_config_path.exists() else None,
         mcp_config_path=mcp_config_path if mcp_config_path.exists() else None,
         instructions_files=instructions_files,
         warnings=tuple(warnings),
     )
-

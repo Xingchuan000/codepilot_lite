@@ -63,6 +63,7 @@ TUIEventType = Literal[
     "test_status_changed",
     "file_changed",
     "run_finished",
+    "tool_execution_uncertain",
     "run_cancelled",
     "command_output",
     "user_message",
@@ -80,7 +81,6 @@ class ProjectContext:
     git_dirty_status: str
     workspace_root: Path
     effective_repo_path: Path
-    default_runs_dir: Path
     project_config_path: Path | None = None
     mcp_config_path: Path | None = None
     instructions_files: tuple[Path, ...] = ()
@@ -154,9 +154,6 @@ class AgentRunView:
     diff_checked: bool | None = None
     missing_evidence: tuple[str, ...] = ()
     permission_requests: tuple[PermissionRequest, ...] = ()
-    report_path: str | None = None
-    report_json_path: str | None = None
-    trace_path: str | None = None
     warnings: tuple[str, ...] = ()
 
 

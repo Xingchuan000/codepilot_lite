@@ -8,7 +8,7 @@ from codepilot.session.database import SessionDatabase
 from codepilot.tui_agent import app as app_module
 from codepilot.tui_agent.app import create_tui_agent_app
 from codepilot.tui_agent.models import TUIEvent
-from codepilot.tui_agent.session_store import now_iso
+from codepilot.tui_agent.session_controller import now_iso
 
 
 class _FakeWidget:

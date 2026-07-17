@@ -457,6 +457,38 @@ TUI、Runner、Picker 和 Exporter 共用 `resolve_session_paths()` 返回的用
 
 Session Runtime 的事实来源始终是 SQLite；旧的文件型 Trace/Report 仍只服务于非 Session 的 `agent-run`、GitHub/PR/CI 等既有入口。Session 导出文件不能被当作恢复状态，也不会在正常 Session 运行时自动生成。
 
+### Phase 1–2 Session 使用说明
+
+TUI 新建 Session 时只解析模型身份，不会为了显示 Provider/Model 提前构造真实模型客户端。模型来源按以下顺序选择：`--model`、`--model-config` 中的 `model.model_name`、mini-swe-agent 的 `get_model_name()`（包括其全局 `.env` 中的 `MSWEA_MODEL_NAME`）。因此不传 `--model` 时，TUI 会自动复用 mini-swe-agent 当前默认模型，例如 `deepseek/deepseek-v4-flash`。所有来源都没有时，新建操作会在 Picker 中显示配置提示，不写入半创建的 Session：
+
+```text
+尚未配置模型。请使用 --model、model config 或 MSWEA_MODEL_NAME 后再新建 Session。
+```
+
+例如：
+
+```bash
+codepilot tui --model openai/gpt-4o-mini
+codepilot tui --model-config 'model.model_name=anthropic/claude-sonnet-4-5-20250929'
+MSWEA_MODEL_NAME=gpt-4o-mini codepilot tui
+```
+
+如果在未配置模型时按 `n`，Picker 会保留在界面上，并在顶部显示上述配置提示；该操作不会关闭 Picker，也不会创建半成品 Session。请按提示通过启动参数、model config 或环境变量配置模型后重新启动 TUI，再按 `n` 新建 Session。
+
+输入 `/model` 会打开只读模型选择器，列表来自 mini-swe-agent 当前可用模型；选择后仍由 Session Service 校验，只有同 Provider 的模型可以切换。模型选择器不会新增或删除模型，模型配置维护继续使用 mini-swe-agent。直接输入 `/model <model-name>` 仍支持显式切换；切换失败时 SQLite 和当前 Runner 配置都保持原值。实际运行 Turn 前还会再次核对构造出的模型身份与 Session 快照，避免调用错误模型。
+
+打开或切换 Session 时，界面会从 SQLite 重新 Hydrate Transcript，并清空旧 Session 的渲染 ID、权限提示和状态缓存。历史消息只在对应组件成功 mount 后登记，因此 Session A/B 切换不会空白、重复或串线；延迟渲染回调也会通过 Session generation 丢弃旧 Session 的消息。
+
+### Phase 3–7 Session 使用说明
+
+Session Runtime 在每次模型调用前根据 `ContextPlan` 规划上下文：System Prompt、分支事件、当前 User Message、当前 Turn 的完整工具事实和未解决 Tool Call 属于不可拆分的必需项；旧历史只能按完整消息组从新到旧加入。预算不足时会抛出明确的 `ContextBudgetExceeded`，不会截断 User Message、Tool JSON 或只保留 Tool Call/Tool Result 的一半，因此该 Turn 会阻断并写入恢复状态。
+
+Compact 只统计当前有效上下文，不重复计算已经被最新 Summary 覆盖的 SQLite 原文。摘要创建、Summary Message、旧摘要失效和 `context_compacted` Event 在同一事务中完成；失败时旧 Summary 仍保持有效。最近一次文件修改、测试结果、Diff、未解决工具链、Artifact 引用和关键 Session Event 会分别保留，Compact 后可继续运行。
+
+模型能力会随真实构造结果保存到 Turn metadata，包括输入/输出预算、reasoning 格式和能力来源；未知模型使用保守窗口。未知副作用会直接进入 `recovery_required`，而不是展示为普通 `interrupted`。TUI 启动时会尝试清理超过 24 小时且没有 SQLite 记录的 `art-*` 孤儿文件，清理失败只记录日志，不影响打开 Session。
+
+Phase 7 已移除 Interactive Session TUI 的 `runs_dir`、独立 Trace/Report 状态和 `session_store.py` 兼容别名。Session 模式中的 `/trace`、`/report` 会提示使用 `/export-session`；正常运行不会自动生成 JSON/JSONL Trace 或 Report。导出 manifest 会记录快照时 Session 状态、活动 Turn、快照 Schema 版本和 Artifact 校验状态。
+
 Step12 已将 TUI 的 Session 主类型切换为 SQLite `SessionRecord`，`TUIAgentRunner` 通过 `SessionRuntime` 创建 Turn/Attempt，不再构造 `TraceLogger` 或调用 `generate_report()`。旧的 Run 索引写入接口已移除，避免旧调用悄悄重新写入 JSON。
 
 这次还把大输出统一切到 artifact 入口：消息分片和 Tool Result 现在只保留 `preview` 和 `artifact_id`，完整内容会落到 Session artifact store。想查看完整文本时，可以直接用 `ArtifactStore.read_text(artifact_id)` 读取；TUI 默认显示的是 preview。

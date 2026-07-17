@@ -15,7 +15,6 @@ def test_project_config_applies_when_cli_values_are_none(tmp_path: Path) -> None
     config = merge_config(
         cli_model=None,
         cli_permission_mode=None,
-        cli_runs_dir=None,
         cli_mcp_config=None,
         cli_max_steps=None,
         project=resolve_project(tmp_path),
@@ -33,7 +32,6 @@ def test_cli_values_override_project_config(tmp_path: Path) -> None:
     config = merge_config(
         cli_model=None,
         cli_permission_mode="accept_edits",
-        cli_runs_dir=None,
         cli_mcp_config=None,
         cli_max_steps=7,
         project=resolve_project(tmp_path),
@@ -51,7 +49,6 @@ def test_project_config_preserves_zero_max_steps(tmp_path: Path) -> None:
     config = merge_config(
         cli_model=None,
         cli_permission_mode=None,
-        cli_runs_dir=None,
         cli_mcp_config=None,
         cli_max_steps=None,
         project=resolve_project(tmp_path),

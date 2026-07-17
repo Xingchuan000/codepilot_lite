@@ -152,7 +152,6 @@ def _reduce_run_started(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         run_id=event.run_id or view.run_id,
         task=str(payload.get("task") or view.task),
         status="running",
-        trace_path=payload.get("trace_path") or view.trace_path,
     )
 
 
@@ -384,9 +383,6 @@ def _finish_view_from_payload(view: AgentRunView, payload: dict[str, Any], *, va
     return replace(
         view,
         status=status_text,
-        trace_path=payload.get("trace_path") or view.trace_path,
-        report_path=payload.get("report_path") or view.report_path,
-        report_json_path=payload.get("report_json_path") or view.report_json_path,
         changed_files=_string_tuple_or_current(payload.get("changed_files"), view.changed_files),
         test_status=str(payload.get("test_status")) if isinstance(payload.get("test_status"), str) else view.test_status,
         completion_kind=str(payload.get("completion_kind")) if isinstance(payload.get("completion_kind"), str) else view.completion_kind,
@@ -564,6 +560,8 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         return _reduce_agent_finished(view, event)
     if event.type == "run_finished":
         return _reduce_run_finished(view, event)
+    if event.type == "tool_execution_uncertain":
+        return replace(view, status="recovery_required", warnings=view.warnings + ("tool_execution_uncertain",))
     if event.type == "run_cancelled":
         return replace(view, status="cancelled")
     if event.type == "command_output":

@@ -17,7 +17,7 @@ from codepilot.session.context import ContextAssembler
 from codepilot.session.database import SessionDatabase
 from codepilot.session.git_context import read_git_context
 from codepilot.session.models import BranchConfirmationRequired, TurnRecord, TurnSubmission
-from codepilot.session.model_capabilities import resolve_model_context_profile
+from codepilot.session.model_capabilities import ModelCapabilities, resolve_model_context_profile
 from codepilot.session.permission import PermissionRequestContext
 from codepilot.session.service import SessionService
 from codepilot.session.store import SessionStore
@@ -41,7 +41,7 @@ class TurnExecutionResult:
 class SessionRuntime:
     """把 Session 持久化生命周期接到现有单线程 AgentLoop。"""
 
-    def __init__(self, database: SessionDatabase, llm: CodePilotLLMClient, router_factory: Callable[[Any], ToolRouter], max_steps: int = 12, trace_hook: Callable[[Any], None] | None = None) -> None:
+    def __init__(self, database: SessionDatabase, llm: CodePilotLLMClient, router_factory: Callable[[Any], ToolRouter], max_steps: int = 12, trace_hook: Callable[[Any], None] | None = None, capabilities: ModelCapabilities | None = None) -> None:
         self.database = database
         self.store = SessionStore(database)
         self.service = SessionService(database)
@@ -51,6 +51,7 @@ class SessionRuntime:
         self.router_factory = router_factory
         self.max_steps = max_steps
         self.trace_hook = trace_hook
+        self.capabilities = capabilities
 
     def submit_user_message(
         self,
@@ -125,10 +126,30 @@ class SessionRuntime:
             user_message = self.store.get_user_message_for_turn(turn_id)
             if user_message is None:
                 raise LookupError(turn_id)
-            profile = resolve_model_context_profile(turn.provider_snapshot, turn.model_snapshot)
+            profile = resolve_model_context_profile(turn.provider_snapshot, turn.model_snapshot, self.capabilities)
+            self.store.update_turn_metadata(
+                turn_id,
+                {
+                    "max_input_tokens": profile.max_input_tokens,
+                    "max_output_tokens": profile.max_output_tokens,
+                    "reasoning_format": profile.reasoning_format,
+                    "capability_source": profile.capability_source,
+                },
+            )
+            if profile.capability_source == "conservative_unknown_model" and not any(
+                event.event_type == "model_capability_fallback" and event.turn_id == turn_id
+                for event in self.store.list_events(session.session_id)
+            ):
+                self.store.append_event(
+                    session_id=session.session_id,
+                    event_type="model_capability_fallback",
+                    payload={"provider": profile.provider, "model": profile.model, "max_input_tokens": profile.max_input_tokens},
+                    turn_id=turn_id,
+                    metadata={"source": profile.capability_source},
+                )
             try:
                 self.compaction_service.ensure_context_budget(session.session_id, turn_id, profile)
-                context = self.assembler.build(session.session_id, turn_id, turn.provider_snapshot, turn.model_snapshot)
+                context = self.assembler.build(session.session_id, turn_id, turn.provider_snapshot, turn.model_snapshot, profile=profile)
             except Exception:
                 self.store.interrupt_turn_attempt(turn_id, attempt_id, "context compaction failed", worker_id=worker_id)
                 self.store.update_turn_status(turn_id, "recovery_required")
