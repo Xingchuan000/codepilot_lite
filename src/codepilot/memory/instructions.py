@@ -21,10 +21,15 @@ class ProjectInstructionLoader:
             path = root / relative_path
             if not path.is_file():
                 continue
-            content = path.read_bytes()[: self.max_bytes]
-            digest = sha256(content).hexdigest()
+            content = _read_preview(path, self.max_bytes)
+            digest = _sha256_file(path)
+            size = path.stat().st_size
             cached = self.repository.latest(project_id, relative_path)
-            if cached is not None and cached.sha256 == digest:
+            if (
+                cached is not None
+                and cached.sha256 == digest
+                and {"source_size_bytes", "loaded_bytes"} <= cached.content.keys()
+            ):
                 records.append(cached)
                 continue
             records.append(
@@ -33,7 +38,25 @@ class ProjectInstructionLoader:
                     relative_path,
                     kind,
                     digest,
-                    {"text": content.decode("utf-8", errors="replace"), "truncated": path.stat().st_size > self.max_bytes},
+                    {
+                        "text": content.decode("utf-8", errors="replace"),
+                        "truncated": size > self.max_bytes,
+                        "source_size_bytes": size,
+                        "loaded_bytes": len(content),
+                    },
                 )
             )
         return records
+
+
+def _sha256_file(path: Path, chunk_size: int = 64 * 1024) -> str:
+    digest = sha256()
+    with path.open("rb") as handle:
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_preview(path: Path, max_bytes: int) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(max_bytes)

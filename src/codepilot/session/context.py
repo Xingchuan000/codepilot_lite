@@ -58,7 +58,7 @@ class ContextAssembler:
             summaries=summaries,
             messages=_messages_for_turn(self.store, session_id, turn.sequence),
             branch_events=tuple(_branch_messages(self.store, session_id, turn.sequence)),
-            instruction_items=self.memory.instruction_items(session.project_id, project_path),
+            instruction_items=self.memory.instruction_items(session.project_id, project_path, profile),
             memory_items=self.memory.memory_items(
                 session.project_id,
                 self.memory_query.build(
