@@ -5,7 +5,7 @@ from pathlib import Path
 
 from codepilot.llm.fake import FakeLLMClient
 from codepilot.memory.models import SessionSummaryContent
-from codepilot.memory.summarizer import LLMSummaryGenerator
+from codepilot.memory.summarizer import LLMSummaryGenerator, SessionSummaryEvidence, merge_llm_summary
 from codepilot.session.compaction import CompactionService
 from codepilot.session.database import SessionDatabase
 from codepilot.session.store import SessionStore
@@ -236,3 +236,19 @@ def test_cumulative_compaction_scrubs_unsafe_previous_summary_and_audits_counts(
     event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_summary_redacted")
     assert set(event.payload) == {"redaction_count", "message_count"}
     assert secret not in str(event.payload)
+
+
+def test_merge_llm_summary_treats_empty_work_lists_as_current_state() -> None:
+    previous = SessionSummaryContent(
+        confirmed_decisions=("keep SQLite",),
+        unresolved_work=("fix A",),
+        next_actions=("test A",),
+    )
+    proposed = SessionSummaryContent(task_goal="Done", unresolved_work=(), next_actions=())
+    evidence = SessionSummaryEvidence((), (), (), (), (), (), {}, "", "")
+
+    merged = merge_llm_summary(previous, proposed, evidence)
+
+    assert merged.unresolved_work == ()
+    assert merged.next_actions == ()
+    assert merged.confirmed_decisions == ("keep SQLite",)

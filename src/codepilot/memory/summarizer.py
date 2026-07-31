@@ -132,6 +132,7 @@ class StructuredSummaryGenerator:
             test_results=_field_merge("test_results", previous.test_results, evidence.test_results),
             diff_status=evidence.diff_status or previous.diff_status,
             errors_and_failures=_field_merge("errors_and_failures", previous.errors_and_failures, evidence.errors_and_failures),
+            # Deterministic evidence cannot prove that user-level work is resolved.
             unresolved_work=previous.unresolved_work,
             next_actions=previous.next_actions,
             branch=evidence.branch or previous.branch,
@@ -166,7 +167,9 @@ class LLMSummaryGenerator:
                     "Return exactly one JSON object matching the supplied schema. Infer only task_goal, "
                     "user_constraints, confirmed_decisions, repository_facts, unresolved_work and next_actions "
                     "from conversation. Never invent files, commands, tests, Git facts, or secrets. Preserve "
-                    "still-valid previous facts and omit uncertain claims.",
+                    "still-valid previous facts and omit uncertain claims. unresolved_work and next_actions "
+                    "are complete current-state snapshots: remove resolved old items and return an empty array "
+                    "when no unresolved work or next action remains.",
                 ),
                 ChatMessage(
                     "user",
@@ -176,6 +179,20 @@ class LLMSummaryGenerator:
                             "deterministic_evidence": _evidence_dict(evidence),
                             "conversation_excerpt": evidence.messages,
                             "output_limits": _LIMITS,
+                            "merge_semantics": {
+                                "cumulative_fields": [
+                                    "user_constraints",
+                                    "confirmed_decisions",
+                                    "repository_facts",
+                                    "files_read",
+                                    "files_modified",
+                                    "commands_run",
+                                    "test_results",
+                                    "errors_and_failures",
+                                    "source_message_ids",
+                                ],
+                                "snapshot_fields": ["task_goal", "unresolved_work", "next_actions"],
+                            },
                             "schema": SessionSummaryContent().to_dict(),
                             "max_output_tokens": max_output_tokens,
                         },
@@ -187,29 +204,47 @@ class LLMSummaryGenerator:
         proposed = SessionSummaryContent.from_dict(json.loads(response.content))
         proposed = SessionSummaryContent.from_dict(sanitize_memory_content(proposed.to_dict())[0])
         previous = SessionSummaryContent.from_dict(safe_previous) if safe_previous else SessionSummaryContent()
-        value = SessionSummaryContent(
-            task_goal=proposed.task_goal or previous.task_goal,
-            user_constraints=_field_merge("user_constraints", previous.user_constraints, proposed.user_constraints),
-            confirmed_decisions=_field_merge("confirmed_decisions", previous.confirmed_decisions, proposed.confirmed_decisions),
-            repository_facts=_field_merge("repository_facts", previous.repository_facts, proposed.repository_facts),
-            files_read=_field_merge("files_read", previous.files_read, evidence.files_read),
-            files_modified=_field_merge("files_modified", previous.files_modified, evidence.files_modified),
-            commands_run=_field_merge("commands_run", previous.commands_run, evidence.commands_run),
-            test_results=_field_merge("test_results", previous.test_results, evidence.test_results),
-            diff_status=evidence.diff_status or previous.diff_status,
-            errors_and_failures=_field_merge("errors_and_failures", previous.errors_and_failures, evidence.errors_and_failures),
-            unresolved_work=_field_merge("unresolved_work", previous.unresolved_work, proposed.unresolved_work),
-            next_actions=_field_merge("next_actions", previous.next_actions, proposed.next_actions),
-            branch=evidence.branch or previous.branch,
-            commit=evidence.commit or previous.commit,
-            source_message_ids=_merge_strings(
-                previous.source_message_ids,
-                (str(item["message_id"]) for item in evidence.messages if item.get("message_id")),
-                limit=10_000,
-                item_limit=100,
-            ),
-        ).to_dict()
-        return _fit_budget(value, max_output_tokens)
+        return _fit_budget(merge_llm_summary(previous, proposed, evidence).to_dict(), max_output_tokens)
+
+
+def merge_llm_summary(
+    previous: SessionSummaryContent,
+    proposed: SessionSummaryContent,
+    evidence: SessionSummaryEvidence,
+) -> SessionSummaryContent:
+    return SessionSummaryContent(
+        task_goal=proposed.task_goal.strip() or _latest_user_goal(evidence) or previous.task_goal,
+        user_constraints=_field_merge("user_constraints", previous.user_constraints, proposed.user_constraints),
+        confirmed_decisions=_field_merge("confirmed_decisions", previous.confirmed_decisions, proposed.confirmed_decisions),
+        repository_facts=_field_merge("repository_facts", previous.repository_facts, proposed.repository_facts),
+        files_read=_field_merge("files_read", previous.files_read, evidence.files_read),
+        files_modified=_field_merge("files_modified", previous.files_modified, evidence.files_modified),
+        commands_run=_field_merge("commands_run", previous.commands_run, evidence.commands_run),
+        test_results=_field_merge("test_results", previous.test_results, evidence.test_results),
+        diff_status=evidence.diff_status or previous.diff_status,
+        errors_and_failures=_field_merge("errors_and_failures", previous.errors_and_failures, evidence.errors_and_failures),
+        unresolved_work=_field_merge("unresolved_work", proposed.unresolved_work),
+        next_actions=_field_merge("next_actions", proposed.next_actions),
+        branch=evidence.branch or previous.branch,
+        commit=evidence.commit or previous.commit,
+        source_message_ids=_merge_strings(
+            previous.source_message_ids,
+            (str(item["message_id"]) for item in evidence.messages if item.get("message_id")),
+            limit=10_000,
+            item_limit=100,
+        ),
+    )
+
+
+def _latest_user_goal(evidence: SessionSummaryEvidence) -> str:
+    return next(
+        (
+            str(message.get("content", "")).strip()
+            for message in reversed(evidence.messages)
+            if message.get("role") == "user" and str(message.get("content", "")).strip()
+        ),
+        "",
+    )
 
 
 def sanitize_summary_evidence(evidence: SessionSummaryEvidence) -> tuple[SessionSummaryEvidence, int]:
