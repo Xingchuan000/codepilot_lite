@@ -5,7 +5,7 @@
       
       
       
-        <link rel="canonical" href="https://mini-swe-agent.com/latest/_footer/">
+        <link rel="canonical" href="https://mini-swe-agent.com/latest/manual_session_runtime_acceptance/">
       
       
       
@@ -18,7 +18,7 @@
     
     
       
-        <title>footer - mini-SWE-agent documentation</title>
+        <title>Session Runtime 手动验收文档 - mini-SWE-agent documentation</title>
       
     
     
@@ -110,6 +110,11 @@
     <label class="md-overlay" for="__drawer"></label>
     <div data-md-component="skip">
       
+        
+        <a href="#session-runtime" class="md-skip">
+          Skip to content
+        </a>
+      
     </div>
     <div data-md-component="announce">
       
@@ -164,7 +169,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-               footer
+              Session Runtime 手动验收文档
             
           </span>
         </div>
@@ -2496,6 +2501,181 @@
   
   
   
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix="">
+      
+        <li class="md-nav__item">
+  <a href="#1-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. 新建 Session
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. 两轮连续上下文
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. 退出并重启恢复
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. 跨项目切换
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. 路径缺失只读
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. 分支变化
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-session" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. Session 级权限
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#8-pending-approval" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        8. pending approval 恢复
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#9-tool-execution-uncertain" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        9. tool execution uncertain 恢复
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#10-interrupted-assistant" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        10. interrupted Assistant
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#11-compact" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        11. 自动和手动 Compact
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#12-compact-failure" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        12. Compact failure
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#13-archiveunarchive" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        13. archive/unarchive
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#14" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        14. 手动导出
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#15" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        15. 正常运行无导出文件
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
   
 </nav>
                   </div>
@@ -2513,7 +2693,7 @@
 
 
   
-    <a href="https://github.com/SWE-agent/mini-SWE-agent/edit/main/docs/_footer.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/SWE-agent/mini-SWE-agent/edit/main/docs/manual_session_runtime_acceptance.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"></path></svg>
     </a>
@@ -2521,29 +2701,104 @@
   
 
 
-  <h1> footer</h1>
+<h1 id="session-runtime">Session Runtime 手动验收文档</h1>
+<p>本文面向不需要阅读源代码的验收人员。所有命令都在仓库根目录执行；先准备环境：</p>
+<div class="highlight"><pre><span></span><code><span class="nb">export</span><span class="w"> </span><span class="nv">PYTHONPATH</span><span class="o">=</span>src
+<span class="nb">export</span><span class="w"> </span><span class="nv">DEMO_ROOT</span><span class="o">=</span>/tmp/codepilot-session-acceptance
+rm<span class="w"> </span>-rf<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">"</span>
+mkdir<span class="w"> </span>-p<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a/src"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-b"</span>
+<span class="nb">printf</span><span class="w"> </span><span class="s1">'def add(a, b):\n    return a - b\n'</span><span class="w"> </span>&gt;<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a/src/calc.py"</span>
+git<span class="w"> </span>-C<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span><span class="w"> </span>init
+git<span class="w"> </span>-C<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span><span class="w"> </span>add<span class="w"> </span>.
+git<span class="w"> </span>-C<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span><span class="w"> </span>-c<span class="w"> </span>user.name<span class="o">=</span>acceptance<span class="w"> </span>-c<span class="w"> </span>user.email<span class="o">=</span>acceptance@example.com<span class="w"> </span>commit<span class="w"> </span>-m<span class="w"> </span>init
+</code></pre></div>
+<h2 id="1-session">1. 新建 Session</h2>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>codepilot.cli<span class="w"> </span>tui<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span><span class="w"> </span>--permission-mode<span class="w"> </span>manual
+</code></pre></div>
+<p>在 Session Picker 中选择当前项目，或输入 <code>/new</code> 创建新 Session。输入：</p>
+<div class="highlight"><pre><span></span><code>请检查 src/calc.py，但先不要修改文件。
+</code></pre></div>
+<p>验收：Session 有唯一 ID，项目路径、Provider、模型、权限模式和当前分支可见；未执行导出前，项目目录中不出现 <code>session.json</code>、<code>messages.jsonl</code>、<code>runs.jsonl</code>、<code>trace.jsonl</code> 或 <code>report.json</code>。</p>
+<h2 id="2">2. 两轮连续上下文</h2>
+<p>第一轮输入：<code>请读取 src/calc.py，并说明 add 函数的问题。</code></p>
+<p>第二轮输入：<code>使用你刚才的第二个建议，但先告诉我将修改哪些文件。</code></p>
+<p>验收：第二轮能引用第一轮内容；SQLite 中两条 Turn 属于同一 Session，Assistant、Tool Call、Tool Result 分别有结构化记录。</p>
+<h2 id="3">3. 退出并重启恢复</h2>
+<p>输入 <code>/exit</code> 退出，再重新执行：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>codepilot.cli<span class="w"> </span>tui<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span><span class="w"> </span>--permission-mode<span class="w"> </span>manual
+</code></pre></div>
+<p>从 Picker 选择原 Session，输入“继续刚才的工作，并先复述当前未完成事项”。验收：历史来自 SQLite，Transcript 不重复；新消息属于新的 Turn/Attempt。</p>
+<h2 id="4">4. 跨项目切换</h2>
+<p>在 TUI 中输入 <code>/sessions</code>，选择 <code>project-b</code> 的 Session；也可输入 <code>/new</code> 创建新 Session。验收：项目路径、分支和 Session ID 一起切换，旧项目 Transcript 不串入新 Session。</p>
+<h2 id="5">5. 路径缺失只读</h2>
+<div class="highlight"><pre><span></span><code>mv<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a-missing"</span>
+</code></pre></div>
+<p>重新打开并选择原 Session。验收：历史仍可查看，项目显示 missing/只读标记，提交消息会被拒绝，不会自动重新绑定路径。完成后恢复目录：</p>
+<div class="highlight"><pre><span></span><code>mv<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a-missing"</span><span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span>
+</code></pre></div>
+<h2 id="6">6. 分支变化</h2>
+<div class="highlight"><pre><span></span><code>git<span class="w"> </span>-C<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span><span class="w"> </span>checkout<span class="w"> </span>-b<span class="w"> </span>acceptance-branch
+</code></pre></div>
+<p>回到原 Session 提交消息。验收：先显示旧分支和当前分支确认框；选择继续后才创建 Turn，并写入 <code>branch_changed</code> Event；取消时不创建 Turn。</p>
+<h2 id="7-session">7. Session 级权限</h2>
+<p>在 <code>manual</code> 模式下请求一次写操作，权限框应显示 <code>Approve once</code>、<code>Approve for session</code>、<code>Deny</code>。选择 <code>Approve for session</code>，再执行同一工作区范围的第二次编辑。验收：第二次命中 SQLite Grant，不重复弹窗；<code>Approve once</code> 不创建 Grant；Policy deny 仍优先于 Grant。</p>
+<h2 id="8-pending-approval">8. pending approval 恢复</h2>
+<p>在权限框出现时直接关闭 TUI，再重新打开原 Session。验收：显示 pending approval，可继续批准或拒绝；未得到响应前不能执行工具。</p>
+<h2 id="9-tool-execution-uncertain">9. tool execution uncertain 恢复</h2>
+<p>使用测试代码或故障注入，让工具在 <code>execution_started</code> 后、Tool Result 写入前终止。重新打开 Session 后检查 Recovery Modal：应显示 Tool、参数、<code>execution_started</code> 时间和对账结果；Modal 打开时自动 Inspect，用户选择 <code>mark completed / retry / abort</code>。只读工具可自动重试；写 Shell 或未知外部工具必须人工确认，不能静默重复执行。</p>
+<h2 id="10-interrupted-assistant">10. interrupted Assistant</h2>
+<p>使用流式 Fake Client 或在 Assistant 输出期间终止进程。重新打开 Session，验收：已显示内容仍在 Transcript 中，并标记 <code>interrupted</code>；恢复会创建新 Attempt，模型收到中断内容和重新生成完整回答的 System Event，不从最后字符盲目续写。</p>
+<h2 id="11-compact">11. 自动和手动 Compact</h2>
+<p>在 Session 中产生足够长的多轮历史后输入：</p>
+<div class="highlight"><pre><span></span><code>/compact
+</code></pre></div>
+<p>也可以使用显式模型窗口触发：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-<span class="w"> </span><span class="s">&lt;&lt;'PY'</span>
+<span class="s">from pathlib import Path</span>
+<span class="s">from codepilot.session import ModelContextProfile, SessionDatabase, CompactionService, resolve_session_paths</span>
 
-<div class="grid cards">
-  <a href="https://github.com/SWE-agent/SWE-agent/issues/new" class="nav-card-link">
-    <div class="nav-card">
-      <div class="nav-card-header">
-        <span class="material-icons nav-card-icon">bug_report</span>
-        <span class="nav-card-title">Something broken/unclear?</span>
-      </div>
-      <p class="nav-card-description">Open an issue on GitHub!</p>
-    </div>
-  </a>
+<span class="s">database = SessionDatabase(resolve_session_paths().database_path)</span>
+<span class="s">database.initialize()</span>
+<span class="s">CompactionService(database).compact(</span>
+<span class="s">    "&lt;session-id&gt;",</span>
+<span class="s">    force=True,</span>
+<span class="s">    profile=ModelContextProfile("codepilot", "acceptance", max_input_tokens=1000, supports_reasoning_replay=False),</span>
+<span class="s">)</span>
+<span class="s">PY</span>
+</code></pre></div>
+<p>验收：生成 <code>context_summaries</code> 和 <code>context_compacted</code> Event，原始消息仍可查看，ContextAssembler 使用摘要而不是删除原文。连续执行三次 <code>/compact</code>，确认早期已压缩消息不会重新以全文进入上下文，未完成 Tool Call、最近文件修改、测试结果和 Diff 仍可见。</p>
+<h2 id="12-compact-failure">12. Compact failure</h2>
+<p>让摘要函数返回空字符串或缺少必需字段。验收：写入 <code>context_compaction_failed</code> Event；不删除旧消息，不调用主模型；修复摘要函数后 <code>/compact</code> 可以重试。</p>
+<h2 id="13-archiveunarchive">13. archive/unarchive</h2>
+<p>在没有运行 Turn 时输入 <code>/archive</code>，再输入 <code>/unarchive &lt;session-id&gt;</code>。验收：归档 Session 默认不出现在 active Picker；取消归档后重新出现。运行中执行 <code>/archive</code> 或切换 Session 应被拒绝。</p>
+<h2 id="14">14. 手动导出</h2>
+<p>只有明确需要导出时执行：</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-<span class="w"> </span><span class="s">&lt;&lt;'PY'</span>
+<span class="s">from pathlib import Path</span>
+<span class="s">from codepilot.session import SessionDatabase, SessionExporter, resolve_session_paths</span>
 
-  <a href="https://join.slack.com/t/swe-bench/shared_invite/zt-36pj9bu5s-o3_yXPZbaH2wVnxnss1EkQ" class="nav-card-link">
-    <div class="nav-card">
-      <div class="nav-card-header">
-        <span class="material-icons nav-card-icon">help</span>
-        <span class="nav-card-title">Open-ended discussions</span>
-      </div>
-      <p class="nav-card-description">Join our Slack!</p>
-    </div>
-  </a>
-</div>
+<span class="s">database = SessionDatabase(resolve_session_paths().database_path)</span>
+<span class="s">database.initialize()</span>
+<span class="s">output = SessionExporter(database).export("&lt;session-id&gt;", Path("/tmp/codepilot-session-exports"))</span>
+<span class="s">print(output)</span>
+<span class="s">PY</span>
+</code></pre></div>
+<p>验收导出目录包含固定 v2 文件：</p>
+<div class="highlight"><pre><span></span><code>manifest.json
+session.json
+turns.jsonl
+messages.jsonl
+events.jsonl
+trace.jsonl
+report.json
+artifacts/
+</code></pre></div>
+<p>检查 <code>manifest.json</code>、Artifact SHA-256 和文件顺序。删除导出目录后，原 Session 仍可继续运行；Runtime 不从导出目录读取状态。</p>
+<h2 id="15">15. 正常运行无导出文件</h2>
+<div class="highlight"><pre><span></span><code>rm<span class="w"> </span>-rf<span class="w"> </span>/tmp/codepilot-session-exports
+python<span class="w"> </span>-m<span class="w"> </span>codepilot.cli<span class="w"> </span>tui<span class="w"> </span><span class="s2">"</span><span class="nv">$DEMO_ROOT</span><span class="s2">/project-a"</span><span class="w"> </span>--permission-mode<span class="w"> </span>manual
+</code></pre></div>
+<p>验收：正常运行只更新 SQLite 和内部 Artifact；以下文件均不存在：<code>session.json</code>、<code>messages.jsonl</code>、<code>runs.jsonl</code>、<code>trace.jsonl</code>、<code>report.json</code>。只有显式执行 <code>/export-session</code> 或调用 <code>SessionExporter.export()</code> 时，才允许在导出目录生成这些导出文件。无效 <code>/switch &lt;不存在 id&gt;</code>、空 Session 的 <code>/compact</code> 和无权限的导出路径应显示为 TUI 错误而不退出主循环；切换 Session 后右侧测试、Diff、证据和完成状态不得串线。</p>
 
 
 

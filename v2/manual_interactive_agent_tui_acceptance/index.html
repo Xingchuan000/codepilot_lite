@@ -14,7 +14,7 @@
       
       
       <link rel="icon" href="../assets/mini_square.svg">
-      <meta name="generator" content="mkdocs-ProperDocs 1.6.7, mkdocs-material-9.7.6">
+      <meta name="generator" content="mkdocs-ProperDocs 1.6.7, mkdocs-material-9.7.7">
     
     
       
@@ -22,7 +22,7 @@
       
     
     
-      <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../assets/stylesheets/main.ec1eaa64.min.css">
       
         
         <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
@@ -2555,10 +2555,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#5-cancel" class="md-nav__link">
+  <a href="#5-list_files" class="md-nav__link">
     <span class="md-ellipsis">
       
-        5. cancel 验收
+        5. list_files 分页验收
       
     </span>
   </a>
@@ -2566,10 +2566,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#6-dashboard" class="md-nav__link">
+  <a href="#6-cancel" class="md-nav__link">
     <span class="md-ellipsis">
       
-        6. dashboard 兼容验收
+        6. cancel 验收
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#7-dashboard" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        7. dashboard 兼容验收
       
     </span>
   </a>
@@ -2616,9 +2627,30 @@
 <p>期望：<code>replace_range</code> 出现 <code>Approve once</code> / <code>Deny</code></p>
 <h2 id="4">4. 结果验收</h2>
 <p>期望：<code>status success</code>、<code>tests passed</code>、<code>report.md</code>、<code>trace.jsonl</code>、<code>/diff</code>、<code>/report</code>、<code>/new</code>、<code>/exit</code> 可用</p>
-<h2 id="5-cancel">5. cancel 验收</h2>
+<h2 id="5-list_files">5. list_files 分页验收</h2>
+<div class="highlight"><pre><span></span><code>mkdir<span class="w"> </span>-p<span class="w"> </span>/tmp/codepilot-list-files-pagination
+python<span class="w"> </span>-<span class="w"> </span><span class="s">&lt;&lt;'PY'</span>
+<span class="s">from pathlib import Path</span>
+
+<span class="s">root = Path("/tmp/codepilot-list-files-pagination")</span>
+<span class="s">for index in range(450):</span>
+<span class="s">    (root / f"file_{index:04d}.txt").write_text(str(index), encoding="utf-8")</span>
+<span class="s">PY</span>
+<span class="nv">PYTHONPATH</span><span class="o">=</span>src<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>codepilot.cli<span class="w"> </span>tui-agent<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--repo<span class="w"> </span>/tmp/codepilot-list-files-pagination
+</code></pre></div>
+<p>在对话里输入：</p>
+<div class="highlight"><pre><span></span><code>请完整检查当前目录中的所有文件名，并告诉我文件总数。
+</code></pre></div>
+<p>检查 trace：</p>
+<ul>
+<li><code>list_files</code> 的 <code>offset</code> 依次推进为 <code>0</code>、<code>200</code>、<code>400</code></li>
+<li>不要通过把 <code>max_entries</code> 调到极大值来绕过分页</li>
+<li>最终回答应说明已经按多页读取完成，而不是停在第一页</li>
+</ul>
+<h2 id="6-cancel">6. cancel 验收</h2>
 <p>运行中输入 <code>/cancel</code>，期望 <code>run_end status=cancelled</code></p>
-<h2 id="6-dashboard">6. dashboard 兼容验收</h2>
+<h2 id="7-dashboard">7. dashboard 兼容验收</h2>
 <div class="highlight"><pre><span></span><code><span class="nv">PYTHONPATH</span><span class="o">=</span>src<span class="w"> </span>python<span class="w"> </span>-m<span class="w"> </span>codepilot.cli<span class="w"> </span>dashboard<span class="w"> </span>--runs-dir<span class="w"> </span>/tmp/codepilot-tui-demo/runs<span class="w"> </span>--static
 </code></pre></div>
 
@@ -2713,7 +2745,7 @@
       <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.indexes", "navigation.top", "content.action.edit", "navigation.footer", "content.code.copy", "content.footnote.tooltips", "header.autohide", "announce.dismiss", "content.code.annotate", "navigation.tabs", "navigation.tabs.sticky"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": {"provider": "mike"}}</script>
     
     
-      <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../assets/javascripts/bundle.d7400e89.min.js"></script>
       
         <script src="../assets/js/sh-annotation.js"></script>
       
