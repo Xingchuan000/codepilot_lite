@@ -6,7 +6,11 @@ from inspect import signature
 from typing import Any, Literal
 
 from codepilot.memory.models import SessionSummaryContent
-from codepilot.memory.summarizer import StructuredSummaryGenerator
+from codepilot.memory.summarizer import (
+    LLMSummaryGenerator,
+    SessionSummaryEvidenceCollector,
+    StructuredSummaryGenerator,
+)
 from codepilot.session.context import ContextAssembler
 from codepilot.session.context_budget import ContextBudgetAllocator, ContextBudgetExceeded, ContextItem, estimate_tokens
 from codepilot.session.database import SessionDatabase
@@ -175,6 +179,7 @@ class CompactionService:
             raise ValueError("threshold must be between 0 and 1")
         self.store = SessionStore(database)
         self.summarizer = summarizer or StructuredSummaryGenerator()
+        self.evidence = SessionSummaryEvidenceCollector(database)
         self.threshold = threshold
         self.planning = ContextPlanningService(database)
 
@@ -219,11 +224,27 @@ class CompactionService:
         try:
             previous_summary = latest_summary.content if latest_summary is not None and isinstance(latest_summary.content, dict) else None
             max_output_tokens = max(1, min(4_000, int(profile.max_input_tokens * 0.1)))
-            summary_input = ([{"role": "system", "content": previous_summary}] if previous_summary else []) + summary_payload
-            if "max_output_tokens" in signature(self.summarizer).parameters:
-                summary_value = self.summarizer(summary_input, max_output_tokens=max_output_tokens, previous_summary=previous_summary)
-            else:
-                summary_value = self.summarizer(summary_input)
+            evidence = self.evidence.collect(session_id, tuple(covered_message_ids), current_turn_id)
+            try:
+                if "max_output_tokens" in signature(self.summarizer).parameters:
+                    summary_value = self.summarizer(evidence, max_output_tokens=max_output_tokens, previous_summary=previous_summary)
+                else:
+                    summary_value = self.summarizer(evidence)
+            except Exception as exc:
+                if not isinstance(self.summarizer, LLMSummaryGenerator):
+                    raise
+                summary_value = StructuredSummaryGenerator()(
+                    evidence,
+                    max_output_tokens=max_output_tokens,
+                    previous_summary=previous_summary,
+                )
+                self.store.append_event(
+                    session_id=session_id,
+                    event_type="context_summary_fallback_used",
+                    payload={"error": str(exc), "message_count": len(summary_payload)},
+                    turn_id=current_turn_id,
+                    metadata={"source": "compaction_service"},
+                )
             summary_content = _validate_summary(summary_value)
             if estimate_tokens(summary_content) > max_output_tokens:
                 raise ContextBudgetExceeded("compaction summary exceeds its output budget", reason="summary_output_overflow")

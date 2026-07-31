@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import sqlite3
 import shutil
+import sqlite3
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,6 +208,48 @@ def test_run_turn_sets_precise_attempt_times_and_terminal_status(tmp_path: Path)
     with pytest.raises(RuntimeError, match="created state"):
         runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
     assert service.store.get_attempt(submission.attempt.attempt_id).status == "completed"
+
+
+class _FailingCandidateExtractor:
+    def extract(self, session_id: str, turn_id: str):
+        raise RuntimeError("boom")
+
+
+class _SuccessfulCandidateExtractor:
+    def extract(self, session_id: str, turn_id: str):
+        return [SimpleNamespace(candidate_id="candidate-1")]
+
+
+@pytest.mark.parametrize(
+    ("extractor", "event_type", "payload"),
+    [
+        (_FailingCandidateExtractor(), "memory_candidate_extraction_failed", {"error": "boom"}),
+        (
+            _SuccessfulCandidateExtractor(),
+            "memory_candidates_extracted",
+            {"candidate_ids": ["candidate-1"], "count": 1},
+        ),
+    ],
+)
+def test_memory_candidate_postprocessing_does_not_change_completed_turn(
+    tmp_path: Path,
+    extractor,
+    event_type: str,
+    payload: dict,
+) -> None:
+    _, service, session_id, _ = _runtime(tmp_path)
+    runtime = SessionRuntime(service.database, FakeLLMClient(["hello"]), lambda trace: ToolRouter(trace))
+    runtime.memory_candidates = extractor
+    submission = runtime.submit_user_message(session_id, "say hello")
+    assert isinstance(submission, TurnSubmission)
+
+    execution = runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
+
+    assert execution.result.status == "message_complete"
+    assert service.store.get_turn(submission.turn.turn_id).status == "completed"
+    assert service.store.get_attempt(submission.attempt.attempt_id).status == "completed"
+    event = next(event for event in service.store.list_events(session_id) if event.event_type == event_type)
+    assert event.payload == payload
 
 
 def test_submit_user_message_blocks_recovery_required_turns(tmp_path: Path) -> None:

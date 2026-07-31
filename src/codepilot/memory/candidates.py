@@ -41,3 +41,6 @@ class MemoryCandidateExtractor:
                 )
             )
         return candidates
+
+    def extract_candidates_for_turn(self, session_id: str, turn_id: str) -> list:
+        return self.extract(session_id, turn_id)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -15,6 +14,7 @@ from codepilot.memory.models import (
     ProjectMemoryRecord,
     TurnMemoryCheckpoint,
 )
+from codepilot.memory.policy import validate_memory_content
 from codepilot.session.database import SessionDatabase
 from codepilot.session.ids import now_iso
 
@@ -88,6 +88,65 @@ class MemoryRepository:
             )
         return self.get(memory_id)
 
+    def approve_candidate(self, candidate_id: str) -> ProjectMemoryRecord:
+        timestamp = now_iso()
+        memory_id = f"mem-{uuid4().hex}"
+        with self.database.transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM memory_candidates WHERE candidate_id = ?",
+                (candidate_id,),
+            ).fetchone()
+            if row is None:
+                raise LookupError(candidate_id)
+            candidate = _candidate(row)
+            if candidate.status != "pending":
+                raise ValueError("memory candidate has already been decided")
+            validate_memory_content(candidate.content)
+            version = int(
+                connection.execute(
+                    "SELECT COALESCE(MAX(version), 0) FROM project_memories WHERE project_id = ? AND canonical_key = ?",
+                    (candidate.project_id, candidate.canonical_key),
+                ).fetchone()[0]
+            ) + 1
+            connection.execute(
+                "UPDATE project_memories SET status = 'superseded', updated_at = ? "
+                "WHERE project_id = ? AND canonical_key = ? AND status = 'active'",
+                (timestamp, candidate.project_id, candidate.canonical_key),
+            )
+            connection.execute(
+                """INSERT INTO project_memories(
+                    memory_id, project_id, kind, canonical_key, title, content_json, status,
+                    confidence, importance, branch_scope, source_commit, last_verified_commit,
+                    source_session_id, source_turn_id, source_message_ids_json,
+                    source_artifact_ids_json, created_at, updated_at, last_verified_at,
+                    expires_at, version, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, 5, NULL, NULL, NULL, ?, ?, '[]',
+                          '[]', ?, ?, NULL, NULL, ?, ?)""",
+                (
+                    memory_id,
+                    candidate.project_id,
+                    candidate.kind,
+                    candidate.canonical_key,
+                    candidate.canonical_key,
+                    _dump(candidate.content),
+                    candidate.confidence,
+                    candidate.session_id,
+                    candidate.turn_id,
+                    timestamp,
+                    timestamp,
+                    version,
+                    _dump({"candidate_id": candidate.candidate_id}),
+                ),
+            )
+            cursor = connection.execute(
+                "UPDATE memory_candidates SET status = 'accepted', decided_at = ? "
+                "WHERE candidate_id = ? AND status = 'pending'",
+                (timestamp, candidate_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("memory candidate has already been decided")
+        return self.get(memory_id)
+
     def get(self, memory_id: str) -> ProjectMemoryRecord:
         with self.database.transaction() as connection:
             row = connection.execute("SELECT * FROM project_memories WHERE memory_id = ?", (memory_id,)).fetchone()
@@ -115,35 +174,67 @@ class MemoryRepository:
         return self.get(memory_id)
 
     def search(self, project_id: str, query: MemoryQuery) -> list[MemorySearchResult]:
-        terms = re.findall(r"[\w./-]+", query.text, re.UNICODE)
-        if not terms:
-            return [MemorySearchResult(memory, float(memory.importance)) for memory in self.list(project_id)[: query.limit]]
-        match = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms)
-        clauses = ["memory.project_id = ?", "memory.status = 'active'", "project_memories_fts MATCH ?"]
-        parameters: list[Any] = [project_id, match]
+        from codepilot.memory.retrieval import normalize_memory_query
+
+        normalized = normalize_memory_query(query)
+        clauses = ["project_id = ?", "status = 'active'"]
+        parameters: list[Any] = [project_id]
         if query.kinds:
-            clauses.append(f"memory.kind IN ({', '.join('?' for _ in query.kinds)})")
+            clauses.append(f"kind IN ({', '.join('?' for _ in query.kinds)})")
             parameters.extend(query.kinds)
-        if query.branch:
-            clauses.append("(memory.branch_scope IS NULL OR memory.branch_scope = ?)")
+        if query.branch is None:
+            clauses.append("branch_scope IS NULL")
+        else:
+            clauses.append("(branch_scope IS NULL OR branch_scope = ?)")
             parameters.append(query.branch)
         with self.database.transaction() as connection:
             rows = connection.execute(
-                f"""SELECT memory.*, bm25(project_memories_fts) AS rank
-                    FROM project_memories_fts AS fts
-                    JOIN project_memories AS memory ON memory.memory_id = fts.memory_id
-                    WHERE {' AND '.join(clauses)}
-                    ORDER BY rank, memory.importance DESC, memory.confidence DESC, memory.updated_at DESC
-                    LIMIT ?""",
-                (*parameters, query.limit),
+                f"SELECT * FROM project_memories WHERE {' AND '.join(clauses)}",
+                parameters,
             ).fetchall()
-        return [
-            MemorySearchResult(
-                _memory(row),
-                -float(row["rank"]) + float(row["importance"]) + float(row["confidence"]),
-            )
-            for row in rows
-        ]
+            fts_scores = self._search_fts(connection, project_id, normalized.fts_terms)
+        memories = [_memory(row) for row in rows]
+        if not normalized.fts_terms and not normalized.cjk_fragments and not normalized.paths:
+            ranked = [(memory, float(memory.importance) + memory.confidence) for memory in memories]
+        else:
+            ranked = []
+            raw = normalized.raw_text.casefold().strip()
+            for memory in memories:
+                haystack = f"{memory.canonical_key}\n{memory.title}\n{_dump(memory.content)}".casefold()
+                score = fts_scores.get(memory.memory_id, 0.0)
+                if raw and raw in haystack:
+                    score += 8
+                if raw and memory.canonical_key.casefold() == raw:
+                    score += 12
+                elif raw and memory.canonical_key.casefold().startswith(raw):
+                    score += 6
+                score += min(6, sum(2 for term in normalized.cjk_fragments if term.casefold() in haystack))
+                path_score = min(8, sum(4 for path in normalized.paths if path.casefold() in haystack))
+                score += path_score
+                if path_score and memory.kind in {"file_map", "known_issue", "architecture"}:
+                    score += 2
+                if score <= 0:
+                    continue
+                score += memory.importance + memory.confidence
+                if query.branch is not None and memory.branch_scope == query.branch:
+                    score += 2
+                ranked.append((memory, score))
+        ranked.sort(key=lambda item: (item[1], item[0].updated_at, item[0].memory_id), reverse=True)
+        return [MemorySearchResult(memory, score) for memory, score in ranked[: query.limit]]
+
+    @staticmethod
+    def _search_fts(connection: Any, project_id: str, terms: tuple[str, ...]) -> dict[str, float]:
+        if not terms:
+            return {}
+        match = " OR ".join(f'"{term.replace(chr(34), "")}"' for term in terms)
+        rows = connection.execute(
+            """SELECT fts.memory_id, bm25(project_memories_fts) AS rank
+               FROM project_memories_fts AS fts
+               JOIN project_memories AS memory ON memory.memory_id = fts.memory_id
+               WHERE fts.project_id = ? AND memory.status = 'active' AND project_memories_fts MATCH ?""",
+            (project_id, match),
+        ).fetchall()
+        return {row["memory_id"]: max(1.0, -float(row["rank"])) for row in rows}
 
 
 class CandidateRepository:

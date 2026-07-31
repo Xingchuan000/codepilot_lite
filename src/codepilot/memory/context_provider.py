@@ -7,6 +7,7 @@ from codepilot.memory.rendering import render_project_memory
 from codepilot.memory.repository import MemoryRepository
 from codepilot.session.context_budget import ContextItem, estimate_tokens
 from codepilot.session.database import SessionDatabase
+from codepilot.session.model_capabilities import ModelContextProfile
 
 
 class MemoryContextProvider:
@@ -35,11 +36,25 @@ class MemoryContextProvider:
             )
         return tuple(items)
 
-    def memory_items(self, project_id: str, query: str, branch: str | None) -> tuple[ContextItem, ...]:
-        results = self.memories.search(project_id, MemoryQuery(query, branch=branch, limit=8))
+    def memory_items(
+        self,
+        project_id: str,
+        query: MemoryQuery,
+        profile: ModelContextProfile,
+    ) -> tuple[ContextItem, ...]:
+        results = self.memories.search(project_id, query)
         if not results:
             return ()
-        message = ChatMessage("system", render_project_memory([result.memory for result in results]))
+        max_tokens = max(128, int(profile.max_input_tokens * 0.12))
+        selected = []
+        for result in results:
+            candidate = ChatMessage("system", render_project_memory([*selected, result.memory]))
+            if estimate_tokens(candidate) > max_tokens:
+                continue
+            selected.append(result.memory)
+        if not selected:
+            return ()
+        message = ChatMessage("system", render_project_memory(selected))
         return (
             ContextItem(
                 key="project-memory",

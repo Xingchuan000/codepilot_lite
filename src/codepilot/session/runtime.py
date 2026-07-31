@@ -14,6 +14,7 @@ from uuid import uuid4
 from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop, TurnExecutionContext
 from codepilot.llm.types import CodePilotLLMClient
 from codepilot.memory.candidates import MemoryCandidateExtractor
+from codepilot.memory.summarizer import LLMSummaryGenerator
 from codepilot.memory.turn_window import TurnContextWindow
 from codepilot.router import ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError
@@ -55,7 +56,7 @@ class SessionRuntime:
         self.store = SessionStore(database)
         self.service = SessionService(database)
         self.assembler = ContextAssembler(database, self.store)
-        self.compaction_service = CompactionService(database)
+        self.compaction_service = CompactionService(database, summarizer=LLMSummaryGenerator(llm))
         self.memory_candidates = MemoryCandidateExtractor(database)
         self.llm = llm
         self.router_factory = router_factory
@@ -187,12 +188,73 @@ class SessionRuntime:
         heartbeat.join()
         if result.status in {"success", "message_complete"}:
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="completed", turn_status="completed", worker_id=worker_id)
-            self.memory_candidates.extract(session.session_id, turn_id)
+            self._extract_memory_candidates_best_effort(
+                session_id=session.session_id,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+            )
         elif result.status == "cancelled":
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="cancelled", turn_status="cancelled", worker_id=worker_id)
         else:
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="failed", turn_status="failed", worker_id=worker_id)
         return TurnExecutionResult(self.store.get_turn(turn_id), attempt_id, result)
+
+    def _extract_memory_candidates_best_effort(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        attempt_id: str,
+    ) -> None:
+        try:
+            candidates = self.memory_candidates.extract(session_id, turn_id)
+        except Exception as exc:
+            logger.exception(
+                "Memory candidate extraction failed",
+                extra={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id},
+            )
+            self._append_memory_event_best_effort(
+                session_id=session_id,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+                event_type="memory_candidate_extraction_failed",
+                payload={"error": str(exc)},
+            )
+            return
+        self._append_memory_event_best_effort(
+            session_id=session_id,
+            turn_id=turn_id,
+            attempt_id=attempt_id,
+            event_type="memory_candidates_extracted",
+            payload={
+                "candidate_ids": [candidate.candidate_id for candidate in candidates],
+                "count": len(candidates),
+            },
+        )
+
+    def _append_memory_event_best_effort(
+        self,
+        *,
+        session_id: str,
+        turn_id: str,
+        attempt_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        try:
+            self.store.append_event(
+                session_id=session_id,
+                turn_id=turn_id,
+                attempt_id=attempt_id,
+                event_type=event_type,
+                payload=payload,
+                metadata={"source": "session_runtime"},
+            )
+        except Exception:
+            logger.exception(
+                "Memory candidate event persistence failed",
+                extra={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id, "event_type": event_type},
+            )
 
 
 def _lease_expiry() -> str:

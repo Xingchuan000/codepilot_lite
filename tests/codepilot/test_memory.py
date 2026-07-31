@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
 
 from codepilot.memory.instructions import ProjectInstructionLoader
+from codepilot.memory.models import MemoryQuery
 from codepilot.memory.repository import CandidateRepository
 from codepilot.memory.service import MemoryService
 from codepilot.session.compaction import CompactionService
@@ -129,3 +131,109 @@ def test_candidate_requires_approval_and_secret_is_rejected(tmp_path: Path) -> N
     assert service.approve(candidate.candidate_id).content == {"text": "Use pathlib."}
     with pytest.raises(ValueError, match="secret"):
         service.add(session.project_id, "project_preference", "credential", "API_KEY=top-secret-value")
+
+
+def _candidate(database: SessionDatabase, tmp_path: Path, key: str = "style:pathlib"):
+    store = SessionStore(database)
+    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.create_turn(
+        session_id=session.session_id,
+        title="memory",
+        provider_snapshot="openai",
+        model_snapshot="fake",
+        permission_mode_snapshot="manual",
+        branch_snapshot=None,
+    )
+    return session, CandidateRepository(database).create(
+        session.project_id,
+        session.session_id,
+        turn.turn_id,
+        "convention",
+        key,
+        {"text": "Use pathlib."},
+        {"message_ids": []},
+        0.9,
+    )
+
+
+def test_repeated_candidate_approval_does_not_create_memory_version(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    session, candidate = _candidate(database, tmp_path)
+    service = MemoryService(database)
+    first = service.approve(candidate.candidate_id)
+
+    with pytest.raises(ValueError, match="already been decided"):
+        service.approve(candidate.candidate_id)
+
+    assert service.list(session.project_id) == [first]
+    assert service.candidates.get(candidate.candidate_id).status == "accepted"
+
+
+def test_candidate_approval_rolls_back_memory_when_status_update_fails(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    session, candidate = _candidate(database, tmp_path)
+    old = MemoryService(database).add(session.project_id, "convention", candidate.canonical_key, "Use os.path.")
+    with database.transaction() as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_candidate_accept BEFORE UPDATE OF status ON memory_candidates "
+            "WHEN NEW.status = 'accepted' BEGIN SELECT RAISE(ABORT, 'forced candidate failure'); END"
+        )
+
+    with pytest.raises(sqlite3.IntegrityError, match="forced candidate failure"):
+        MemoryService(database).approve(candidate.candidate_id)
+
+    assert MemoryService(database).list(session.project_id) == [old]
+    assert CandidateRepository(database).get(candidate.candidate_id).status == "pending"
+
+
+def test_unknown_candidate_approval_does_not_create_memory(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    with pytest.raises(LookupError):
+        MemoryService(database).approve("candidate-missing")
+    with database.transaction() as connection:
+        assert connection.execute("SELECT COUNT(*) FROM project_memories").fetchone()[0] == 0
+
+
+def test_memory_search_supports_cjk_paths_and_branch_isolation(tmp_path: Path) -> None:
+    database = _database(tmp_path)
+    store = SessionStore(database)
+    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    service = MemoryService(database)
+    global_memory = service.memories.add(
+        session.project_id,
+        "architecture",
+        "facts:sqlite",
+        "事实来源",
+        {"text": "所有事实来源都是SQLite，JSON只用于导出"},
+    )
+    path_memory = service.memories.add(
+        session.project_id,
+        "file_map",
+        "file:src/a.py",
+        "A module",
+        {"text": "核心模块", "paths": ["src/a.py"]},
+    )
+    branch_memory = service.memories.add(
+        session.project_id,
+        "known_issue",
+        "issue:feature",
+        "Feature issue",
+        {"text": "Only on feature"},
+        branch_scope="feature/x",
+    )
+    other_memory = service.memories.add(
+        session.project_id,
+        "known_issue",
+        "issue:other",
+        "Other issue",
+        {"text": "Only on other"},
+        branch_scope="feature/y",
+    )
+
+    assert service.search(session.project_id, "事实来源")[0].memory == global_memory
+    assert service.search(session.project_id, "导出")[0].memory == global_memory
+    assert [result.memory for result in service.memories.search(session.project_id, MemoryQuery("", paths=("src/a.py",)))] == [path_memory]
+    assert branch_memory not in [result.memory for result in service.memories.search(session.project_id, MemoryQuery("issue", branch=None))]
+    current = [result.memory for result in service.memories.search(session.project_id, MemoryQuery("issue", branch="feature/x"))]
+    assert branch_memory in current
+    assert other_memory not in current

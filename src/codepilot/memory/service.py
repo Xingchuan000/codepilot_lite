@@ -49,21 +49,7 @@ class MemoryService:
         return self.memories.search(project_id, MemoryQuery(text, limit=limit))
 
     def approve(self, candidate_id: str) -> ProjectMemoryRecord:
-        candidate = self.candidates.get(candidate_id)
-        validate_memory_content(candidate.content)
-        memory = self.memories.add(
-            candidate.project_id,
-            candidate.kind,
-            candidate.canonical_key,
-            candidate.canonical_key,
-            candidate.content,
-            confidence=candidate.confidence,
-            source_session_id=candidate.session_id,
-            source_turn_id=candidate.turn_id,
-            metadata={"candidate_id": candidate.candidate_id},
-        )
-        self.candidates.decide(candidate_id, "accepted")
-        return memory
+        return self.memories.approve_candidate(candidate_id)
 
     def reject(self, candidate_id: str) -> None:
         self.candidates.decide(candidate_id, "rejected")

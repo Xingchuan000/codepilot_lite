@@ -5,6 +5,7 @@ from pathlib import Path
 from codepilot.llm.types import ChatMessage, RichChatMessage
 from codepilot.memory.context_provider import MemoryContextProvider
 from codepilot.memory.repository import TurnCheckpointRepository
+from codepilot.memory.retrieval import MemoryQueryBuilder
 from codepilot.memory.turn_window import render_turn_checkpoint
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.context_adapters import SessionHistory, TextActionContextAdapter
@@ -23,19 +24,23 @@ class ContextAssembler:
         self.artifacts = ArtifactStore(database)
         self.adapter = TextActionContextAdapter(self.store, self.artifacts)
         self.memory = MemoryContextProvider(database)
+        self.memory_query = MemoryQueryBuilder(self.store)
         self.checkpoints = TurnCheckpointRepository(database)
 
     def build(self, session_id: str, current_turn_id: str, provider: str, model: str, profile=None) -> list[ChatMessage | RichChatMessage]:
-        return self.adapter.build_messages(self.build_history(session_id, current_turn_id), profile or resolve_model_context_profile(provider, model))
+        profile = profile or resolve_model_context_profile(provider, model)
+        return self.adapter.build_messages(self.build_history(session_id, current_turn_id, profile), profile)
 
     def build_plan(self, session_id: str, current_turn_id: str, provider: str, model: str, profile=None):
         """暴露预算规划，供 Compact 估算有效上下文而不重复统计已覆盖原文。"""
 
-        return self.adapter.build_context_plan(self.build_history(session_id, current_turn_id), profile or resolve_model_context_profile(provider, model))
+        profile = profile or resolve_model_context_profile(provider, model)
+        return self.adapter.build_context_plan(self.build_history(session_id, current_turn_id, profile), profile)
 
-    def build_history(self, session_id: str, current_turn_id: str) -> SessionHistory:
+    def build_history(self, session_id: str, current_turn_id: str, profile=None) -> SessionHistory:
         session = self.store.get_session(session_id)
         turn = self.store.get_turn(current_turn_id)
+        profile = profile or resolve_model_context_profile(turn.provider_snapshot, turn.model_snapshot)
         with self.store.database.transaction() as connection:
             project_path = Path(connection.execute("SELECT path FROM projects WHERE project_id = ?", (session.project_id,)).fetchone()[0])
         latest_summary = self.store.get_latest_context_summary(session_id)
@@ -56,10 +61,18 @@ class ContextAssembler:
             instruction_items=self.memory.instruction_items(session.project_id, project_path),
             memory_items=self.memory.memory_items(
                 session.project_id,
-                str(self.store.get_user_message_for_turn(current_turn_id).content)
-                if self.store.get_user_message_for_turn(current_turn_id) is not None
-                else "",
-                turn.branch_snapshot,
+                self.memory_query.build(
+                    session_id=session_id,
+                    current_turn_id=current_turn_id,
+                    current_user_text=(
+                        str(self.store.get_user_message_for_turn(current_turn_id).content)
+                        if self.store.get_user_message_for_turn(current_turn_id) is not None
+                        else ""
+                    ),
+                    latest_summary=latest_summary,
+                    branch=turn.branch_snapshot,
+                ),
+                profile,
             ),
             turn_checkpoint_items=(
                 (

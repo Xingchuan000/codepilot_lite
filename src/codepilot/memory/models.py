@@ -74,6 +74,14 @@ class MemoryQuery:
 
 
 @dataclass(frozen=True)
+class NormalizedMemoryQuery:
+    raw_text: str
+    fts_terms: tuple[str, ...]
+    cjk_fragments: tuple[str, ...]
+    paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class MemorySearchResult:
     memory: ProjectMemoryRecord
     score: float
