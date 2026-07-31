@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from codepilot.llm.fake import FakeLLMClient
 from codepilot.memory.models import SessionSummaryContent
 from codepilot.memory.summarizer import LLMSummaryGenerator, SessionSummaryEvidence, merge_llm_summary
@@ -252,3 +254,70 @@ def test_merge_llm_summary_treats_empty_work_lists_as_current_state() -> None:
     assert merged.unresolved_work == ()
     assert merged.next_actions == ()
     assert merged.confirmed_decisions == ("keep SQLite",)
+
+
+class _FailingSummaryLLM:
+    def complete(self, messages):
+        raise RuntimeError("provider failed: API_KEY=event-secret")
+
+
+def test_summary_fallback_event_redacts_provider_exception(tmp_path: Path) -> None:
+    database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
+
+    CompactionService(database, LLMSummaryGenerator(_FailingSummaryLLM())).compact(
+        session.session_id,
+        force=True,
+        current_turn_id=turns[-1].turn_id,
+    )
+
+    event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_summary_fallback_used")
+    assert event.payload == {
+        "error_type": "RuntimeError",
+        "error": "provider failed: API_KEY=[REDACTED_SECRET]",
+        "message_count": 2,
+    }
+    assert "event-secret" not in str(event.payload)
+
+
+def test_compaction_failed_event_redacts_summarizer_exception(tmp_path: Path) -> None:
+    database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
+
+    def fail(_):
+        raise RuntimeError("summary failed: TOKEN=failure-secret")
+
+    with pytest.raises(RuntimeError, match="failure-secret"):
+        CompactionService(database, fail).compact(
+            session.session_id,
+            force=True,
+            current_turn_id=turns[-1].turn_id,
+        )
+
+    event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_compaction_failed")
+    assert event.payload == {
+        "error_type": "RuntimeError",
+        "error": "summary failed: TOKEN=[REDACTED_SECRET]",
+        "message_count": 2,
+    }
+    assert "failure-secret" not in str(event.payload)
+
+
+def test_compaction_failed_event_redacts_persistence_exception(tmp_path: Path) -> None:
+    database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
+    with database.transaction() as connection:
+        connection.execute(
+            "CREATE TRIGGER fail_summary_insert BEFORE INSERT ON context_summaries "
+            "BEGIN SELECT RAISE(ABORT, 'API_KEY=persistence-secret'); END"
+        )
+
+    with pytest.raises(Exception, match="persistence-secret"):
+        CompactionService(database).compact(
+            session.session_id,
+            force=True,
+            current_turn_id=turns[-1].turn_id,
+        )
+
+    event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_compaction_failed")
+    assert event.payload["error_type"] == "IntegrityError"
+    assert event.payload["error"] == "API_KEY=[REDACTED_SECRET]"
+    assert event.payload["message_count"] == 2
+    assert "persistence-secret" not in str(event.payload)

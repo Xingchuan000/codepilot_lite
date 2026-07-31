@@ -246,7 +246,7 @@ class CompactionService:
                 self.store.append_event(
                     session_id=session_id,
                     event_type="context_summary_fallback_used",
-                    payload={"error": str(exc), "message_count": len(summary_payload)},
+                    payload=_safe_error_payload(exc, len(summary_payload)),
                     turn_id=current_turn_id,
                     metadata={"source": "compaction_service"},
                 )
@@ -265,7 +265,7 @@ class CompactionService:
             self.store.append_event(
                 session_id=session_id,
                 event_type="context_compaction_failed",
-                payload={"error": str(exc), "message_count": len(summary_payload)},
+                payload=_safe_error_payload(exc, len(summary_payload)),
                 turn_id=current_turn_id,
                 metadata={"source": "compaction_service"},
             )
@@ -327,7 +327,7 @@ class CompactionService:
             self.store.append_event(
                 session_id=session_id,
                 event_type="context_compaction_failed",
-                payload={"error": str(exc), "message_count": len(summary_payload)},
+                payload=_safe_error_payload(exc, len(summary_payload)),
                 turn_id=current_turn_id,
                 metadata={"source": "compaction_service"},
             )
@@ -386,3 +386,11 @@ def _validate_summary(summary: Any) -> dict[str, Any] | str:
     if any(item not in summary for item in required):
         raise ValueError("compaction summary does not cover required fields")
     return summary
+
+
+def _safe_error_payload(exc: Exception, message_count: int) -> dict[str, Any]:
+    return {
+        "error_type": type(exc).__name__,
+        "error": str(redact_memory_value(str(exc)).value),
+        "message_count": message_count,
+    }
