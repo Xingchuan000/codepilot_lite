@@ -120,3 +120,119 @@ def test_llm_cannot_add_unobserved_tool_facts(tmp_path: Path) -> None:
 
     assert summary["files_modified"] == ["src/a.py"]
     assert all("999 passed" not in result for result in summary["test_results"])
+
+
+def test_deterministic_summary_redacts_secret_without_changing_original_message(tmp_path: Path) -> None:
+    database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
+    secret = "top-secret-value"
+    message = store.create_message(
+        session_id=session.session_id,
+        turn_id=turns[0].turn_id,
+        role="user",
+        status="completed",
+        content=f"API_KEY={secret}",
+    )
+
+    summary = CompactionService(database, LLMSummaryGenerator(FakeLLMClient(["not json"]))).compact(
+        session.session_id,
+        force=True,
+        current_turn_id=turns[-1].turn_id,
+    ).summary.content
+
+    assert secret not in str(summary)
+    assert "[REDACTED_SECRET]" in str(summary)
+    assert next(item for item, _ in store.list_messages_with_parts(session.session_id) if item.message_id == message.message_id).content == f"API_KEY={secret}"
+
+
+def test_summary_redacts_secrets_from_commands_tool_results_and_errors(tmp_path: Path) -> None:
+    database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
+    call = store.create_tool_call(
+        turn_id=turns[0].turn_id,
+        tool_name="run_tests",
+        arguments={"command": "TOKEN=command-secret pytest"},
+    )
+    store.persist_tool_result(
+        call.tool_call_id,
+        call_status="failed",
+        result_status="failed",
+        content="failed",
+        output_preview="PASSWORD=preview-secret",
+        error="API_KEY=error-secret",
+        success=False,
+    )
+    preview_call = store.create_tool_call(
+        turn_id=turns[0].turn_id,
+        tool_name="run_tests",
+        arguments={"command": "pytest preview"},
+    )
+    store.persist_tool_result(
+        preview_call.tool_call_id,
+        call_status="failed",
+        result_status="failed",
+        content="failed",
+        output_preview="PASSWORD=preview-secret",
+        success=False,
+    )
+
+    summary = CompactionService(database).compact(
+        session.session_id,
+        force=True,
+        current_turn_id=turns[-1].turn_id,
+    ).summary.content
+
+    assert all(secret not in str(summary) for secret in ("command-secret", "preview-secret", "error-secret"))
+    assert "[REDACTED_SECRET]" in str(summary)
+
+
+def test_llm_summary_receives_only_redacted_evidence(tmp_path: Path) -> None:
+    database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
+    store.create_message(
+        session_id=session.session_id,
+        turn_id=turns[0].turn_id,
+        role="user",
+        status="completed",
+        content="password: provider-secret",
+    )
+    llm = FakeLLMClient([json.dumps(SessionSummaryContent(task_goal="Continue").to_dict())])
+
+    CompactionService(database, LLMSummaryGenerator(llm)).compact(
+        session.session_id,
+        force=True,
+        current_turn_id=turns[-1].turn_id,
+    )
+
+    request = str(llm.calls)
+    assert "provider-secret" not in request
+    assert "[REDACTED_SECRET]" in request
+
+
+def test_cumulative_compaction_scrubs_unsafe_previous_summary_and_audits_counts(tmp_path: Path) -> None:
+    database, store, session, turns, messages = _history_with_tool_facts(tmp_path)
+    secret = "legacy-secret"
+    unsafe = SessionSummaryContent(task_goal=f"API_KEY={secret}").to_dict()
+    old = store.replace_context_summary(
+        session_id=session.session_id,
+        previous_summary_id=None,
+        summary_content=unsafe,
+        turn_id=turns[0].turn_id,
+        source_start_sequence=turns[0].sequence,
+        source_end_sequence=turns[0].sequence,
+        model="old",
+        metadata={"covered_message_ids": [messages[0].message_id]},
+        event_payload={},
+    )
+    llm = FakeLLMClient([json.dumps(SessionSummaryContent(task_goal="Continue").to_dict())])
+
+    result = CompactionService(database, LLMSummaryGenerator(llm)).compact(
+        session.session_id,
+        force=True,
+        current_turn_id=turns[-1].turn_id,
+    )
+
+    assert secret not in str(result.summary.content)
+    assert secret not in str(llm.calls)
+    assert store.list_context_summaries(session.session_id)[0].status == "superseded"
+    assert old.summary_id != result.summary.summary_id
+    event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_summary_redacted")
+    assert set(event.payload) == {"redaction_count", "message_count"}
+    assert secret not in str(event.payload)

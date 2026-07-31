@@ -7,6 +7,7 @@ import pytest
 
 from codepilot.memory.instructions import ProjectInstructionLoader
 from codepilot.memory.models import MemoryQuery
+from codepilot.memory.policy import REDACTED_SECRET, is_memory_content_safe, redact_memory_value
 from codepilot.memory.repository import CandidateRepository
 from codepilot.memory.service import MemoryService
 from codepilot.session.compaction import CompactionService
@@ -237,3 +238,20 @@ def test_memory_search_supports_cjk_paths_and_branch_isolation(tmp_path: Path) -
     current = [result.memory for result in service.memories.search(session.project_id, MemoryQuery("issue", branch="feature/x"))]
     assert branch_memory in current
     assert other_memory not in current
+
+
+def test_memory_redaction_is_recursive_idempotent_and_non_mutating() -> None:
+    original = {
+        "text": "API_KEY=top-secret-value",
+        "nested": ["password: abc123", ("ghp_abcdefghijklmnopqrstuvwxyz",)],
+    }
+
+    first = redact_memory_value(original)
+    second = redact_memory_value(first.value)
+
+    assert first.redaction_count == 3
+    assert second.redaction_count == 0
+    assert second.value == first.value
+    assert REDACTED_SECRET in str(first.value)
+    assert is_memory_content_safe(first.value)
+    assert original["text"] == "API_KEY=top-secret-value"

@@ -7,7 +7,7 @@ from typing import Any
 
 from codepilot.llm.types import ChatMessage, CodePilotLLMClient
 from codepilot.memory.models import SessionSummaryContent
-from codepilot.memory.policy import is_memory_content_safe
+from codepilot.memory.policy import redact_memory_value, sanitize_memory_content
 from codepilot.session.context_budget import estimate_tokens
 from codepilot.session.database import SessionDatabase
 from codepilot.session.store import SessionStore
@@ -117,7 +117,9 @@ class StructuredSummaryGenerator:
         max_output_tokens: int = 4_000,
         previous_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        previous = SessionSummaryContent.from_dict(previous_summary) if previous_summary else SessionSummaryContent()
+        evidence, _ = sanitize_summary_evidence(evidence)
+        safe_previous, _ = sanitize_memory_content(previous_summary or {})
+        previous = SessionSummaryContent.from_dict(safe_previous) if safe_previous else SessionSummaryContent()
         user_messages = [item for item in evidence.messages if item.get("role") == "user"]
         value = SessionSummaryContent(
             task_goal=str(user_messages[-1].get("content", ""))[:1000] if user_messages else previous.task_goal,
@@ -155,6 +157,8 @@ class LLMSummaryGenerator:
         max_output_tokens: int = 4_000,
         previous_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        evidence, _ = sanitize_summary_evidence(evidence)
+        safe_previous, _ = sanitize_memory_content(previous_summary or {})
         response = self.llm.complete(
             [
                 ChatMessage(
@@ -168,7 +172,7 @@ class LLMSummaryGenerator:
                     "user",
                     json.dumps(
                         {
-                            "previous_summary": previous_summary,
+                            "previous_summary": safe_previous or None,
                             "deterministic_evidence": _evidence_dict(evidence),
                             "conversation_excerpt": evidence.messages,
                             "output_limits": _LIMITS,
@@ -181,9 +185,8 @@ class LLMSummaryGenerator:
             ]
         )
         proposed = SessionSummaryContent.from_dict(json.loads(response.content))
-        if not is_memory_content_safe(proposed.to_dict()):
-            raise ValueError("summary contains sensitive content")
-        previous = SessionSummaryContent.from_dict(previous_summary) if previous_summary else SessionSummaryContent()
+        proposed = SessionSummaryContent.from_dict(sanitize_memory_content(proposed.to_dict())[0])
+        previous = SessionSummaryContent.from_dict(safe_previous) if safe_previous else SessionSummaryContent()
         value = SessionSummaryContent(
             task_goal=proposed.task_goal or previous.task_goal,
             user_constraints=_field_merge("user_constraints", previous.user_constraints, proposed.user_constraints),
@@ -207,6 +210,37 @@ class LLMSummaryGenerator:
             ),
         ).to_dict()
         return _fit_budget(value, max_output_tokens)
+
+
+def sanitize_summary_evidence(evidence: SessionSummaryEvidence) -> tuple[SessionSummaryEvidence, int]:
+    result = redact_memory_value(
+        {
+            "messages": evidence.messages,
+            "commands_run": evidence.commands_run,
+            "test_results": evidence.test_results,
+            "files_read": evidence.files_read,
+            "files_modified": evidence.files_modified,
+            "errors_and_failures": evidence.errors_and_failures,
+            "diff_status": evidence.diff_status,
+            "branch": evidence.branch,
+            "commit": evidence.commit,
+        }
+    )
+    value, count = dict(result.value), result.redaction_count
+    return (
+        SessionSummaryEvidence(
+            tuple(value["messages"]),
+            tuple(value["commands_run"]),
+            tuple(value["test_results"]),
+            tuple(value["files_read"]),
+            tuple(value["files_modified"]),
+            tuple(value["errors_and_failures"]),
+            dict(value["diff_status"]),
+            str(value["branch"]),
+            str(value["commit"]),
+        ),
+        count,
+    )
 
 
 def _paths(arguments: dict[str, Any]) -> tuple[str, ...]:

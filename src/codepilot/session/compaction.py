@@ -6,10 +6,12 @@ from inspect import signature
 from typing import Any, Literal
 
 from codepilot.memory.models import SessionSummaryContent
+from codepilot.memory.policy import redact_memory_value, sanitize_memory_content, validate_memory_content
 from codepilot.memory.summarizer import (
     LLMSummaryGenerator,
     SessionSummaryEvidenceCollector,
     StructuredSummaryGenerator,
+    sanitize_summary_evidence,
 )
 from codepilot.session.context import ContextAssembler
 from codepilot.session.context_budget import ContextBudgetAllocator, ContextBudgetExceeded, ContextItem, estimate_tokens
@@ -225,6 +227,9 @@ class CompactionService:
             previous_summary = latest_summary.content if latest_summary is not None and isinstance(latest_summary.content, dict) else None
             max_output_tokens = max(1, min(4_000, int(profile.max_input_tokens * 0.1)))
             evidence = self.evidence.collect(session_id, tuple(covered_message_ids), current_turn_id)
+            evidence, evidence_redactions = sanitize_summary_evidence(evidence)
+            previous_summary, previous_redactions = sanitize_memory_content(previous_summary or {})
+            previous_summary = previous_summary or None
             try:
                 if "max_output_tokens" in signature(self.summarizer).parameters:
                     summary_value = self.summarizer(evidence, max_output_tokens=max_output_tokens, previous_summary=previous_summary)
@@ -246,6 +251,14 @@ class CompactionService:
                     metadata={"source": "compaction_service"},
                 )
             summary_content = _validate_summary(summary_value)
+            if isinstance(summary_content, dict):
+                summary_content, summary_redactions = sanitize_memory_content(summary_content)
+            else:
+                result = redact_memory_value(summary_content)
+                summary_content = str(result.value)
+                summary_redactions = result.redaction_count
+                validate_memory_content({"summary": summary_content})
+            redaction_count = evidence_redactions + previous_redactions + summary_redactions
             if estimate_tokens(summary_content) > max_output_tokens:
                 raise ContextBudgetExceeded("compaction summary exceeds its output budget", reason="summary_output_overflow")
         except Exception as exc:
@@ -257,6 +270,14 @@ class CompactionService:
                 metadata={"source": "compaction_service"},
             )
             raise
+        if redaction_count:
+            self.store.append_event(
+                session_id=session_id,
+                event_type="context_summary_redacted",
+                payload={"redaction_count": redaction_count, "message_count": len(summary_payload)},
+                turn_id=current_turn_id,
+                metadata={"source": "compaction_service"},
+            )
         newly_covered_message_ids = tuple(covered_message_ids)
         covered_message_ids = list(dict.fromkeys([*(latest_summary.metadata.get("covered_message_ids", []) if latest_summary else []), *covered_message_ids]))
         all_sequences = [self.store.get_turn(message.turn_id).sequence for message, _ in messages if message.message_id in covered_message_ids]
