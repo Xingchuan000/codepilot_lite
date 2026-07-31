@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shlex
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,6 +15,7 @@ from codepilot.agent.evidence import (
 )
 from codepilot.llm.types import ChatMessage, RichChatMessage
 from codepilot.router.actions import ToolRouteResult
+from codepilot.tools.test_tools import looks_like_pytest_command
 
 
 @dataclass
@@ -40,6 +40,7 @@ class AgentState:
     completion_kind: CompletionKind | None = None
     delivery_kind: str | None = None
     messages: list[ChatMessage | RichChatMessage] = field(default_factory=list)
+    base_message_count: int = 0
     step: int = 0
     max_steps: int = 12
     finished: bool = False
@@ -112,23 +113,6 @@ def _collect_changed_paths(metadata: dict[str, object], *, include_path_when_cha
     return changed_paths
 
 
-def looks_like_pytest_command(command: str) -> bool:
-    """用很小的启发式判断命令是否是在跑 pytest。"""
-
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False
-    if not tokens:
-        return False
-    first_token = Path(tokens[0]).name
-    if first_token == "pytest":
-        return True
-    if len(tokens) >= 3 and first_token.startswith("python") and tokens[1] == "-m" and tokens[2] == "pytest":
-        return True
-    return False
-
-
 def create_initial_state(
     task: str,
     repo: str | Path,
@@ -150,6 +134,7 @@ def create_initial_state(
         evidence_reasons=[],
         max_steps=max_steps,
         messages=list(messages or []),
+        base_message_count=len(messages or []),
     )
     refresh_evidence_state(state)
     return state

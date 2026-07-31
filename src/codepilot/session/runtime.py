@@ -1,30 +1,39 @@
 from __future__ import annotations
 
+import logging
 import os
 import socket
+import sqlite3
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop, TurnExecutionContext
 from codepilot.llm.types import CodePilotLLMClient
+from codepilot.memory.candidates import MemoryCandidateExtractor
+from codepilot.memory.turn_window import TurnContextWindow
 from codepilot.router import ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError
 from codepilot.session.compaction import CompactionService
 from codepilot.session.context import ContextAssembler
 from codepilot.session.database import SessionDatabase
 from codepilot.session.git_context import read_git_context
-from codepilot.session.models import BranchConfirmationRequired, TurnRecord, TurnSubmission
 from codepilot.session.model_capabilities import ModelCapabilities, resolve_model_context_profile
+from codepilot.session.models import BranchConfirmationRequired, TurnRecord, TurnSubmission
 from codepilot.session.permission import PermissionRequestContext
 from codepilot.session.service import SessionService
 from codepilot.session.store import SessionStore
 from codepilot.session.tool_lifecycle import SQLiteToolLifecycleObserver
 from codepilot.session.trace_recorder import SessionTraceRecorder
 
+logger = logging.getLogger(__name__)
 
+_LEASE_RENEW_INTERVAL_SECONDS = 30
+_LEASE_RETRY_INTERVAL_SECONDS = 1
+_LEASE_MAX_BUSY_RETRIES = 5
 _UNCONFIRMED_BRANCH = object()
 BLOCKING_TURN_STATUSES = {"queued", "running", "waiting_permission", "recovery_required"}
 
@@ -47,6 +56,7 @@ class SessionRuntime:
         self.service = SessionService(database)
         self.assembler = ContextAssembler(database, self.store)
         self.compaction_service = CompactionService(database)
+        self.memory_candidates = MemoryCandidateExtractor(database)
         self.llm = llm
         self.router_factory = router_factory
         self.max_steps = max_steps
@@ -115,6 +125,10 @@ class SessionRuntime:
                 router.permission_request_context = PermissionRequestContext(session.session_id, turn_id, attempt.attempt_id, None)
             # Trace 只记录事件；业务表由稳定 ID 的 Lifecycle Observer 单独维护。
             router.lifecycle_observer = SQLiteToolLifecycleObserver(self.database, session.session_id, turn_id, attempt_id, trace)
+            user_message = self.store.get_user_message_for_turn(turn_id)
+            if user_message is None:
+                raise LookupError(turn_id)
+            profile = resolve_model_context_profile(turn.provider_snapshot, turn.model_snapshot, self.capabilities)
             loop = MinimalAgentLoop(
                 llm=self.llm,
                 router=router,
@@ -122,11 +136,8 @@ class SessionRuntime:
                 max_steps=self.max_steps,
                 cancellation_token=_LeaseAwareCancellationToken(cancellation_token, lease_lost),
                 event_sink=trace,
+                context_window=TurnContextWindow(self.database, profile),
             )
-            user_message = self.store.get_user_message_for_turn(turn_id)
-            if user_message is None:
-                raise LookupError(turn_id)
-            profile = resolve_model_context_profile(turn.provider_snapshot, turn.model_snapshot, self.capabilities)
             self.store.update_turn_metadata(
                 turn_id,
                 {
@@ -176,6 +187,7 @@ class SessionRuntime:
         heartbeat.join()
         if result.status in {"success", "message_complete"}:
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="completed", turn_status="completed", worker_id=worker_id)
+            self.memory_candidates.extract(session.session_id, turn_id)
         elif result.status == "cancelled":
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="cancelled", turn_status="cancelled", worker_id=worker_id)
         else:
@@ -203,15 +215,39 @@ def _renew_lease_until_stopped(
     stop: threading.Event,
     lease_lost: threading.Event,
 ) -> None:
-    while not stop.wait(30):
-        while not stop.is_set():
+    while not stop.wait(_LEASE_RENEW_INTERVAL_SECONDS):
+        for retry_index in range(_LEASE_MAX_BUSY_RETRIES + 1):
+            if stop.is_set():
+                return
             try:
                 store.renew_attempt_lease(attempt_id, worker_id, _lease_expiry())
                 break
             except RuntimeError:
                 lease_lost.set()
                 return
-            except Exception:
-                # SQLite 短暂 busy/IO 错误每秒重试，不能让 heartbeat 静默消失。
-                if stop.wait(1):
+            except sqlite3.OperationalError as exc:
+                message = str(exc).lower()
+                transient = "locked" in message or "busy" in message
+                if not transient:
+                    logger.exception(
+                        "Session lease renewal failed with non-transient SQLite error",
+                        extra={"attempt_id": attempt_id},
+                    )
+                    lease_lost.set()
                     return
+                if retry_index >= _LEASE_MAX_BUSY_RETRIES:
+                    logger.error(
+                        "Session lease renewal exhausted SQLite busy retries",
+                        extra={"attempt_id": attempt_id},
+                    )
+                    lease_lost.set()
+                    return
+                if stop.wait(_LEASE_RETRY_INTERVAL_SECONDS):
+                    return
+            except Exception:
+                logger.exception(
+                    "Unexpected session lease renewal failure",
+                    extra={"attempt_id": attempt_id},
+                )
+                lease_lost.set()
+                return

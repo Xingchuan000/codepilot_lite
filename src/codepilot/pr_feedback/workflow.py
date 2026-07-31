@@ -30,6 +30,7 @@ from codepilot.repo.git_utils import sha256_file
 from codepilot.repo.models import RepoSafetyConfig
 from codepilot.repo.safety import check_repo_safety
 from codepilot.repo.worktree import create_issue_worktree
+from codepilot.workflow_artifacts import build_artifact_record, prepare_owned_artifacts
 
 
 PR_FEEDBACK_ARTIFACT_NAMES = [
@@ -43,17 +44,6 @@ PR_FEEDBACK_ARTIFACT_NAMES = [
 ]
 
 
-def _ensure_can_write(run_dir: Path, *, overwrite: bool) -> None:
-    """只管理第十四步自己的根目录产物，不碰 follow-up attempt 目录。"""
-
-    existing = [run_dir / name for name in PR_FEEDBACK_ARTIFACT_NAMES if (run_dir / name).exists()]
-    if existing and not overwrite:
-        raise FileExistsError("PR feedback artifacts already exist: " + ", ".join(str(path) for path in existing))
-    if overwrite:
-        for path in existing:
-            path.unlink()
-
-
 def _write_json(path: Path, payload: dict[str, Any], *, overwrite: bool) -> Path:
     """把 payload 统一写成 UTF-8 JSON。"""
 
@@ -62,24 +52,6 @@ def _write_json(path: Path, payload: dict[str, Any], *, overwrite: bool) -> Path
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
-
-
-def _artifact_record(name: str, path: Path | None, *, run_dir: Path) -> dict[str, Any] | None:
-    """把实际文件压缩成 manifest 里的稳定索引。"""
-
-    if path is None:
-        return None
-    try:
-        display_path = str(path.resolve().relative_to(run_dir.resolve()))
-    except ValueError:
-        display_path = path.name
-    return {
-        "name": name,
-        "path": display_path,
-        "exists": path.exists(),
-        "size_bytes": path.stat().st_size if path.exists() else None,
-        "sha256": sha256_file(path) if path.exists() else None,
-    }
 
 
 def _sha256_or_none(path: Path) -> str | None:
@@ -140,7 +112,11 @@ def _write_manifest(
         "new_commit_sha": result.new_commit_sha,
         "blockers": result.blockers,
         "warnings": result.warnings,
-        "generated_artifacts": [item for item in (_artifact_record(name, path, run_dir=result.run_dir) for name, path in artifacts.items()) if item is not None],
+        "generated_artifacts": [
+            build_artifact_record(name, path, run_dir=result.run_dir)
+            for name, path in artifacts.items()
+            if path is not None
+        ],
     }
     return _write_json(output_path, payload, overwrite=overwrite)
 
@@ -415,7 +391,12 @@ def run_pr_feedback_loop(
     run_dir_path = Path(run_dir).expanduser().resolve()
     if not run_dir_path.exists() or not run_dir_path.is_dir():
         raise FileNotFoundError(run_dir_path)
-    _ensure_can_write(run_dir_path, overwrite=overwrite)
+    prepare_owned_artifacts(
+        run_dir_path,
+        PR_FEEDBACK_ARTIFACT_NAMES,
+        overwrite=overwrite,
+        label="PR feedback",
+    )
     artifact_paths = resolve_feedback_artifact_paths(run_dir_path)
     manifest_path = Path(auto_pr_manifest_path).expanduser().resolve() if auto_pr_manifest_path else run_dir_path / "auto_pr_manifest.json"
 

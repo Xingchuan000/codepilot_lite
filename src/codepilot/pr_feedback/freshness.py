@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codepilot.auto_pr.git_push import get_remote_branch_sha
+from codepilot.github.git_branches import get_remote_branch_sha
 from codepilot.pr_feedback.github_client import PRFeedbackGitHubClientProtocol
 from codepilot.pr_feedback.models import FeedbackFreshness, PRFeedbackStaleHeadError, PRRef
 

@@ -14,7 +14,11 @@ from codepilot.agent.actions import (
     parse_agent_turn,
 )
 from codepilot.agent.evidence import AssistantStopReason, CompletionKind, EvidenceDecision
-from codepilot.agent.observation import format_finish_blocked_observation, format_observation, format_parse_error_observation
+from codepilot.agent.observation import (
+    format_finish_blocked_observation,
+    format_observation,
+    format_parse_error_observation,
+)
 from codepilot.agent.outcome import RunOutcomeSnapshot, build_run_outcome
 from codepilot.agent.prompts import build_initial_messages
 from codepilot.agent.state import (
@@ -28,12 +32,11 @@ from codepilot.agent.state import (
     update_state_from_route_result,
 )
 from codepilot.llm.fake import FakeLLMExhaustedError
-from codepilot.llm.types import ChatMessage, CodePilotLLMClient, LLMResponse, LLMStreamEvent, RichChatMessage
+from codepilot.llm.types import ChatMessage, CodePilotLLMClient, LLMResponse, RichChatMessage
 from codepilot.router import ToolAction, ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError, ToolPreExecutionError
 from codepilot.tools.base import ToolSpec
 from codepilot.tools.registry import list_tool_specs
-from codepilot.trace.logger import TraceLogger
 from codepilot.trace.protocol import TraceRecorder
 
 
@@ -146,6 +149,21 @@ class AgentEventSink(Protocol):
     def assistant_message_interrupted(self, **kwargs: Any) -> None: ...
 
 
+class AgentContextWindow(Protocol):
+    def prepare_for_llm(
+        self,
+        *,
+        session_id: str | None,
+        turn_id: str | None,
+        attempt_id: str | None,
+        step: int,
+        messages: list[ChatMessage | RichChatMessage],
+        base_message_count: int,
+        task: str,
+        evidence: dict[str, Any],
+    ) -> tuple[list[ChatMessage | RichChatMessage], int]: ...
+
+
 def _inject_repo_if_missing(arguments: dict[str, Any], repo: Path) -> dict[str, Any]:
     """确保模型不能借 repo 参数切换到当前仓库之外。"""
 
@@ -232,6 +250,7 @@ class MinimalAgentLoop:
         prompt_extra_tool_specs: list[ToolSpec] | None = None,
         cancellation_token: Any | None = None,
         event_sink: AgentEventSink | None = None,
+        context_window: AgentContextWindow | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be greater than 0")
@@ -249,6 +268,7 @@ class MinimalAgentLoop:
         self.prompt_extra_tool_specs = list(prompt_extra_tool_specs or [])
         self.cancellation_token = cancellation_token
         self.event_sink = event_sink
+        self.context_window = context_window
         self.tool_specs_by_name = {}
         for spec in list_tool_specs():
             self.tool_specs_by_name[spec.name] = spec
@@ -585,6 +605,17 @@ class MinimalAgentLoop:
                 if self._cancel_requested():
                     return self._cancelled_result(state)
                 state.step += 1
+                if self.context_window is not None:
+                    state.messages, state.base_message_count = self.context_window.prepare_for_llm(
+                        session_id=context.session_id,
+                        turn_id=context.turn_id,
+                        attempt_id=context.attempt_id,
+                        step=state.step,
+                        messages=state.messages,
+                        base_message_count=state.base_message_count,
+                        task=state.task,
+                        evidence=evidence_snapshot(state).to_payload(),
+                    )
                 try:
                     response = self._complete_llm(state.messages, context)
                 except FakeLLMExhaustedError as exc:

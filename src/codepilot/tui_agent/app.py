@@ -8,7 +8,13 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widgets import Footer, Header, Input
+
 from codepilot.permissions import PermissionResponse
+from codepilot.memory.service import MemoryService
 from codepilot.agent.runner import ModelConfigurationRequired, get_minisweagent_model_names, resolve_codepilot_model_identity
 from codepilot.session.database import SessionDatabase
 from codepilot.session.artifacts import ArtifactStore
@@ -27,26 +33,20 @@ from codepilot.tui_agent.models import AgentRunView, PermissionMode, ProjectCont
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker
 from codepilot.tui_agent.project_resolver import resolve_project
 from codepilot.tui_agent.runner import TUIAgentRunner, TUIRunnerConfig
-from codepilot.tui_agent.session_modals import format_branch_confirmation, format_recovery_modal
+from codepilot.tui_agent.screens import (
+    BranchConfirmationModal,
+    PermissionModal,
+    RecoveryModal,
+    SelectableStatic,
+    TranscriptCopyScreen,
+)
 from codepilot.tui_agent.session_hydrator import hydrate_session_view
 from codepilot.tui_agent.session_picker import SessionPicker, SessionPickerResult, SessionPickerScreen
 from codepilot.tui_agent.model_picker import ModelPickerResult, ModelPickerScreen
 from codepilot.tui_agent.session_controller import SessionController, now_iso
 
 
-SESSION_LIFECYCLE_COMMANDS = {"sessions", "switch", "new", "archive", "unarchive", "move", "compact", "export-session"}
-
-
-def _load_textual():
-    try:
-        from textual.app import App, ComposeResult
-        from textual.binding import Binding
-        from textual.containers import Horizontal, Vertical, VerticalScroll
-        from textual.screen import ModalScreen
-        from textual.widgets import Footer, Header, Input, Static, TextArea
-    except ImportError as exc:
-        raise RuntimeError("Textual is not installed. Install textual or use codepilot agent-run.") from exc
-    return App, ComposeResult, Horizontal, Vertical, VerticalScroll, Footer, Header, Input, Static, TextArea, ModalScreen, Binding
+SESSION_LIFECYCLE_COMMANDS = {"sessions", "switch", "new", "archive", "unarchive", "move", "compact", "memory", "export-session"}
 
 
 logger = logging.getLogger(__name__)
@@ -63,8 +63,6 @@ def create_tui_agent_app(
     max_steps: int | None = None,
     session_database: SessionDatabase | None = None,
 ):
-    App, ComposeResult, Horizontal, Vertical, VerticalScroll, Footer, Header, Input, Static, TextArea, ModalScreen, Binding = _load_textual()
-
     project_context = resolve_project(project)
     merged = merge_config(
         cli_model=model,
@@ -108,156 +106,7 @@ def create_tui_agent_app(
     session_picker = SessionPicker(service)
     session_exporter = SessionExporter(database, paths)
     compaction_service = CompactionService(database)
-
-    class SelectableStatic(Static):
-        can_focus = True
-
-        def selection_updated(self, selection) -> None:
-            super().selection_updated(selection)
-            if selection is None:
-                return
-            selected_text = self.screen.get_selected_text() if hasattr(self.screen, "get_selected_text") else ""
-            if selected_text:
-                self.app.copy_to_clipboard(selected_text)
-
-    class TranscriptCopyScreen(ModalScreen[None]):
-        BINDINGS = [Binding("escape", "dismiss", "Close"), Binding("ctrl+a", "select_all", "Select all")]
-
-        def __init__(self, text: str) -> None:
-            super().__init__()
-            self.text = text
-
-        def compose(self) -> ComposeResult:
-            yield TextArea(self.text, read_only=True, id="copy-text")
-
-        def on_mount(self) -> None:
-            self.query_one("#copy-text", TextArea).focus()
-
-        def action_select_all(self) -> None:
-            self.query_one("#copy-text", TextArea).select_all()
-
-        def action_dismiss(self) -> None:
-            self.dismiss()
-
-    class PermissionModal(ModalScreen[PermissionResponse | None]):
-        BINDINGS = [
-            Binding("y", "approve_once", "Approve once"),
-            Binding("s", "approve_session", "Approve for session"),
-            Binding("n", "deny", "Deny"),
-            Binding("a", "abort_pending", "Abort pending"),
-            Binding("escape", "deny", "Deny"),
-        ]
-
-        def __init__(self, request: dict[str, Any]) -> None:
-            super().__init__()
-            self.request = request
-            self.can_approve_session = bool(self.request.get("scope_key"))
-
-        def compose(self) -> ComposeResult:
-            actions = "Actions: Y = once, N/Esc = deny"
-            if self.can_approve_session:
-                actions = "Actions: Y = once, S = session, N/Esc = deny"
-            yield Static(
-                "\n".join(
-                    [
-                        f"Agent wants to run/edit: {self.request.get('tool_name')}",
-                        f"Reason: {self.request.get('reason')}",
-                        f"Risk: {self.request.get('risk')} / {self.request.get('side_effect')}",
-                        f"Matched rule: {self.request.get('matched_rule')}",
-                        f"Arguments: {self.request.get('arguments_preview')}",
-                        f"Session scope: {self.request.get('scope_key') or '(none)'}",
-                        actions,
-                    ]
-                )
-            )
-
-        def _resolve(self, decision: str, reason: str) -> None:
-            request_id = self.request.get("request_id")
-            if not request_id:
-                event_stream.publish(TUIEvent(type="error", timestamp=now_iso(), payload={"error": "permission request missing request_id"}))
-                self.dismiss()
-                return
-            response = PermissionResponse(
-                request_id=str(request_id),
-                decision=decision,
-                reason=reason,
-                responded_at=now_iso(),
-            )
-            runner.resolve_permission(response)
-            self.dismiss(response)
-
-        def action_approve_once(self) -> None:
-            self._resolve("approve_once", "approved once from TUI")
-
-        def action_approve_session(self) -> None:
-            if not self.can_approve_session:
-                return
-            # 只有 scope_key 存在时才允许升级为会话级授权，避免把一次性请求误放大。
-            self._resolve("approve_session", "approved for session from TUI")
-
-        def action_deny(self) -> None:
-            self._resolve("deny", "denied from TUI")
-
-        def action_abort_pending(self) -> None:
-            request_id = self.request.get("request_id")
-            if not request_id:
-                self.dismiss()
-                return
-            recovery_service.abort_pending_approval(str(request_id))
-            self.dismiss()
-
-    class BranchConfirmationModal(ModalScreen[bool]):
-        """显示可恢复的分支变化确认；取消不会调用任何数据库写入方法。"""
-
-        BINDINGS = [Binding("y", "confirm", "Continue"), Binding("n", "cancel", "Cancel"), Binding("escape", "cancel", "Cancel")]
-
-        def __init__(self, pending: PendingTurnSubmission) -> None:
-            super().__init__()
-            self.pending = pending
-
-        def compose(self) -> ComposeResult:
-            yield Static(
-                format_branch_confirmation(
-                    BranchConfirmationRequired(
-                        session_id=self.pending.session_id,
-                        old_branch=self.pending.old_branch,
-                        new_branch=self.pending.new_branch,
-                    )
-                )
-            )
-
-        def action_confirm(self) -> None:
-            self.dismiss(True)
-
-        def action_cancel(self) -> None:
-            self.dismiss(False)
-
-    class RecoveryModal(ModalScreen[str]):
-        """仅对自动对账无法确认的副作用显示人工恢复动作。"""
-
-        BINDINGS = [
-            Binding("m", "mark_completed", "Mark completed"),
-            Binding("r", "retry", "Retry"),
-            Binding("a", "abort", "Abort"),
-        ]
-
-        def __init__(self, tool_call_id: str) -> None:
-            super().__init__()
-            self.tool_call_id = tool_call_id
-            self.call = recovery_service.store.get_tool_call(tool_call_id)
-            self.result = recovery_service.reconcile_tool_call(tool_call_id)
-
-        def compose(self) -> ComposeResult:
-            yield Static(format_recovery_modal(self.call.tool_name, self.call.arguments, self.call.started_at, self.result))
-
-        def action_mark_completed(self) -> None:
-            self.dismiss("mark completed")
-
-        def action_retry(self) -> None:
-            self.dismiss("retry")
-
-        def action_abort(self) -> None:
-            self.dismiss("abort")
+    memory_service = MemoryService(database)
 
     class CodePilotTUIAgentApp(App):
         permission_mode = merged.permission_mode
@@ -473,13 +322,35 @@ def create_tui_agent_app(
                 self._session_service.unarchive_session(result.unarchive_session_id)
             if result.compact_requested:
                 self._compaction_service.compact(self.session.session_id, force=True)
+            if result.memory_action is not None:
+                action, values = result.memory_action
+                if action == "list":
+                    return _format_memories(memory_service.list(self.session.project_id))
+                if action == "pending":
+                    return _format_candidates(memory_service.candidates.list(self.session.project_id))
+                if action == "add":
+                    kind, canonical_key, *text = values
+                    memory = memory_service.add(
+                        self.session.project_id,
+                        kind,
+                        canonical_key,
+                        " ".join(text),
+                        source_session_id=self.session.session_id,
+                    )
+                    return f"Memory added: {memory.memory_id}"
+                if action == "approve":
+                    return f"Memory approved: {memory_service.approve(values[0]).memory_id}"
+                if action == "reject":
+                    memory_service.reject(values[0])
+                    return f"Memory candidate rejected: {values[0]}"
+                if action == "forget":
+                    return f"Memory forgotten: {memory_service.forget(values[0]).memory_id}"
+                return _format_memories([result.memory for result in memory_service.search(self.session.project_id, " ".join(values))])
             if result.export_session_requested:
                 if self.session_exporter is None:
                     raise RuntimeError("Session export requires a SQLite Session database")
                 exported = self.session_exporter.export(self.session.session_id, result.export_target)
                 return f"Session exported: {exported}"
-            if result.export_transcript_requested:
-                return result.output
             if result.next_new_session_project is not None:
                 self._new_session_project_context = resolve_project(result.next_new_session_project)
             return None
@@ -491,7 +362,15 @@ def create_tui_agent_app(
                 request = self.runner.restore_pending_permission(plan.pending_approval_request_ids[0])
                 self._reducer.view = replace(self._reducer.view, status="waiting_permission")
                 self._shown_permission_request_ids.add(request.request_id)
-                self.push_screen(PermissionModal(request.__dict__), self._on_restored_permission_resolved)
+                self.push_screen(
+                    PermissionModal(
+                        request.__dict__,
+                        runner=runner,
+                        event_stream=event_stream,
+                        recovery_service=recovery_service,
+                    ),
+                    self._on_restored_permission_resolved,
+                )
                 return
             if plan.resumable_attempt_ids:
                 attempt = self._recovery_service.store.get_attempt(plan.resumable_attempt_ids[0])
@@ -501,7 +380,7 @@ def create_tui_agent_app(
             if plan.unresolved_tool_call_ids:
                 tool_call_id = plan.unresolved_tool_call_ids[0]
                 self.push_screen(
-                    RecoveryModal(tool_call_id),
+                    RecoveryModal(tool_call_id, recovery_service=recovery_service),
                     lambda decision, tool_call_id=tool_call_id: self._resolve_recovery(tool_call_id, decision),
                 )
 
@@ -683,7 +562,14 @@ def create_tui_agent_app(
                 if request_id not in pending_permission_ids:
                     continue
                 self._shown_permission_request_ids.add(request_id)
-                self.push_screen(PermissionModal(event.payload))
+                self.push_screen(
+                    PermissionModal(
+                        event.payload,
+                        runner=runner,
+                        event_stream=event_stream,
+                        recovery_service=recovery_service,
+                    )
+                )
             for event in events:
                 if event.type != "branch_confirmation_required" or event.session_id is None:
                     continue
@@ -813,4 +699,23 @@ def _changes_session_lifecycle(result: Any) -> bool:
         or result.compact_requested
         or result.model_name is not None
         or result.open_model_picker
+        or result.memory_action is not None
+    )
+
+
+def _format_memories(memories) -> str:
+    if not memories:
+        return "No project memories."
+    return "\n".join(
+        f"{memory.memory_id} [{memory.kind}] {memory.title}: {memory.content.get('text', memory.content)}"
+        for memory in memories
+    )
+
+
+def _format_candidates(candidates) -> str:
+    if not candidates:
+        return "No pending memory candidates."
+    return "\n".join(
+        f"{candidate.candidate_id} [{candidate.kind}] {candidate.canonical_key}: {candidate.content.get('text', candidate.content)}"
+        for candidate in candidates
     )

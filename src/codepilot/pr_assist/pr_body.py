@@ -37,18 +37,23 @@ def display_artifact_path(path: str | Path | None, run_dir: str | Path) -> str |
 
 
 def read_json_if_exists(path: str | Path | None) -> dict[str, Any] | None:
-    """读取可选 JSON 文件；读取失败时按缺失处理。"""
+    """读取可选 JSON；缺失返回 None，存在但损坏则明确报错。"""
 
     if path is None:
         return None
+
     file_path = Path(path)
     if not file_path.exists():
         return None
+
     try:
         data = json.loads(file_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON artifact: {file_path}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"JSON artifact must contain an object: {file_path}")
+    return data
 
 
 def build_pr_body_data(

@@ -7,7 +7,7 @@ from typing import Any, Protocol
 
 import requests
 
-from codepilot.auto_pr.github_client import redact_github_error
+from codepilot.github.auth import is_github_token_available, redact_github_error
 from codepilot.pr_feedback.models import PRFeedbackGitHubError, PRRef
 
 
@@ -31,12 +31,6 @@ class PRFeedbackGitHubClientProtocol(Protocol):
     def list_pull_request_review_comments(self, pr: PRRef) -> list[dict[str, Any]]: ...
 
     def post_pr_comment(self, pr: PRRef, body: str) -> dict[str, Any]: ...
-
-
-def is_github_token_available(token_env: str = "GITHUB_TOKEN") -> bool:
-    """仅检查环境变量是否存在，不回传敏感值。"""
-
-    return bool(os.environ.get(token_env))
 
 
 def assert_github_token_available(token_env: str = "GITHUB_TOKEN") -> None:

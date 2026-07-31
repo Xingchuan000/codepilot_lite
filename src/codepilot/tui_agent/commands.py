@@ -3,9 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from codepilot.session.models import SessionRecord
 from codepilot.tui_agent.diff_view import format_diff_summary
 from codepilot.tui_agent.layout import format_side_status
-from codepilot.session.models import SessionRecord
 from codepilot.tui_agent.models import AgentRunView, PermissionMode, ProjectContext
 
 
@@ -19,7 +19,6 @@ class CommandResult:
     permission_mode: PermissionMode | None = None
     open_copy_mode: bool = False
     copy_target: str | None = None
-    export_transcript_requested: bool = False
     switch_session_id: str | None = None
     rename_title: str | None = None
     open_session_picker: bool = False
@@ -31,6 +30,7 @@ class CommandResult:
     next_new_session_project: Path | None = None
     model_name: str | None = None
     open_model_picker: bool = False
+    memory_action: tuple[str, tuple[str, ...]] | None = None
 
 def parse_slash_command(text: str) -> tuple[str, list[str]]:
     parts = text.strip().split()
@@ -51,7 +51,7 @@ def handle_command(
     if not command:
         return CommandResult(handled=False)
     if command == "help":
-        return CommandResult(handled=True, output="/help /sessions /new /switch <session-id> /rename <title> /model [model-name] /archive /unarchive <session-id> /compact /export-session [path] /cancel /exit")
+        return CommandResult(handled=True, output="/help /sessions /new /switch <session-id> /rename <title> /model [model-name] /archive /unarchive <session-id> /compact /memory [list|pending|add|approve|reject|forget|search] /export-session [path] /cancel /exit")
     if command == "sessions":
         return CommandResult(handled=True, output="Session picker requested", open_session_picker=True)
     if command == "switch":
@@ -73,6 +73,18 @@ def handle_command(
         return CommandResult(handled=True, output="Session unarchive requested", unarchive_session_id=args[0] if args else None)
     if command == "compact":
         return CommandResult(handled=True, output="Session compaction requested", compact_requested=True)
+    if command == "memory":
+        action = args[0].lower() if args else "list"
+        values = tuple(args[1:])
+        if action == "add" and len(values) < 3:
+            return CommandResult(handled=True, output="Usage: /memory add <kind> <canonical-key> <text>")
+        if action in {"approve", "reject", "forget"} and len(values) != 1:
+            return CommandResult(handled=True, output=f"Usage: /memory {action} <id>")
+        if action == "search" and not values:
+            return CommandResult(handled=True, output="Usage: /memory search <query>")
+        if action not in {"list", "pending", "add", "approve", "reject", "forget", "search"}:
+            return CommandResult(handled=True, output=f"Unknown memory command: {action}")
+        return CommandResult(handled=True, output="Memory command requested", memory_action=(action, values))
     if command == "export-session":
         return CommandResult(
             handled=True,
@@ -126,8 +138,6 @@ def handle_command(
             output=f"Next new Session project set to: {path}\nCurrent Session project was not changed.",
             next_new_session_project=path,
         )
-    if command == "export-transcript":
-        return CommandResult(handled=True, output="/export-transcript is deprecated; use /export-session", export_transcript_requested=True)
     if command == "new":
         return CommandResult(handled=True, output="Ready for new task", new_task_requested=True)
     if command == "cancel":

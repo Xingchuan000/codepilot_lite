@@ -9,7 +9,6 @@ from typing import Any
 from codepilot.router.actions import ToolAction
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
-from codepilot.session.ids import now_iso
 from codepilot.session.models import to_jsonable
 from codepilot.session.reconcilers import shell_command_is_read_only
 from codepilot.session.store import SessionStore

@@ -8,6 +8,7 @@ from typing import Any
 
 from codepilot.permissions import PermissionRequest
 from codepilot.tui_agent.models import AgentRunView, TUIEvent, TimelineItem, TranscriptItem
+from codepilot.tui_agent.preview import safe_dict_preview, truncate_text
 
 
 VALID_RUN_STATUSES = {
@@ -27,39 +28,6 @@ VALID_RUN_STATUSES = {
     "llm_exhausted",
     "unknown",
 }
-
-
-def _truncate_text(text: str, limit: int = 1200) -> str:
-    if len(text) <= limit:
-        return text
-    suffix = "... truncated"
-    return f"{text[: max(0, limit - len(suffix))]}{suffix}"
-
-
-def _safe_dict_preview(value: Any, limit: int = 800) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    preview: dict[str, Any] = {}
-    for key, item in value.items():
-        key_text = str(key)
-        if isinstance(item, dict):
-            preview_item: Any = _safe_dict_preview(item, max(80, limit // 4))
-        elif isinstance(item, list):
-            preview_item = [
-                entry if isinstance(entry, (dict, list)) else str(entry)
-                for entry in item[:5]
-            ]
-        elif isinstance(item, str):
-            preview_item = _truncate_text(item, max(40, limit // 4))
-        else:
-            preview_item = item
-        candidate = {**preview, key_text: preview_item}
-        if len(json.dumps(candidate, ensure_ascii=False)) > limit:
-            break
-        preview[key_text] = preview_item
-        if len(json.dumps(preview, ensure_ascii=False)) >= limit:
-            break
-    return preview
 
 
 def _make_item_id(event: TUIEvent, suffix: str) -> str:
@@ -163,7 +131,7 @@ def _reduce_user_message(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         timestamp=event.timestamp,
         run_id=event.run_id or view.run_id,
         title="You",
-        body=_truncate_text(text),
+        body=truncate_text(text),
         copy_text=f"You: {text}",
     )
     return _append_transcript(replace(view, task=text, status="running"), item)
@@ -184,7 +152,7 @@ def _reduce_llm_call_finished(view: AgentRunView, event: TUIEvent) -> AgentRunVi
             timestamp=event.timestamp,
             run_id=event.run_id or view.run_id,
             title="+ Plan",
-            body=_truncate_text(parsed["short_rationale"]),
+            body=truncate_text(parsed["short_rationale"]),
             copy_text=f"+ Plan: {parsed['short_rationale']}",
         )
         view = _append_transcript(replace(view, last_assistant_message=parsed["short_rationale"]), item)
@@ -198,7 +166,7 @@ def _reduce_agent_observation(view: AgentRunView, event: TUIEvent) -> AgentRunVi
         timestamp=event.timestamp,
         run_id=event.run_id or view.run_id,
         title="Observation",
-        body=_truncate_text(str(event.payload.get("output_summary") or event.payload.get("output_preview") or "")),
+        body=truncate_text(str(event.payload.get("output_summary") or event.payload.get("output_preview") or "")),
         copy_text=f"Observation: {event.payload.get('output_summary') or event.payload.get('output_preview') or ''}",
     )
     return _append_transcript(view, item)
@@ -228,7 +196,7 @@ def _reduce_tool_finished(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         run_id=event.run_id or view.run_id,
         step=item.step,
         title=title,
-        body=_truncate_text(str(body)),
+        body=truncate_text(str(body)),
         tool_name=item.tool_name,
         status="success" if success else "failed",
         copy_text="\n".join(filter(None, [title, str(body)])),
@@ -273,7 +241,7 @@ def _reduce_agent_action(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         run_id=event.run_id or view.run_id,
         step=item.step,
         title="→",
-        body=_truncate_text(f"{tool_name} {json.dumps(preview, ensure_ascii=False, sort_keys=True)}"),
+        body=truncate_text(f"{tool_name} {json.dumps(preview, ensure_ascii=False, sort_keys=True)}"),
         tool_name=tool_name,
         input_preview=preview,
         copy_text=f"→ {tool_name} {json.dumps(preview, ensure_ascii=False, sort_keys=True)}",
@@ -325,16 +293,16 @@ def _reduce_permission_requested(view: AgentRunView, event: TUIEvent) -> AgentRu
         body="\n".join(
             [
                 f"Reason: {request.reason}",
-                f"Arguments: {json.dumps(_safe_dict_preview(request.arguments_preview) or {}, ensure_ascii=False, sort_keys=True)}",
+                f"Arguments: {json.dumps(safe_dict_preview(request.arguments_preview) or {}, ensure_ascii=False, sort_keys=True)}",
             ]
         ),
         tool_name=request.tool_name,
-        input_preview=_safe_dict_preview(request.arguments_preview),
+        input_preview=safe_dict_preview(request.arguments_preview),
         copy_text="\n".join(
             [
                 f"? Permission required: {request.tool_name}",
                 f"Reason: {request.reason}",
-                f"Arguments: {json.dumps(_safe_dict_preview(request.arguments_preview) or {}, ensure_ascii=False, sort_keys=True)}",
+                f"Arguments: {json.dumps(safe_dict_preview(request.arguments_preview) or {}, ensure_ascii=False, sort_keys=True)}",
             ]
         ),
     )
@@ -442,7 +410,7 @@ def _reduce_agent_finished(view: AgentRunView, event: TUIEvent) -> AgentRunView:
             timestamp=event.timestamp,
             run_id=event.run_id or view.run_id,
             title="Task incomplete",
-            body=_truncate_text(status_body),
+            body=truncate_text(status_body),
             copy_text=status_body,
         )
         return _append_transcript(updated_view, item)
@@ -475,7 +443,7 @@ def _reduce_run_finished(view: AgentRunView, event: TUIEvent) -> AgentRunView:
             timestamp=event.timestamp,
             run_id=event.run_id or view.run_id,
             title="Run finished",
-            body=_truncate_text(status_body),
+            body=truncate_text(status_body),
             copy_text=status_body,
         ),
     )
@@ -490,7 +458,7 @@ def _reduce_command_output(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         timestamp=event.timestamp,
         run_id=event.run_id or view.run_id,
         title=f"$ {command}" if command else "$ command",
-        body=_truncate_text(output),
+        body=truncate_text(output),
         copy_text="\n".join(filter(None, [f"$ {command}" if command else "$ command", output])),
     )
     return _append_transcript(view, item)
@@ -508,7 +476,7 @@ def _reduce_error(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         timestamp=event.timestamp,
         run_id=event.run_id or view.run_id,
         title=title,
-        body=_truncate_text(body),
+        body=truncate_text(body),
         copy_text=f"! {body}",
     )
     return _append_transcript(

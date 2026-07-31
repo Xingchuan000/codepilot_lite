@@ -19,7 +19,6 @@ from codepilot.auto_pr.github_client import (
 )
 from codepilot.auto_pr.manifest_loader import (
     load_pr_assist_manifest,
-    load_source_artifact_manifest,
     resolve_required_auto_pr_artifacts,
     validate_pr_assist_manifest,
 )
@@ -37,8 +36,10 @@ from codepilot.auto_pr.models import (
 from codepilot.auto_pr.pr_creator import build_pr_create_request, create_pr_if_allowed, extract_pr_title
 from codepilot.auto_pr.safety import assert_remote_side_effect_allowed, build_auto_pr_safety_gate, summarize_safety_gate
 from codepilot.auto_pr.workflow_inputs import validate_head_branch, validate_repo_slug, validate_run_id
-from codepilot.pr_assist.manifest_loader import scan_token_like_strings
 from codepilot.repo.git_utils import sha256_file
+from codepilot.security.secrets import scan_token_like_strings
+from codepilot.workflow_artifacts import build_artifact_record, prepare_owned_artifacts
+from codepilot.workflow_manifest import load_source_artifact_manifest
 
 
 AUTO_PR_ARTIFACT_NAMES = [
@@ -46,33 +47,6 @@ AUTO_PR_ARTIFACT_NAMES = [
     "auto_pr_manifest.json",
     "controlled_auto_pr_workflow.yml",
 ]
-
-
-def _ensure_auto_pr_can_write(run_dir: Path, *, overwrite: bool) -> None:
-    """只清理第十三步自己的产物，绝不触碰前面步骤生成的文件。"""
-
-    existing = [run_dir / name for name in AUTO_PR_ARTIFACT_NAMES if (run_dir / name).exists()]
-    if existing and not overwrite:
-        raise FileExistsError("Auto PR artifacts already exist: " + ", ".join(str(path) for path in existing))
-    if overwrite:
-        for path in existing:
-            path.unlink()
-
-
-def _artifact_record(name: str, path: Path, *, run_dir: Path) -> dict[str, Any]:
-    """把实际文件压缩成 manifest 里的稳定索引记录。"""
-
-    try:
-        display_path = str(path.resolve().relative_to(run_dir.resolve()))
-    except ValueError:
-        display_path = path.name
-    return {
-        "name": name,
-        "path": display_path,
-        "exists": path.exists(),
-        "size_bytes": path.stat().st_size if path.exists() else None,
-        "sha256": sha256_file(path) if path.exists() else None,
-    }
 
 
 def _status_from_gate(gate: AutoPRSafetyGate, *, execute: bool, blockers: list[str], validation_errors: list[str]) -> str:
@@ -228,7 +202,7 @@ def write_auto_pr_manifest(
         "blockers": blockers,
         "warnings": warnings,
         "generated_artifacts": [
-            _artifact_record(name, artifact_path, run_dir=result.run_dir)
+            build_artifact_record(name, artifact_path, run_dir=result.run_dir)
             for name, artifact_path in artifacts.items()
             if artifact_path is not None
         ],
@@ -328,7 +302,12 @@ def run_auto_pr(
     run_dir_path = Path(run_dir).expanduser().resolve()
     if not run_dir_path.exists() or not run_dir_path.is_dir():
         raise FileNotFoundError(run_dir_path)
-    _ensure_auto_pr_can_write(run_dir_path, overwrite=overwrite)
+    prepare_owned_artifacts(
+        run_dir_path,
+        AUTO_PR_ARTIFACT_NAMES,
+        overwrite=overwrite,
+        label="Auto PR",
+    )
     pr_assist_manifest_path = run_dir_path / "pr_assist_manifest.json"
     if not pr_assist_manifest_path.exists():
         raise FileNotFoundError(pr_assist_manifest_path)

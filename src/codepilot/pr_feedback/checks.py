@@ -10,9 +10,6 @@ from codepilot.pr_feedback.models import CheckConclusion, CheckCorrelation, Chec
 
 
 _PENDING_STATUSES = {"queued", "in_progress", "waiting", "requested"}
-_ACTIONABLE_CONCLUSIONS = {"failure", "timed_out", "action_required", "cancelled"}
-
-
 def _normalize_conclusion(status: str | None, conclusion: str | None) -> CheckConclusion:
     """把 GitHub 原始状态字段压缩成统一结论。"""
 
@@ -160,23 +157,6 @@ def _normalize_workflow_job(raw: dict[str, Any], *, pr: PRRef, workflow_run_id: 
     )
 
 
-def collect_pr_checks(*, client: PRFeedbackGitHubClientProtocol, pr: PRRef) -> list[CheckRunSummary]:
-    """收集 checks / statuses / workflow run / workflow job 的统一摘要。"""
-
-    checks = [normalize_check_run(raw, pr=pr) for raw in client.list_check_runs_for_ref(pr)]
-    checks.extend(normalize_commit_status(raw, pr=pr) for raw in client.list_commit_statuses(pr))
-    for raw in client.list_workflow_runs_for_pr(pr):
-        workflow_run = normalize_workflow_run(raw, pr=pr)
-        checks.append(workflow_run)
-        run_id = raw.get("id")
-        if isinstance(run_id, int):
-            checks.extend(
-                _normalize_workflow_job(job, pr=pr, workflow_run_id=run_id)
-                for job in client.list_workflow_jobs(pr.owner, pr.repo, run_id)
-            )
-    return checks
-
-
 def collect_pr_checks_degraded(*, client: PRFeedbackGitHubClientProtocol, pr: PRRef) -> tuple[list[CheckRunSummary], list[str], list[str]]:
     """按固定顺序收集 checks，并允许局部 API 失败降级。"""
 
@@ -224,18 +204,6 @@ def summarize_check_state(checks: list[CheckRunSummary]) -> dict[str, int]:
         "failure": counter.get("failure", 0),
         "pending": counter.get("pending", 0),
     }
-
-
-def check_is_actionable_failure(check: CheckRunSummary) -> bool:
-    """判断一个 check 是否属于需要人工关注的失败项。"""
-
-    return check.conclusion in _ACTIONABLE_CONCLUSIONS
-
-
-def has_blocking_ci_failure(checks: list[CheckRunSummary]) -> bool:
-    """判断是否存在会阻止继续 follow-up 的 CI 失败。"""
-
-    return any(check_is_actionable_failure(check) for check in checks)
 
 
 def has_pending_checks(checks: list[CheckRunSummary]) -> bool:

@@ -1,4 +1,4 @@
-from codepilot.tools.patch_utils import extract_paths_from_patch, normalize_diff_path
+from codepilot.common.patches import extract_paths_from_patch, normalize_diff_path
 
 
 def test_normalize_diff_path_strips_a_prefix() -> None:

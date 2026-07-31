@@ -8,12 +8,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from jinja2 import StrictUndefined, Template
+from jinja2 import Template
 
 from codepilot.post_pr.models import (
     ApprovalAction,
     ApprovalDecision,
-    ApprovalDecisionStatus,
     ApprovalRequest,
     PostPRTerminalReason,
     to_post_pr_jsonable,

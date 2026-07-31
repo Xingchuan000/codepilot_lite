@@ -5,33 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from codepilot.auto_pr.git_push import push_existing_pr_branch
-from codepilot.pr_assist.commit import prepare_commit, render_commit_message
+from codepilot.github.git_branches import push_existing_pr_branch
 from codepilot.pr_feedback.freshness import assert_remote_branch_sha_for_push
 from codepilot.pr_feedback.models import PRFeedbackStaleHeadError, PRRef
+from codepilot.repo.commit import prepare_commit, render_commit_message
 from codepilot.repo.models import PatchMetadata
-
-
-def build_pr_branch_update_plan(
-    *,
-    pr: PRRef,
-    repo_path: str | Path,
-    expected_current_head_sha: str,
-    new_commit_sha: str,
-    remote_name: str = "origin",
-) -> dict[str, Any]:
-    """构造更新 PR 分支前的最小计划对象。"""
-
-    return {
-        "repo_path": str(Path(repo_path).expanduser().resolve()),
-        "remote_name": remote_name,
-        "remote_branch": pr.head_branch,
-        "base_branch": pr.base_branch,
-        "expected_current_head_sha": expected_current_head_sha,
-        "new_commit_sha": new_commit_sha,
-        "pull_number": pr.pull_number,
-        "url": pr.url,
-    }
 
 
 def push_pr_branch_update_if_allowed(

@@ -8,7 +8,7 @@ from time import perf_counter
 
 from codepilot.tools.base import ToolResult, ToolRisk, elapsed_ms
 from codepilot.tools.file_tools import _safe_join
-from codepilot.tools.patch_utils import extract_paths_from_patch
+from codepilot.common.patches import extract_paths_from_patch
 
 
 def _truncate_text(text: str, max_chars: int) -> tuple[str, bool]:

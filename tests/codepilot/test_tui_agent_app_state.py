@@ -90,24 +90,15 @@ class _FakeBinding:
 
 
 def _install_fake_textual(monkeypatch) -> None:
-    monkeypatch.setattr(
-        app_module,
-        "_load_textual",
-        lambda: (
-            _FakeApp,
-            object,
-            _FakeContainer,
-            _FakeContainer,
-            _FakeScrollContainer,
-            _FakeWidget,
-            _FakeWidget,
-            _FakeWidget,
-            _FakeWidget,
-            _FakeWidget,
-            _FakeModalScreen,
-            _FakeBinding,
-        ),
-    )
+    monkeypatch.setattr(app_module, "App", _FakeApp)
+    monkeypatch.setattr(app_module, "Horizontal", _FakeContainer)
+    monkeypatch.setattr(app_module, "Vertical", _FakeContainer)
+    monkeypatch.setattr(app_module, "VerticalScroll", _FakeScrollContainer)
+    monkeypatch.setattr(app_module, "Footer", _FakeWidget)
+    monkeypatch.setattr(app_module, "Header", _FakeWidget)
+    monkeypatch.setattr(app_module, "Input", _FakeWidget)
+    monkeypatch.setattr(app_module, "SelectableStatic", _FakeWidget)
+    monkeypatch.setattr(app_module, "Binding", _FakeBinding)
 
 
 def _widgets() -> dict[str, _FakeWidget]:

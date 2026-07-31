@@ -3,19 +3,15 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
 
 from codepilot.agent.prompts import build_system_prompt
 from codepilot.llm.types import ChatMessage, RichChatMessage
+from codepilot.memory.rendering import render_session_summary
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.context_budget import ContextBudgetAllocator, ContextItem, ContextPlan, estimate_tokens
 from codepilot.session.model_capabilities import ModelContextProfile
 from codepilot.session.models import ContextSummaryRecord, MessagePartRecord, MessageRecord
 from codepilot.session.store import SessionStore
-
-
-class ContextMessageAdapter(Protocol):
-    def build_messages(self, history: "SessionHistory", profile: ModelContextProfile) -> list[ChatMessage | RichChatMessage]: ...
 
 
 @dataclass(frozen=True)
@@ -26,6 +22,10 @@ class SessionHistory:
     summaries: tuple[ContextSummaryRecord, ...]
     messages: tuple[tuple[MessageRecord, tuple[MessagePartRecord, ...]], ...]
     branch_events: tuple[ChatMessage, ...] = ()
+    instruction_items: tuple[ContextItem, ...] = ()
+    memory_items: tuple[ContextItem, ...] = ()
+    turn_checkpoint_items: tuple[ContextItem, ...] = ()
+    turn_checkpoint_covered_ids: tuple[str, ...] = ()
 
 
 class TextActionContextAdapter:
@@ -54,10 +54,14 @@ class TextActionContextAdapter:
                 priority=1000 - index,
             )
             for index, message in enumerate(system_messages)
-        )
+        ) + tuple(item for item in history.instruction_items if item.mandatory)
 
         covered_message_ids: set[str] = set()
-        summary_items: list[ContextItem] = []
+        covered_message_ids.update(history.turn_checkpoint_covered_ids)
+        summary_items: list[ContextItem] = [
+            *(item for item in history.instruction_items if not item.mandatory),
+            *history.memory_items,
+        ]
         for index, summary in enumerate(history.summaries):
             if summary.status != "completed":
                 continue
@@ -70,10 +74,11 @@ class TextActionContextAdapter:
                         key=f"summary-{summary.summary_id}",
                         messages=(message,),
                         estimated_tokens=estimate_tokens(message),
-                        mandatory=False,
-                        priority=800 - index,
+                        mandatory=bool(summary.metadata.get("covered_message_ids")),
+                        priority=900 - index,
                     )
                 )
+        summary_items.extend(history.turn_checkpoint_items)
 
         grouped: dict[str, list[ChatMessage]] = {}
         group_metadata: dict[str, tuple[bool, int, str | None]] = {}
@@ -192,7 +197,11 @@ def _call_belongs_to_session(store: SessionStore, turn_id: str, session_id: str)
 
 
 def _summary_content(summary: ContextSummaryRecord) -> str:
-    content = summary.content if isinstance(summary.content, str) else json.dumps(summary.content, ensure_ascii=False)
+    content = (
+        summary.content
+        if isinstance(summary.content, str)
+        else render_session_summary(summary.content)
+    )
     return f"Persisted context summary ({summary.model}):\n{content}" if summary.model else f"Persisted context summary:\n{content}"
 
 

@@ -3,13 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from codepilot.mcp.models import MCPCallResult, MCPServerConfig, MCPToolInfo
-from codepilot.mcp.risk import classify_mcp_tool
 from codepilot.mcp.trace import build_mcp_config_hash, redact_mcp_mapping, redact_mcp_text, truncate_mcp_text
 from codepilot.tools.base import ToolResult
-
-
-def mcp_tool_to_codepilot_spec(tool: MCPToolInfo, *, server: MCPServerConfig):
-    return classify_mcp_tool(tool, server=server)
 
 
 def validate_structured_content(

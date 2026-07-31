@@ -6,7 +6,7 @@ from pathlib import Path
 from codepilot.repo.git_utils import GitCommandError, run_git, sha256_file
 from codepilot.repo.models import PatchMetadata
 from codepilot.repo.safety import find_protected_paths, normalize_repo_relative_path
-from codepilot.tools.patch_utils import extract_paths_from_patch
+from codepilot.common.patches import extract_paths_from_patch
 
 
 def extract_changed_files_from_patch(patch_path: str | Path) -> list[str]:

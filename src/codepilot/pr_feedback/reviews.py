@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from codepilot.pr_feedback.github_client import PRFeedbackGitHubClientProtocol, redact_feedback_text
+from codepilot.pr_feedback.github_client import PRFeedbackGitHubClientProtocol
 from codepilot.pr_feedback.models import PRRef, ReviewCommentSummary
 
 

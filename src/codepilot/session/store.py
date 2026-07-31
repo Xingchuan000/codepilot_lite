@@ -13,8 +13,6 @@ from codepilot.session.ids import (
     make_event_id,
     make_message_id,
     make_part_id,
-    make_project_id,
-    make_session_id,
     make_tool_call_id,
     make_tool_result_id,
     make_turn_id,
@@ -45,6 +43,21 @@ from codepilot.session.models import (
     TurnStatus,
 )
 from codepilot.session.paths import SessionPaths, resolve_session_paths
+from codepilot.session.row_mappers import (
+    artifact_from_row,
+    attempt_from_row,
+    context_summary_from_row,
+    event_from_row,
+    message_from_row,
+    message_part_from_row,
+    permission_grant_from_row,
+    permission_request_from_row,
+    permission_response_from_row,
+    tool_call_from_row,
+    tool_result_from_row,
+    turn_from_row,
+)
+from codepilot.session.repositories import ProjectRepository, SessionRepository
 
 
 def _json_dumps(value: Any) -> str:
@@ -55,16 +68,8 @@ def _json_loads(value: str) -> Any:
     return json.loads(value)
 
 
-def _row_dict(row: Any) -> dict[str, Any]:
-    return dict(row)
-
-
 def _bool_to_int(value: bool) -> int:
     return 1 if value else 0
-
-
-def _int_to_bool(value: Any) -> bool:
-    return bool(int(value))
 
 
 def _make_local_id(prefix: str) -> str:
@@ -75,12 +80,6 @@ def _task_preview(text: str) -> str:
     """把首条用户消息压缩为稳定的 Session 标题。"""
 
     return " ".join(text.split())[:80] or "New session"
-
-
-def _content_preview(content: Any) -> str:
-    if isinstance(content, str):
-        return " ".join(content.split())[:120]
-    return _json_dumps(content)[:120]
 
 
 BLOCKING_TURN_STATUSES = {"queued", "running", "waiting_permission", "recovery_required"}
@@ -95,27 +94,14 @@ class SessionStore:
     def __init__(self, database: SessionDatabase, paths: SessionPaths | None = None) -> None:
         self.database = database
         self.paths = paths or resolve_session_paths(database.path.parent)
+        self.projects = ProjectRepository(database)
+        self.sessions = SessionRepository(database, self.projects)
 
     def create_project(self, path: Path) -> ProjectRecord:
-        resolved = path.expanduser().resolve()
-        created_at = now_iso()
-        with self.database.transaction() as connection:
-            row = connection.execute("SELECT * FROM projects WHERE path = ?", (str(resolved),)).fetchone()
-            if row is None:
-                connection.execute(
-                    "INSERT INTO projects(project_id, path, created_at, updated_at) VALUES (?, ?, ?, ?)",
-                    (make_project_id(), str(resolved), created_at, created_at),
-                )
-                row = connection.execute("SELECT * FROM projects WHERE path = ?", (str(resolved),)).fetchone()
-        return self._project_from_row(row)
+        return self.projects.create_project(path)
 
     def get_or_create_project(self, path: Path) -> ProjectRecord:
-        resolved = path.expanduser().resolve()
-        with self.database.transaction() as connection:
-            row = connection.execute("SELECT * FROM projects WHERE path = ?", (str(resolved),)).fetchone()
-            if row is not None:
-                return self._project_from_row(row)
-        return self.create_project(resolved)
+        return self.projects.get_or_create_project(path)
 
     def create_session(
         self,
@@ -132,102 +118,34 @@ class SessionStore:
         forked_from_turn_id: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> SessionRecord:
-        project = self.get_or_create_project(project_path)
-        session_id = make_session_id()
-        created_at = now_iso()
-        payload = metadata or {}
-        with self.database.transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO sessions(
-                    session_id, project_id, title, provider, current_model, permission_mode,
-                    initial_branch, current_branch, status, parent_session_id, forked_from_turn_id,
-                    created_at, updated_at, last_activity_at, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    session_id,
-                    project.project_id,
-                    title,
-                    provider,
-                    current_model,
-                    permission_mode,
-                    initial_branch,
-                    current_branch if current_branch is not None else initial_branch,
-                    status,
-                    parent_session_id,
-                    forked_from_turn_id,
-                    created_at,
-                    created_at,
-                    created_at,
-                    _json_dumps(payload),
-                ),
-            )
-        return self.get_session(session_id)
+        return self.sessions.create_session(
+            project_path=project_path,
+            provider=provider,
+            current_model=current_model,
+            permission_mode=permission_mode,
+            title=title,
+            initial_branch=initial_branch,
+            current_branch=current_branch,
+            status=status,
+            parent_session_id=parent_session_id,
+            forked_from_turn_id=forked_from_turn_id,
+            metadata=metadata,
+        )
 
     def get_session(self, session_id: str) -> SessionRecord:
-        with self.database.transaction() as connection:
-            row = connection.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
-        if row is None:
-            raise LookupError(session_id)
-        return self._session_from_row(row)
+        return self.sessions.get_session(session_id)
 
     def list_sessions(self, include_archived: bool = False) -> list[SessionSummary]:
-        query = (
-            "SELECT s.*, p.path AS project_path, "
-            "(SELECT content_json FROM messages m WHERE m.session_id = s.session_id AND m.role = 'user' ORDER BY m.created_at DESC, m.message_id DESC LIMIT 1) AS last_user_content "
-            "FROM sessions s JOIN projects p ON p.project_id = s.project_id"
-        )
-        params: tuple[Any, ...] = ()
-        if not include_archived:
-            query += " WHERE s.status = ?"
-            params = ("active",)
-        query += " ORDER BY s.last_activity_at DESC, s.created_at DESC, s.session_id DESC"
-        with self.database.transaction() as connection:
-            rows = connection.execute(query, params).fetchall()
-        return [self._session_summary_from_row(row) for row in rows]
+        return self.sessions.list_sessions(include_archived)
 
     def update_session(self, session_id: str, **changes: Any) -> SessionRecord:
-        if not changes:
-            return self.get_session(session_id)
-        allowed = {
-            "title",
-            "provider",
-            "current_model",
-            "permission_mode",
-            "initial_branch",
-            "current_branch",
-            "status",
-            "parent_session_id",
-            "forked_from_turn_id",
-            "metadata",
-            "updated_at",
-            "last_activity_at",
-        }
-        invalid = set(changes) - allowed
-        if invalid:
-            raise ValueError(f"Unsupported session fields: {sorted(invalid)}")
-        payload = dict(changes)
-        payload.setdefault("updated_at", now_iso())
-        payload.setdefault("last_activity_at", payload["updated_at"])
-        if "metadata" in payload:
-            payload["metadata_json"] = _json_dumps(payload.pop("metadata"))
-        columns = []
-        values: list[Any] = []
-        for key, value in payload.items():
-            column = "metadata_json" if key == "metadata_json" else key
-            columns.append(f"{column} = ?")
-            values.append(value)
-        values.append(session_id)
-        with self.database.transaction() as connection:
-            connection.execute(f"UPDATE sessions SET {', '.join(columns)} WHERE session_id = ?", values)
-        return self.get_session(session_id)
+        return self.sessions.update_session(session_id, **changes)
 
     def archive_session(self, session_id: str) -> SessionRecord:
-        return self.update_session(session_id, status="archived")
+        return self.sessions.archive_session(session_id)
 
     def unarchive_session(self, session_id: str) -> SessionRecord:
-        return self.update_session(session_id, status="active")
+        return self.sessions.unarchive_session(session_id)
 
     def create_turn(
         self,
@@ -279,7 +197,7 @@ class SessionStore:
                 "SELECT * FROM turns WHERE session_id = ? AND sequence = ?",
                 (session_id, sequence),
             ).fetchone()
-        return self._turn_from_row(row)
+        return turn_from_row(row)
 
     def update_turn_status(self, turn_id: str, status: TurnStatus) -> TurnRecord:
         updated_at = now_iso()
@@ -289,7 +207,7 @@ class SessionStore:
                 (status, updated_at, updated_at, turn_id),
             )
             row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
-        return self._turn_from_row(row)
+        return turn_from_row(row)
 
     def update_turn_metadata(self, turn_id: str, metadata: dict[str, Any]) -> TurnRecord:
         """把本次真实模型能力写入 Turn 快照，避免后续 registry 变化影响回放。"""
@@ -312,7 +230,7 @@ class SessionStore:
                 "SELECT * FROM turns WHERE session_id = ? ORDER BY sequence",
                 (session_id,),
             ).fetchall()
-        return [self._turn_from_row(row) for row in rows]
+        return [turn_from_row(row) for row in rows]
 
     def get_turn(self, turn_id: str) -> TurnRecord:
         """按稳定 ID 精确读取 Turn，避免依赖列表中的最后一条记录。"""
@@ -321,7 +239,7 @@ class SessionStore:
             row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
         if row is None:
             raise LookupError(turn_id)
-        return self._turn_from_row(row)
+        return turn_from_row(row)
 
     def create_attempt(
         self,
@@ -360,7 +278,7 @@ class SessionStore:
                 "SELECT * FROM run_attempts WHERE turn_id = ? AND attempt_number = ?",
                 (turn_id, attempt_number),
             ).fetchone()
-        return self._attempt_from_row(row)
+        return attempt_from_row(row)
 
     def update_attempt_status(self, attempt_id: str, status: str) -> RunAttemptRecord:
         now = now_iso()
@@ -370,7 +288,7 @@ class SessionStore:
                 (status, now, now, status, now, attempt_id),
             )
             row = connection.execute("SELECT * FROM run_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
-        return self._attempt_from_row(row)
+        return attempt_from_row(row)
 
     def get_attempt(self, attempt_id: str) -> RunAttemptRecord:
         """按稳定 ID 精确读取 Attempt。"""
@@ -379,7 +297,7 @@ class SessionStore:
             row = connection.execute("SELECT * FROM run_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
         if row is None:
             raise LookupError(attempt_id)
-        return self._attempt_from_row(row)
+        return attempt_from_row(row)
 
     def list_attempts(self, turn_id: str) -> list[RunAttemptRecord]:
         """按创建顺序返回 Turn 的所有 Attempt，供恢复和 TUI 状态重建使用。"""
@@ -389,7 +307,7 @@ class SessionStore:
                 "SELECT * FROM run_attempts WHERE turn_id = ? ORDER BY attempt_number",
                 (turn_id,),
             ).fetchall()
-        return [self._attempt_from_row(row) for row in rows]
+        return [attempt_from_row(row) for row in rows]
 
     def start_turn_attempt(self, turn_id: str, attempt_id: str, *, worker_id: str, lease_expires_at: str) -> tuple[TurnRecord, RunAttemptRecord]:
         """在模型调用前同时把 Turn 和指定 Attempt 标记为 running。"""
@@ -422,7 +340,7 @@ class SessionStore:
             attempt_row = connection.execute("SELECT * FROM run_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
         if turn_row is None:
             raise LookupError(turn_id)
-        return self._turn_from_row(turn_row), self._attempt_from_row(attempt_row)
+        return turn_from_row(turn_row), attempt_from_row(attempt_row)
 
     def finish_turn_attempt(
         self,
@@ -456,7 +374,7 @@ class SessionStore:
             )
             turn_row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
             attempt_row = connection.execute("SELECT * FROM run_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
-        return self._turn_from_row(turn_row), self._attempt_from_row(attempt_row)
+        return turn_from_row(turn_row), attempt_from_row(attempt_row)
 
     def interrupt_turn_attempt(self, turn_id: str, attempt_id: str, reason: str, *, worker_id: str) -> tuple[TurnRecord, RunAttemptRecord]:
         """未捕获异常时原子保留中断原因，不把未知执行结果误记为 failed。"""
@@ -482,7 +400,7 @@ class SessionStore:
             )
             turn_row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
             attempt_row = connection.execute("SELECT * FROM run_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
-        return self._turn_from_row(turn_row), self._attempt_from_row(attempt_row)
+        return turn_from_row(turn_row), attempt_from_row(attempt_row)
 
     def renew_attempt_lease(self, attempt_id: str, worker_id: str, lease_expires_at: str) -> None:
         """只允许当前 Worker 为自己的 running Attempt 续租。"""
@@ -653,7 +571,7 @@ class SessionStore:
 
             turn_row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
             attempt_row = connection.execute("SELECT * FROM run_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
-        return TurnSubmission(self._turn_from_row(turn_row), self._attempt_from_row(attempt_row))
+        return TurnSubmission(turn_from_row(turn_row), attempt_from_row(attempt_row))
 
     def create_message(
         self,
@@ -692,7 +610,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
-        return self._message_from_row(row)
+        return message_from_row(row)
 
     def append_message_part(
         self,
@@ -732,7 +650,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM message_parts WHERE part_id = ?", (part_id,)).fetchone()
-        return self._message_part_from_row(row)
+        return message_part_from_row(row)
 
     def update_message_status(self, message_id: str, status: str, interrupted_at: str | None = None) -> MessageRecord:
         updated_at = now_iso()
@@ -742,7 +660,7 @@ class SessionStore:
                 (status, updated_at, interrupted_at, message_id),
             )
             row = connection.execute("SELECT * FROM messages WHERE message_id = ?", (message_id,)).fetchone()
-        return self._message_from_row(row)
+        return message_from_row(row)
 
     def list_messages_with_parts(self, session_id: str, turn_id: str | None = None) -> list[tuple[MessageRecord, list[MessagePartRecord]]]:
         query = "SELECT * FROM messages WHERE session_id = ?"
@@ -760,9 +678,9 @@ class SessionStore:
             ).fetchall() if message_rows else []
         parts_by_message: dict[str, list[MessagePartRecord]] = {}
         for row in part_rows:
-            part = self._message_part_from_row(row)
+            part = message_part_from_row(row)
             parts_by_message.setdefault(part.message_id, []).append(part)
-        return [(self._message_from_row(row), parts_by_message.get(row["message_id"], [])) for row in message_rows]
+        return [(message_from_row(row), parts_by_message.get(row["message_id"], [])) for row in message_rows]
 
     def create_tool_call(
         self,
@@ -809,13 +727,13 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
-        return self._tool_call_from_row(row)
+        return tool_call_from_row(row)
 
     def mark_tool_approval_pending_with_event(self, tool_call_id: str, request: PermissionRequest) -> ToolCallRecord:
-        return self._tool_call_from_row(self._mark_tool_call_status(tool_call_id, "approval_pending"))
+        return tool_call_from_row(self._mark_tool_call_status(tool_call_id, "approval_pending"))
 
     def mark_tool_approved(self, tool_call_id: str) -> ToolCallRecord:
-        return self._tool_call_from_row(self._mark_tool_call_status(tool_call_id, "approved"))
+        return tool_call_from_row(self._mark_tool_call_status(tool_call_id, "approved"))
 
     def mark_tool_execution_uncertain_with_event(self, tool_call_id: str, error: str) -> ToolCallRecord:
         timestamp = now_iso()
@@ -845,7 +763,7 @@ class SessionStore:
                 ),
             )
             updated = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
-        return self._tool_call_from_row(updated)
+        return tool_call_from_row(updated)
 
     def require_tool_recovery(
         self,
@@ -881,7 +799,7 @@ class SessionStore:
             )
             turn_row = connection.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
             attempt_row = connection.execute("SELECT * FROM run_attempts WHERE attempt_id = ?", (attempt_id,)).fetchone()
-        return self._turn_from_row(turn_row), self._attempt_from_row(attempt_row)
+        return turn_from_row(turn_row), attempt_from_row(attempt_row)
 
     def persist_recovered_tool_result(
         self,
@@ -912,7 +830,7 @@ class SessionStore:
             row = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
         if row is None:
             raise LookupError(tool_call_id)
-        return self._tool_call_from_row(row)
+        return tool_call_from_row(row)
 
     def _mark_tool_call_status(self, tool_call_id: str, status: ToolCallStatus) -> Any:
         with self.database.transaction() as connection:
@@ -928,7 +846,7 @@ class SessionStore:
     def get_tool_result_by_call(self, tool_call_id: str) -> ToolResultRecord | None:
         with self.database.transaction() as connection:
             row = connection.execute("SELECT * FROM tool_results WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
-        return self._tool_result_from_row(row) if row is not None else None
+        return tool_result_from_row(row) if row is not None else None
 
     def list_tool_calls(self, session_id: str) -> list[ToolCallRecord]:
         with self.database.transaction() as connection:
@@ -936,7 +854,7 @@ class SessionStore:
                 "SELECT * FROM tool_calls WHERE turn_id IN (SELECT turn_id FROM turns WHERE session_id = ?) ORDER BY created_at, tool_call_id",
                 (session_id,),
             ).fetchall()
-        return [self._tool_call_from_row(row) for row in rows]
+        return [tool_call_from_row(row) for row in rows]
 
     def list_tool_results(self, session_id: str) -> list[ToolResultRecord]:
         with self.database.transaction() as connection:
@@ -945,7 +863,7 @@ class SessionStore:
                 "JOIN turns t ON t.turn_id = tc.turn_id WHERE t.session_id = ? ORDER BY tr.created_at, tr.tool_result_id",
                 (session_id,),
             ).fetchall()
-        return [self._tool_result_from_row(row) for row in rows]
+        return [tool_result_from_row(row) for row in rows]
 
     def list_permission_requests(self, session_id: str) -> list[PermissionRequestRecord]:
         with self.database.transaction() as connection:
@@ -953,7 +871,7 @@ class SessionStore:
                 "SELECT * FROM permission_requests WHERE session_id = ? ORDER BY created_at, request_id",
                 (session_id,),
             ).fetchall()
-        return [self._permission_request_from_row(row) for row in rows]
+        return [permission_request_from_row(row) for row in rows]
 
     def mark_tool_execution_started(self, tool_call_id: str) -> ToolCallRecord:
         now = now_iso()
@@ -963,7 +881,7 @@ class SessionStore:
                 ("execution_started", now, now, tool_call_id),
             )
             row = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
-        return self._tool_call_from_row(row)
+        return tool_call_from_row(row)
 
     def persist_tool_execution_started(self, tool_call_id: str, recovery_token: dict[str, Any]) -> ToolCallRecord:
         """在真实副作用前原子保存恢复 Token 和 execution_started 状态。"""
@@ -977,7 +895,7 @@ class SessionStore:
             row = connection.execute("SELECT * FROM tool_calls WHERE tool_call_id = ?", (tool_call_id,)).fetchone()
         if row is None:
             raise LookupError(tool_call_id)
-        return self._tool_call_from_row(row)
+        return tool_call_from_row(row)
 
     def persist_tool_result(
         self,
@@ -1017,7 +935,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM tool_results WHERE tool_result_id = ?", (result_id,)).fetchone()
-        return self._tool_result_from_row(row)
+        return tool_result_from_row(row)
 
     def create_tool_result(
         self,
@@ -1053,7 +971,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM tool_results WHERE tool_result_id = ?", (result_id,)).fetchone()
-        return self._tool_result_from_row(row)
+        return tool_result_from_row(row)
 
     def list_unresolved_tool_calls(self, turn_id: str | None = None) -> list[ToolCallRecord]:
         query = "SELECT * FROM tool_calls WHERE status NOT IN ('completed', 'failed')"
@@ -1064,7 +982,7 @@ class SessionStore:
         query += " ORDER BY created_at, tool_call_id"
         with self.database.transaction() as connection:
             rows = connection.execute(query, params).fetchall()
-        return [self._tool_call_from_row(row) for row in rows]
+        return [tool_call_from_row(row) for row in rows]
 
     def append_event(
         self,
@@ -1102,7 +1020,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM session_events WHERE event_id = ?", (event_id,)).fetchone()
-        return self._event_from_row(row)
+        return event_from_row(row)
 
     def list_events(self, session_id: str) -> list[SessionEventRecord]:
         with self.database.transaction() as connection:
@@ -1110,12 +1028,12 @@ class SessionStore:
                 "SELECT * FROM session_events WHERE session_id = ? ORDER BY sequence",
                 (session_id,),
             ).fetchall()
-        return [self._event_from_row(row) for row in rows]
+        return [event_from_row(row) for row in rows]
 
     def list_context_summaries(self, session_id: str) -> list[ContextSummaryRecord]:
         with self.database.transaction() as connection:
             rows = connection.execute("SELECT * FROM context_summaries WHERE session_id = ? ORDER BY created_at, summary_id", (session_id,)).fetchall()
-        return [self._context_summary_from_row(row) for row in rows]
+        return [context_summary_from_row(row) for row in rows]
 
     def get_latest_context_summary(self, session_id: str) -> ContextSummaryRecord | None:
         with self.database.transaction() as connection:
@@ -1129,7 +1047,7 @@ class SessionStore:
                 """,
                 (session_id,),
             ).fetchone()
-        return self._context_summary_from_row(row) if row is not None else None
+        return context_summary_from_row(row) if row is not None else None
 
     def update_context_summary_status(self, summary_id: str, status: str) -> ContextSummaryRecord:
         with self.database.transaction() as connection:
@@ -1137,7 +1055,7 @@ class SessionStore:
             row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
         if row is None:
             raise LookupError(summary_id)
-        return self._context_summary_from_row(row)
+        return context_summary_from_row(row)
 
     def get_user_message_for_turn(self, turn_id: str) -> MessageRecord | None:
         with self.database.transaction() as connection:
@@ -1145,19 +1063,19 @@ class SessionStore:
                 "SELECT * FROM messages WHERE turn_id = ? AND role = 'user' ORDER BY created_at, message_id LIMIT 1",
                 (turn_id,),
             ).fetchone()
-        return self._message_from_row(row) if row is not None else None
+        return message_from_row(row) if row is not None else None
 
     def get_permission_request(self, request_id: str) -> PermissionRequestRecord:
         with self.database.transaction() as connection:
             row = connection.execute("SELECT * FROM permission_requests WHERE request_id = ?", (request_id,)).fetchone()
         if row is None:
             raise LookupError(request_id)
-        return self._permission_request_from_row(row)
+        return permission_request_from_row(row)
 
     def get_permission_response_by_request(self, request_id: str) -> PermissionResponseRecord | None:
         with self.database.transaction() as connection:
             row = connection.execute("SELECT * FROM permission_responses WHERE request_id = ? ORDER BY responded_at DESC, response_id DESC LIMIT 1", (request_id,)).fetchone()
-        return self._permission_response_from_row(row) if row is not None else None
+        return permission_response_from_row(row) if row is not None else None
 
     def get_permission_grant(self, session_id: str, scope_key: str) -> PermissionGrantRecord | None:
         with self.database.transaction() as connection:
@@ -1165,7 +1083,7 @@ class SessionStore:
                 "SELECT * FROM permission_grants WHERE session_id = ? AND scope_key = ? AND revoked_at IS NULL ORDER BY created_at DESC, grant_id DESC LIMIT 1",
                 (session_id, scope_key),
             ).fetchone()
-        return self._permission_grant_from_row(row) if row is not None else None
+        return permission_grant_from_row(row) if row is not None else None
 
     def list_pending_permission_requests(self, session_id: str) -> list[PermissionRequestRecord]:
         with self.database.transaction() as connection:
@@ -1173,7 +1091,7 @@ class SessionStore:
                 "SELECT * FROM permission_requests WHERE session_id = ? AND status = 'pending' ORDER BY created_at, request_id",
                 (session_id,),
             ).fetchall()
-        return [self._permission_request_from_row(row) for row in rows]
+        return [permission_request_from_row(row) for row in rows]
 
     def create_permission_request(
         self,
@@ -1216,7 +1134,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM permission_requests WHERE request_id = ?", (request_id,)).fetchone()
-        return self._permission_request_from_row(row)
+        return permission_request_from_row(row)
 
     def persist_permission_request_and_pending_call(self, request: PermissionRequest) -> PermissionRequestRecord:
         """一次性写入 pending 权限请求和对应 ToolCall 的 pending 状态。"""
@@ -1293,7 +1211,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM permission_requests WHERE request_id = ?", (request.request_id,)).fetchone()
-        return self._permission_request_from_row(row)
+        return permission_request_from_row(row)
 
     def persist_permission_resolution(
         self,
@@ -1311,10 +1229,10 @@ class SessionStore:
             request_row = connection.execute("SELECT * FROM permission_requests WHERE request_id = ?", (request_id,)).fetchone()
             if request_row is None:
                 raise LookupError(request_id)
-            request = self._permission_request_from_row(request_row)
+            request = permission_request_from_row(request_row)
             existing = connection.execute("SELECT * FROM permission_responses WHERE request_id = ? ORDER BY responded_at DESC, response_id DESC LIMIT 1", (request_id,)).fetchone()
             if existing is not None:
-                return self._permission_response_from_row(existing)
+                return permission_response_from_row(existing)
             if request.status != "pending":
                 raise RuntimeError("permission request is no longer pending")
             response_id = f"response-{request_id}"
@@ -1410,7 +1328,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM permission_responses WHERE request_id = ? ORDER BY responded_at DESC, response_id DESC LIMIT 1", (request_id,)).fetchone()
-        return self._permission_response_from_row(row)
+        return permission_response_from_row(row)
 
     def create_permission_response(
         self,
@@ -1432,7 +1350,7 @@ class SessionStore:
                 (response_id, request_id, decision, reason, responded_at, _json_dumps(metadata or {})),
             )
             row = connection.execute("SELECT * FROM permission_responses WHERE response_id = ?", (response_id,)).fetchone()
-        return self._permission_response_from_row(row)
+        return permission_response_from_row(row)
 
     def create_permission_grant(
         self,
@@ -1455,7 +1373,7 @@ class SessionStore:
                 (grant_id, session_id, scope_key, tool_name, _json_dumps(scope_json) if scope_json is not None else None, created_at, revoked_at, _json_dumps(metadata or {})),
             )
             row = connection.execute("SELECT * FROM permission_grants WHERE grant_id = ?", (grant_id,)).fetchone()
-        return self._permission_grant_from_row(row)
+        return permission_grant_from_row(row)
 
     def create_context_summary(
         self,
@@ -1496,7 +1414,7 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
-        return self._context_summary_from_row(row)
+        return context_summary_from_row(row)
 
     def create_context_summary_with_message(
         self,
@@ -1533,14 +1451,14 @@ class SessionStore:
                 (summary_id, session_id, summary_turn_id, timestamp, _json_dumps(content), source_start_sequence, source_end_sequence, message_id, model, _json_dumps(metadata or {})),
             )
             row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
-        return self._context_summary_from_row(row)
+        return context_summary_from_row(row)
 
     def replace_context_summary(
         self,
         *,
         session_id: str,
         previous_summary_id: str | None,
-        summary_content: str,
+        summary_content: Any,
         turn_id: str | None,
         source_start_sequence: int | None,
         source_end_sequence: int | None,
@@ -1599,7 +1517,10 @@ class SessionStore:
                 (timestamp, timestamp, session_id),
             )
             row = connection.execute("SELECT * FROM context_summaries WHERE summary_id = ?", (summary_id,)).fetchone()
-        return self._context_summary_from_row(row)
+        return context_summary_from_row(row)
+
+    def _artifact_from_row(self, row: Any) -> ArtifactRecord:
+        return artifact_from_row(row)
 
     def create_artifact(
         self,
@@ -1638,239 +1559,4 @@ class SessionStore:
                 ),
             )
             row = connection.execute("SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
-        return self._artifact_from_row(row)
-
-    def _project_from_row(self, row: Any) -> ProjectRecord:
-        data = _row_dict(row)
-        return ProjectRecord(project_id=data["project_id"], path=Path(data["path"]), created_at=data["created_at"], updated_at=data["updated_at"])
-
-    def _session_from_row(self, row: Any) -> SessionRecord:
-        data = _row_dict(row)
-        return SessionRecord(
-            session_id=data["session_id"],
-            project_id=data["project_id"],
-            title=data["title"],
-            provider=data["provider"],
-            current_model=data["current_model"],
-            permission_mode=data["permission_mode"],
-            initial_branch=data["initial_branch"],
-            current_branch=data["current_branch"],
-            status=data["status"],
-            parent_session_id=data["parent_session_id"],
-            forked_from_turn_id=data["forked_from_turn_id"],
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            last_activity_at=data["last_activity_at"],
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _session_summary_from_row(self, row: Any) -> SessionSummary:
-        data = _row_dict(row)
-        return SessionSummary(
-            session_id=data["session_id"],
-            project_id=data["project_id"],
-            title=data["title"],
-            provider=data["provider"],
-            current_model=data["current_model"],
-            permission_mode=data["permission_mode"],
-            status=data["status"],
-            current_branch=data["current_branch"],
-            last_activity_at=data["last_activity_at"],
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            project_path=Path(data["project_path"]),
-            project_exists=Path(data["project_path"]).exists(),
-            last_user_preview=_content_preview(_json_loads(data["last_user_content"])) if data.get("last_user_content") is not None else None,
-        )
-
-    def _turn_from_row(self, row: Any) -> TurnRecord:
-        data = _row_dict(row)
-        return TurnRecord(
-            turn_id=data["turn_id"],
-            session_id=data["session_id"],
-            sequence=data["sequence"],
-            title=data["title"],
-            status=data["status"],
-            provider_snapshot=data["provider_snapshot"],
-            model_snapshot=data["model_snapshot"],
-            permission_mode_snapshot=data["permission_mode_snapshot"],
-            branch_snapshot=data["branch_snapshot"],
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            last_activity_at=data["last_activity_at"],
-            user_message_id=data.get("user_message_id"),
-            started_at=data.get("started_at"),
-            completed_at=data.get("completed_at"),
-            error_code=data.get("error_code"),
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _attempt_from_row(self, row: Any) -> RunAttemptRecord:
-        data = _row_dict(row)
-        return RunAttemptRecord(
-            attempt_id=data["attempt_id"],
-            turn_id=data["turn_id"],
-            attempt_number=data["attempt_number"],
-            status=data["status"],
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            started_at=data["started_at"],
-            ended_at=data["ended_at"],
-            interruption_reason=data["interruption_reason"],
-            worker_id=data["worker_id"],
-            lease_expires_at=data["lease_expires_at"],
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _message_from_row(self, row: Any) -> MessageRecord:
-        data = _row_dict(row)
-        return MessageRecord(
-            message_id=data["message_id"],
-            session_id=data["session_id"],
-            turn_id=data["turn_id"],
-            attempt_id=data["attempt_id"],
-            role=data["role"],
-            status=data["status"],
-            content=_json_loads(data["content_json"]),
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            interrupted_at=data["interrupted_at"],
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _message_part_from_row(self, row: Any) -> MessagePartRecord:
-        data = _row_dict(row)
-        return MessagePartRecord(
-            part_id=data["part_id"],
-            message_id=data["message_id"],
-            sequence=data["sequence"],
-            type=data["type"],
-            content=_json_loads(data["content_json"]),
-            provider_format=data["provider_format"],
-            replayable=_int_to_bool(data["replayable"]),
-            created_at=data["created_at"],
-            artifact_id=data["artifact_id"],
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _tool_call_from_row(self, row: Any) -> ToolCallRecord:
-        data = _row_dict(row)
-        return ToolCallRecord(
-            tool_call_id=data["tool_call_id"],
-            turn_id=data["turn_id"],
-            attempt_id=data["attempt_id"],
-            message_id=data["message_id"],
-            status=data["status"],
-            tool_name=data["tool_name"],
-            arguments=_json_loads(data["arguments_json"]),
-            created_at=data["created_at"],
-            updated_at=data["updated_at"],
-            started_at=data["started_at"],
-            completed_at=data["completed_at"],
-            side_effect=data["side_effect"],
-            idempotency=data["idempotency"],
-            recovery_strategy=data["recovery_strategy"],
-            recovery_token=_json_loads(data["recovery_token_json"]) if data["recovery_token_json"] is not None else None,
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _tool_result_from_row(self, row: Any) -> ToolResultRecord:
-        data = _row_dict(row)
-        return ToolResultRecord(
-            tool_result_id=data["tool_result_id"],
-            tool_call_id=data["tool_call_id"],
-            status=data["status"],
-            content=_json_loads(data["content_json"]),
-            created_at=data["created_at"],
-            output_preview=data["output_preview"],
-            artifact_id=data["artifact_id"],
-            error=data["error"],
-            success=_int_to_bool(data["success"]) if data["success"] is not None else None,
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _permission_request_from_row(self, row: Any) -> PermissionRequestRecord:
-        data = _row_dict(row)
-        return PermissionRequestRecord(
-            request_id=data["request_id"],
-            session_id=data["session_id"],
-            turn_id=data["turn_id"],
-            attempt_id=data["attempt_id"],
-            tool_call_id=data["tool_call_id"],
-            scope_key=data["scope_key"],
-            tool_name=data["tool_name"],
-            arguments=_json_loads(data["arguments_json"]),
-            reason=data["reason"],
-            status=data["status"],
-            created_at=data["created_at"],
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _permission_response_from_row(self, row: Any) -> PermissionResponseRecord:
-        data = _row_dict(row)
-        return PermissionResponseRecord(
-            response_id=data["response_id"],
-            request_id=data["request_id"],
-            decision=data["decision"],
-            reason=data["reason"],
-            responded_at=data["responded_at"],
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _permission_grant_from_row(self, row: Any) -> PermissionGrantRecord:
-        data = _row_dict(row)
-        return PermissionGrantRecord(
-            grant_id=data["grant_id"],
-            session_id=data["session_id"],
-            scope_key=data["scope_key"],
-            created_at=data["created_at"],
-            revoked_at=data["revoked_at"],
-            tool_name=data["tool_name"],
-            scope_json=_json_loads(data["scope_json"]) if data["scope_json"] is not None else None,
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _event_from_row(self, row: Any) -> SessionEventRecord:
-        data = _row_dict(row)
-        return SessionEventRecord(
-            event_id=data["event_id"],
-            session_id=data["session_id"],
-            sequence=data["sequence"],
-            event_type=data["event_type"],
-            created_at=data["created_at"],
-            turn_id=data["turn_id"],
-            attempt_id=data["attempt_id"],
-            payload=_json_loads(data["payload_json"]),
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _context_summary_from_row(self, row: Any) -> ContextSummaryRecord:
-        data = _row_dict(row)
-        return ContextSummaryRecord(
-            summary_id=data["summary_id"],
-            session_id=data["session_id"],
-            turn_id=data["turn_id"],
-            created_at=data["created_at"],
-            content=_json_loads(data["content_json"]),
-            source_start_sequence=data.get("source_start_sequence"),
-            source_end_sequence=data.get("source_end_sequence"),
-            summary_message_id=data.get("summary_message_id"),
-            model=data.get("model"),
-            status=data.get("status") or "completed",
-            metadata=_json_loads(data["metadata_json"]),
-        )
-
-    def _artifact_from_row(self, row: Any) -> ArtifactRecord:
-        data = _row_dict(row)
-        return ArtifactRecord(
-            artifact_id=data["artifact_id"],
-            session_id=data["session_id"],
-            kind=data["kind"],
-            mime_type=data["mime_type"],
-            size_bytes=data["size_bytes"],
-            sha256=data["sha256"],
-            storage_path=data["storage_path"],
-            created_at=data["created_at"],
-            content=_json_loads(data["content_json"]) if data["content_json"] is not None else None,
-            metadata=_json_loads(data["metadata_json"]),
-        )
+        return artifact_from_row(row)

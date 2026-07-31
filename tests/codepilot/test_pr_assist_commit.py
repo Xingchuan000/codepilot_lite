@@ -5,8 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from codepilot.pr_assist.commit import prepare_commit, render_commit_message
-from codepilot.pr_assist.models import CommitPrepError
+from codepilot.repo.commit import CommitPrepError, prepare_commit, render_commit_message
 from codepilot.repo.git_utils import run_git
 
 

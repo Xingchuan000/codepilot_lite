@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from codepilot.common.serialization import to_jsonable
 from codepilot.repo.protected_paths import DEFAULT_REPO_PROTECTED_PATHS
 
 
@@ -160,17 +161,3 @@ class RunArtifactManifest:
     cleanup: dict[str, Any] | None
     artifacts: list[ArtifactEntry]
     redactions_applied: list[str] = field(default_factory=list)
-
-
-def to_jsonable(value: Any) -> Any:
-    """把 Path / dataclass 递归转换成可直接 json.dumps 的结构。"""
-
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return {key: to_jsonable(item) for key, item in asdict(value).items()}
-    if isinstance(value, dict):
-        return {key: to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [to_jsonable(item) for item in value]
-    return value

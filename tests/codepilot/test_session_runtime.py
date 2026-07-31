@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -11,7 +13,7 @@ from codepilot.router import ToolRouter
 from codepilot.session.database import SessionDatabase
 from codepilot.session.git_context import GitContext
 from codepilot.session.models import BranchConfirmationRequired, TurnSubmission
-from codepilot.session.runtime import SessionRuntime
+from codepilot.session.runtime import SessionRuntime, _renew_lease_until_stopped
 from codepilot.session.service import SessionService
 
 
@@ -34,6 +36,59 @@ def _runtime(tmp_path: Path) -> tuple[SessionRuntime, SessionService, str, Path]
     session = service.create_session(repo, "openai", "gpt-4.1", "manual")
     # 本组测试只验证提交协议，不会进入模型或工具执行链。
     return SessionRuntime(database, object(), lambda trace: object()), service, session.session_id, repo  # type: ignore[arg-type,return-value]
+
+
+class _HeartbeatStop:
+    def __init__(self, waits: list[bool]) -> None:
+        self.waits = iter(waits)
+
+    def wait(self, timeout: float) -> bool:
+        return next(self.waits, True)
+
+    def is_set(self) -> bool:
+        return False
+
+
+class _RenewingStore:
+    def __init__(self, failures: list[Exception]) -> None:
+        self.failures = iter(failures)
+        self.calls = 0
+
+    def renew_attempt_lease(self, attempt_id: str, worker_id: str, lease_expires_at: str) -> None:
+        self.calls += 1
+        failure = next(self.failures, None)
+        if failure is not None:
+            raise failure
+
+
+def test_heartbeat_retries_transient_sqlite_busy_then_succeeds() -> None:
+    store = _RenewingStore([sqlite3.OperationalError("database is locked")] * 2)
+    lease_lost = threading.Event()
+
+    _renew_lease_until_stopped(store, "attempt", "worker", _HeartbeatStop([False, False, False, True]), lease_lost)
+
+    assert store.calls == 3
+    assert not lease_lost.is_set()
+
+
+def test_heartbeat_stops_after_maximum_sqlite_busy_retries() -> None:
+    store = _RenewingStore([sqlite3.OperationalError("database is busy")] * 7)
+    lease_lost = threading.Event()
+
+    _renew_lease_until_stopped(store, "attempt", "worker", _HeartbeatStop([False] * 6), lease_lost)
+
+    assert store.calls == 6
+    assert lease_lost.is_set()
+
+
+def test_heartbeat_stops_on_unexpected_error() -> None:
+    store = _RenewingStore([ValueError("bad lease state")])
+    lease_lost = threading.Event()
+
+    _renew_lease_until_stopped(store, "attempt", "worker", _HeartbeatStop([False]), lease_lost)
+
+    assert store.calls == 1
+    assert lease_lost.is_set()
 
 
 def test_branch_confirmation_atomically_creates_submission(tmp_path: Path) -> None:

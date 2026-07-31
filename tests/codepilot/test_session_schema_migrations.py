@@ -57,3 +57,34 @@ def test_unknown_schema_version_is_rejected_without_overwriting_it(tmp_path: Pat
 
     with database.transaction() as connection:
         assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == "99"
+
+
+def test_v5_database_is_migrated_to_project_memory_schema(tmp_path: Path) -> None:
+    database = SessionDatabase(tmp_path / "v5.sqlite3")
+    database.initialize()
+    with database.transaction() as connection:
+        connection.execute("DROP TABLE project_memories")
+        connection.execute("DROP TABLE memory_candidates")
+        connection.execute("DROP TABLE project_instruction_snapshots")
+        connection.execute("DROP TABLE project_memories_fts")
+        connection.execute("UPDATE schema_meta SET value = '5' WHERE key = 'schema_version'")
+
+    database.initialize()
+
+    with database.transaction() as connection:
+        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == str(SCHEMA_VERSION)
+        assert connection.execute("SELECT name FROM sqlite_master WHERE name = 'project_memories_fts'").fetchone()
+
+
+def test_v6_database_is_migrated_to_turn_checkpoint_schema(tmp_path: Path) -> None:
+    database = SessionDatabase(tmp_path / "v6.sqlite3")
+    database.initialize()
+    with database.transaction() as connection:
+        connection.execute("DROP TABLE turn_memory_checkpoints")
+        connection.execute("UPDATE schema_meta SET value = '6' WHERE key = 'schema_version'")
+
+    database.initialize()
+
+    with database.transaction() as connection:
+        assert connection.execute("PRAGMA table_info(turn_memory_checkpoints)").fetchall()
+        assert connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()[0] == str(SCHEMA_VERSION)

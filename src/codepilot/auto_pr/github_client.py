@@ -3,12 +3,12 @@ from __future__ import annotations
 """GitHub API client，严格避免把 token 写入日志或产物。"""
 
 import os
-import re
 from typing import Any, Protocol
 
 import requests
 
 from codepilot.auto_pr.models import AutoPRGitHubError, GitHubRepoRef, PRCreateRequest, PRCreateResult
+from codepilot.github.auth import is_github_token_available, redact_github_error
 
 
 class GitHubClientProtocol(Protocol):
@@ -19,34 +19,11 @@ class GitHubClientProtocol(Protocol):
     def post_issue_comment(self, repo: GitHubRepoRef, issue_number: int, body: str) -> dict[str, Any]: ...
 
 
-def is_github_token_available(token_env: str = "GITHUB_TOKEN") -> bool:
-    """只检查 GitHub 凭据是否存在，不返回任何敏感值。"""
-
-    return bool(os.environ.get(token_env))
-
-
 def assert_github_token_available(token_env: str = "GITHUB_TOKEN") -> None:
     """在真正创建 PR 前做最小凭据预检查。"""
 
     if not is_github_token_available(token_env):
         raise AutoPRGitHubError("missing required GitHub credential for PR creation")
-
-
-def redact_github_error(value: str) -> str:
-    """清理 GitHub 错误消息中的 token，再截断成适合展示的长度。"""
-
-    redacted = re.sub(r"ghp_[A-Za-z0-9_]+", "[REDACTED]", value)
-    redacted = re.sub(r"github_pat_[A-Za-z0-9_]+", "[REDACTED]", redacted)
-    redacted = re.sub(r"Bearer\s+[A-Za-z0-9._-]+", "Bearer [REDACTED]", redacted)
-    redacted = re.sub(r"(?i)GITHUB_TOKEN", "GitHub credential", redacted)
-    redacted = re.sub(r"(?i)OPENAI_API_KEY", "API credential", redacted)
-    redacted = re.sub(r"(?i)ANTHROPIC_API_KEY", "API credential", redacted)
-    redacted = re.sub(
-        r"missing GitHub token env:\s*[A-Za-z0-9_]+",
-        "missing required GitHub credential for PR creation",
-        redacted,
-    )
-    return redacted[:500]
 
 
 class FakeGitHubClient:

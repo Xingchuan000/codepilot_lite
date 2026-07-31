@@ -9,7 +9,7 @@ from typing import Any
 
 from codepilot.auto_pr.github_client import GitHubClientProtocol
 from codepilot.auto_pr.models import GitHubRepoRef
-from codepilot.pr_assist.manifest_loader import scan_token_like_strings
+from codepilot.security.secrets import scan_token_like_strings
 
 
 def extract_issue_number(source_artifact_manifest: dict[str, Any], issue_json_path: str | Path | None = None) -> int | None:

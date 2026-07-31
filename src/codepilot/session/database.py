@@ -5,8 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
 
 
 class SessionDatabase:
@@ -62,6 +61,12 @@ class SessionDatabase:
             if version < 5:
                 _migrate_v4_to_v5(connection)
                 version = 5
+            if version < 6:
+                _migrate_v5_to_v6(connection)
+                version = 6
+            if version < 7:
+                _migrate_v6_to_v7(connection)
+                version = 7
             _create_latest_indexes(connection)
             _verify_schema(connection, version)
             _write_schema_version(connection, version)
@@ -210,6 +215,14 @@ def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
         raise RuntimeError("Session schema migration left invalid foreign keys")
 
 
+def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+    connection.executescript(_memory_tables_sql())
+
+
+def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
+    connection.executescript(_turn_checkpoint_tables_sql())
+
+
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
@@ -232,6 +245,10 @@ def _verify_schema(connection: sqlite3.Connection, expected_version: int) -> Non
         "permission_requests": {"session_id", "turn_id", "attempt_id", "tool_call_id"},
         "tool_results": {"artifact_id"},
         "turns": {"user_message_id"},
+        "project_memories": {"project_id", "canonical_key", "version", "status"},
+        "memory_candidates": {"project_id", "session_id", "turn_id", "status"},
+        "project_instruction_snapshots": {"project_id", "path", "sha256", "status"},
+        "turn_memory_checkpoints": {"session_id", "turn_id", "step", "status"},
     }
     for table, columns in required_columns.items():
         actual = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -253,6 +270,11 @@ def _verify_schema(connection: sqlite3.Connection, expected_version: int) -> Non
         "idx_messages_session_status",
         "idx_context_summaries_session_status_end",
         "idx_artifacts_session_created_at",
+        "idx_project_memories_project_status",
+        "idx_project_memories_project_key_version",
+        "idx_memory_candidates_project_status",
+        "idx_project_instruction_snapshots_project_path",
+        "idx_turn_memory_checkpoints_turn_status_step",
     }
     actual_indexes = {
         row[0]
@@ -496,6 +518,119 @@ def _schema_tables_sql() -> str:
         FOREIGN KEY(session_id) REFERENCES sessions(session_id)
     );
 
+    """ + _memory_tables_sql() + _turn_checkpoint_tables_sql() + """
+
+    """
+
+
+def _memory_tables_sql() -> str:
+    return """
+    CREATE TABLE IF NOT EXISTS project_memories (
+        memory_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        canonical_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        content_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        importance INTEGER NOT NULL,
+        branch_scope TEXT,
+        source_commit TEXT,
+        last_verified_commit TEXT,
+        source_session_id TEXT,
+        source_turn_id TEXT,
+        source_message_ids_json TEXT NOT NULL,
+        source_artifact_ids_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_verified_at TEXT,
+        expires_at TEXT,
+        version INTEGER NOT NULL,
+        metadata_json TEXT NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES projects(project_id),
+        FOREIGN KEY(source_session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(source_turn_id) REFERENCES turns(turn_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS memory_candidates (
+        candidate_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        canonical_key TEXT NOT NULL,
+        content_json TEXT NOT NULL,
+        evidence_json TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        decided_at TEXT,
+        metadata_json TEXT NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES projects(project_id),
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(turn_id) REFERENCES turns(turn_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS project_instruction_snapshots (
+        instruction_id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        path TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sha256 TEXT NOT NULL,
+        content_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        scanned_at TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        FOREIGN KEY(project_id) REFERENCES projects(project_id)
+    );
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS project_memories_fts USING fts5(
+        memory_id UNINDEXED,
+        project_id UNINDEXED,
+        title,
+        canonical_key,
+        content
+    );
+
+    CREATE TRIGGER IF NOT EXISTS project_memories_fts_insert
+    AFTER INSERT ON project_memories BEGIN
+        INSERT INTO project_memories_fts(memory_id, project_id, title, canonical_key, content)
+        VALUES (new.memory_id, new.project_id, new.title, new.canonical_key, new.content_json);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS project_memories_fts_update
+    AFTER UPDATE ON project_memories BEGIN
+        DELETE FROM project_memories_fts WHERE memory_id = old.memory_id;
+        INSERT INTO project_memories_fts(memory_id, project_id, title, canonical_key, content)
+        VALUES (new.memory_id, new.project_id, new.title, new.canonical_key, new.content_json);
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS project_memories_fts_delete
+    AFTER DELETE ON project_memories BEGIN
+        DELETE FROM project_memories_fts WHERE memory_id = old.memory_id;
+    END;
+    """
+
+
+def _turn_checkpoint_tables_sql() -> str:
+    return """
+    CREATE TABLE IF NOT EXISTS turn_memory_checkpoints (
+        checkpoint_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        attempt_id TEXT,
+        step INTEGER NOT NULL,
+        content_json TEXT NOT NULL,
+        covered_message_ids_json TEXT NOT NULL,
+        status TEXT NOT NULL,
+        model TEXT,
+        created_at TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(turn_id) REFERENCES turns(turn_id),
+        FOREIGN KEY(attempt_id) REFERENCES run_attempts(attempt_id)
+    );
     """
 
 
@@ -515,6 +650,11 @@ def _indexes_sql() -> str:
     CREATE INDEX IF NOT EXISTS idx_messages_session_status ON messages(session_id, status);
     CREATE INDEX IF NOT EXISTS idx_context_summaries_session_status_end ON context_summaries(session_id, status, source_end_sequence);
     CREATE INDEX IF NOT EXISTS idx_artifacts_session_created_at ON artifacts(session_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_project_memories_project_status ON project_memories(project_id, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_project_memories_project_key_version ON project_memories(project_id, canonical_key, version);
+    CREATE INDEX IF NOT EXISTS idx_memory_candidates_project_status ON memory_candidates(project_id, status);
+    CREATE INDEX IF NOT EXISTS idx_project_instruction_snapshots_project_path ON project_instruction_snapshots(project_id, path, scanned_at);
+    CREATE INDEX IF NOT EXISTS idx_turn_memory_checkpoints_turn_status_step ON turn_memory_checkpoints(turn_id, status, step);
     """
 
 

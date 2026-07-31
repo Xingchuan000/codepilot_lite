@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,9 @@ from codepilot.mcp.risk import classify_mcp_tool
 from codepilot.mcp.trace import build_codepilot_mcp_tool_name, build_mcp_descriptor_hash
 from codepilot.tools.base import ToolResult, ToolSpec
 from codepilot.tools.registry import find_tool_spec
+
+
+logger = logging.getLogger(__name__)
 
 
 class MCPToolRegistry:
@@ -66,6 +70,15 @@ class MCPToolRegistry:
             except Exception as exc:
                 if server.required:
                     raise ValueError(f"Failed to start MCP server {server.name}: {exc}") from exc
+                logger.warning(
+                    "Optional MCP server failed to start; continuing without its tools",
+                    extra={
+                        "server_name": server.name,
+                        "transport": server.transport,
+                        "error_type": type(exc).__name__,
+                    },
+                    exc_info=exc,
+                )
                 continue
 
             for index, raw_tool in enumerate(tools):

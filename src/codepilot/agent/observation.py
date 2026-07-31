@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from codepilot.agent.actions import AgentActionParseError
 from codepilot.router.actions import ToolRouteResult
 from codepilot.tools.file_tools import LIST_FILES_PAGE_MAX_CHARS
 

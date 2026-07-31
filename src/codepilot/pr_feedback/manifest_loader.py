@@ -6,14 +6,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from codepilot.auto_pr.manifest_loader import load_source_artifact_manifest
-from codepilot.pr_assist.manifest_loader import scan_token_like_strings
+from codepilot.security.secrets import scan_token_like_strings
 from codepilot.pr_feedback.models import (
-    PRFeedbackInput,
     PRFeedbackManifestInvalidError,
     PRRef,
 )
 from codepilot.repo.git_utils import sha256_file
+from codepilot.workflow_manifest import load_source_artifact_manifest
 
 
 def _resolve_inside_run_dir(run_dir: Path, raw_path: str) -> Path:
@@ -190,42 +189,3 @@ def load_source_manifests_for_feedback(
         raise PRFeedbackManifestInvalidError("source_pr_assist_manifest must be a JSON object")
     source_artifact_manifest = load_source_artifact_manifest(run_dir_path, pr_assist_manifest)
     return pr_assist_manifest, source_artifact_manifest
-
-
-def resolve_pr_feedback_inputs(
-    run_dir: str | Path,
-    auto_pr_manifest_path: str | Path | None = None,
-    **overrides: Any,
-) -> PRFeedbackInput:
-    """把 run_dir 与 CLI 覆盖项压缩成 workflow 输入对象。"""
-
-    run_dir_path = Path(run_dir).expanduser().resolve()
-    manifest_path = Path(auto_pr_manifest_path).expanduser().resolve() if auto_pr_manifest_path else run_dir_path / "auto_pr_manifest.json"
-    manifest = load_auto_pr_manifest(manifest_path)
-    errors = validate_auto_pr_manifest_for_feedback(manifest, run_dir_path)
-    if errors:
-        raise PRFeedbackManifestInvalidError("; ".join(errors))
-    run_id = str(manifest.get("run_id") or run_dir_path.name)
-    return PRFeedbackInput(
-        run_id=run_id,
-        run_dir=run_dir_path,
-        auto_pr_manifest_path=manifest_path,
-        dry_run=bool(overrides.get("dry_run", True)),
-        execute=bool(overrides.get("execute", False)),
-        wait_ci=bool(overrides.get("wait_ci", False)),
-        include_logs=bool(overrides.get("include_logs", True)),
-        include_success_logs=bool(overrides.get("include_success_logs", False)),
-        allow_run_agent=bool(overrides.get("allow_run_agent", False)),
-        allow_push_update=bool(overrides.get("allow_push_update", False)),
-        allow_comment=bool(overrides.get("allow_comment", False)),
-        max_feedback_items=int(overrides.get("max_feedback_items", 20)),
-        max_log_bytes=int(overrides.get("max_log_bytes", 200_000)),
-        max_followup_rounds=int(overrides.get("max_followup_rounds", 1)),
-        poll_interval_seconds=int(overrides.get("poll_interval_seconds", 30)),
-        timeout_seconds=int(overrides.get("timeout_seconds", 900)),
-        token_env=str(overrides.get("token_env", "GITHUB_TOKEN")),
-        repo_slug=overrides.get("repo_slug"),
-        pull_number=overrides.get("pull_number"),
-        head_branch=overrides.get("head_branch"),
-        overwrite=bool(overrides.get("overwrite", False)),
-    )

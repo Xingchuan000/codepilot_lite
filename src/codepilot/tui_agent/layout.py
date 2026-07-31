@@ -6,7 +6,6 @@ import re
 from codepilot.session.models import SessionRecord
 from codepilot.tui_agent.models import AgentRunView, PermissionMode, ProjectContext
 from codepilot.tui_agent.models import TranscriptItem
-from codepilot.tui_agent.status import model_label
 from codepilot.tui_agent.diff_view import format_diff_summary
 
 
@@ -17,24 +16,20 @@ def _strip_ansi(text: str) -> str:
     return _ANSI_RE.sub("", text)
 
 
+def _model_label(model: str | None) -> str:
+    return model or "default"
+
+
 def format_header(project: ProjectContext, session: SessionRecord | None, view: AgentRunView, permission_mode: PermissionMode) -> str:
     return "\n".join(
         [
             f"Project: {project.resolved_project}",
             f"Git: {project.git_root or 'non-git'} ({project.git_dirty_status})",
-            f"Model: {model_label(session.current_model) if session is not None else 'not selected'}",
+            f"Model: {_model_label(session.current_model) if session is not None else 'not selected'}",
             f"Permission: {permission_mode}",
             f"Run Status: {view.status}",
         ]
     )
-
-
-def format_main_log(view: AgentRunView) -> str:
-    lines = [f"Task: {view.task or 'idle'}", f"Run: {view.run_id or 'none'}"]
-    if view.warnings:
-        lines.append("Warnings:")
-        lines.extend(f"- {warning}" for warning in view.warnings)
-    return "\n".join(lines)
 
 
 def _preview_text(value: dict[str, object] | None) -> str:
@@ -118,7 +113,7 @@ def format_side_status(project: ProjectContext, session: SessionRecord | None, v
         [
             f"Project: {_short_project_path(project)}",
             f"Git: {(project.git_root.name if project.git_root else 'non-git')} ({project.git_dirty_status})",
-            f"Model: {model_label(session.current_model) if session is not None else 'not selected'}",
+            f"Model: {_model_label(session.current_model) if session is not None else 'not selected'}",
             f"Permission: {permission_mode}",
             f"Status: {view.status}",
             f"Completion: {view.completion_kind or 'unknown'}",
@@ -129,15 +124,6 @@ def format_side_status(project: ProjectContext, session: SessionRecord | None, v
             f"Diff: {_format_diff_state(view)}",
             "Commands: /help /status /permissions /diff /copy /move /export-session /cancel /exit",
         ]
-    )
-
-
-def format_timeline(view: AgentRunView) -> str:
-    if not view.timeline:
-        return "Timeline: empty"
-    return "\n".join(
-        f"{item.step or '-'} | {item.tool_name or item.category} | {item.status or ''} | {item.policy_decision or ''} | {item.output_summary or item.title}"
-        for item in view.timeline
     )
 
 

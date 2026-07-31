@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from codepilot.pr_assist.models import PRAssistSafetyGate
-from codepilot.pr_assist.pr_body import build_pr_body_data, render_pr_body
+from codepilot.pr_assist.pr_body import build_pr_body_data, read_json_if_exists, render_pr_body
 
 
 def test_render_pr_body_contains_required_sections(tmp_path: Path) -> None:
@@ -68,3 +70,23 @@ def test_render_pr_body_unknown_tests_and_empty_patch() -> None:
     assert "- unknown" in content
     assert "No code changes were generated." in content
     assert "passed" not in content
+
+
+def test_read_json_if_exists_returns_none_for_missing(tmp_path: Path) -> None:
+    assert read_json_if_exists(tmp_path / "missing.json") is None
+
+
+def test_read_json_if_exists_rejects_invalid_json(tmp_path: Path) -> None:
+    path = tmp_path / "broken.json"
+    path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Invalid JSON artifact"):
+        read_json_if_exists(path)
+
+
+def test_read_json_if_exists_rejects_non_object(tmp_path: Path) -> None:
+    path = tmp_path / "list.json"
+    path.write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must contain an object"):
+        read_json_if_exists(path)

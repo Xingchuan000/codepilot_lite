@@ -6,7 +6,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from codepilot.auto_pr.models import AutoPRGitError, AutoPRRemoteError, BranchPushPlan, GitHubRepoRef
-from codepilot.auto_pr.workflow_inputs import sanitize_branch_component, validate_head_branch, validate_repo_slug
+from codepilot.auto_pr.workflow_inputs import sanitize_branch_component, validate_repo_slug
 from codepilot.repo import git_utils
 
 

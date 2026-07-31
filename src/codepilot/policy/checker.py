@@ -11,7 +11,7 @@ from codepilot.policy.defaults import default_policy_config
 from codepilot.policy.models import PolicyContext, PolicyDecision, PolicyDecisionValue
 from codepilot.router.actions import ToolAction
 from codepilot.tools.base import DefaultPermission, ToolSideEffect, ToolSpec
-from codepilot.tools.patch_utils import extract_paths_from_patch
+from codepilot.common.patches import extract_paths_from_patch
 from codepilot.tools.registry import find_tool_spec
 
 COMMAND_TOOLS = {"run_shell", "run_tests"}

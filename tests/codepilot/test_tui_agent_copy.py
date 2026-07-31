@@ -90,24 +90,15 @@ class _FakeBinding:
 
 
 def _install_fake_textual(monkeypatch) -> None:
-    monkeypatch.setattr(
-        app_module,
-        "_load_textual",
-        lambda: (
-            _FakeApp,
-            object,
-            _FakeContainer,
-            _FakeContainer,
-            _FakeScrollContainer,
-            _FakeWidget,
-            _FakeWidget,
-            _FakeWidget,
-            _FakeWidget,
-            _FakeWidget,
-            _FakeModalScreen,
-            _FakeBinding,
-        ),
-    )
+    monkeypatch.setattr(app_module, "App", _FakeApp)
+    monkeypatch.setattr(app_module, "Horizontal", _FakeContainer)
+    monkeypatch.setattr(app_module, "Vertical", _FakeContainer)
+    monkeypatch.setattr(app_module, "VerticalScroll", _FakeScrollContainer)
+    monkeypatch.setattr(app_module, "Footer", _FakeWidget)
+    monkeypatch.setattr(app_module, "Header", _FakeWidget)
+    monkeypatch.setattr(app_module, "Input", _FakeWidget)
+    monkeypatch.setattr(app_module, "SelectableStatic", _FakeWidget)
+    monkeypatch.setattr(app_module, "Binding", _FakeBinding)
 
 
 def _widgets() -> dict[str, _FakeWidget]:
@@ -165,18 +156,3 @@ def test_copy_command_without_history_shows_empty_state(tmp_path: Path, monkeypa
     app.on_input_submitted(SimpleNamespace(value="/copy"))
 
     assert app.last_screen.text == "Transcript is empty."
-
-
-def test_export_transcript_is_deprecated_and_does_not_write_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    app, widgets = _app(tmp_path, monkeypatch)
-    app._reducer.view = replace(
-        app._reducer.view,
-        transcript=(TranscriptItem(id="1", kind="system_status", timestamp="t", body="ready"),),
-    )
-
-    app.on_input_submitted(SimpleNamespace(value="/export-transcript"))
-
-    assert list((tmp_path / "data").glob("**/transcript.md")) == []
-    assert app._reducer.view.transcript[-1].kind == "command_output"
-    assert app._reducer.view.transcript[-1].body == "/export-transcript is deprecated; use /export-session"
-    assert len(widgets["#transcript"].mounted) == 2

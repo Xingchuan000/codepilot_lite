@@ -5,7 +5,7 @@ from pathlib import Path
 from codepilot.repo.git_utils import GitCommandError, is_git_repo, run_git
 from codepilot.repo.patch_metadata import build_untracked_file_patch, compute_patch_metadata, get_untracked_files
 from codepilot.repo.models import PatchMetadata
-from codepilot.tools.patch_utils import extract_paths_from_patch
+from codepilot.common.patches import extract_paths_from_patch
 
 
 def export_patch(repo_path: str | Path, output_path: str | Path) -> Path:

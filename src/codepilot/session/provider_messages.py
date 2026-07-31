@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from codepilot.llm.types import ChatMessage, ChatMessagePart, RichChatMessage
+from codepilot.llm.types import ChatMessage, RichChatMessage
 
 
 def to_provider_messages(messages: list[RichChatMessage | ChatMessage]) -> list[dict[str, Any]]:

@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from codepilot.pr_assist.manifest_loader import scan_token_like_strings
+from codepilot.security.secrets import scan_token_like_strings
 from codepilot.post_pr.models import (
     PostPRAutomationState,
     PostPRAutomationStatus,

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from codepilot.repo.commit import CommitPrepError
 
 SafetyGateStatus = Literal["pass", "warn", "fail"]
 PRAssistSideEffectKey = Literal[
@@ -36,18 +37,6 @@ class PRAssistInput:
     manifest_path: Path
     redact_absolute_paths: bool = True
     strict_safety: bool = True
-
-
-@dataclass(frozen=True)
-class PRAssistArtifact:
-    """描述 pr-assist 生成出的单个产物。"""
-
-    name: str
-    path: Path
-    kind: str
-    exists: bool
-    size_bytes: int | None = None
-    sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,16 +106,8 @@ class ManifestInvalidError(PRAssistError):
     """artifact_manifest.json 结构或内容不符合预期。"""
 
 
-class SafetyBlockedError(PRAssistError):
-    """安全门阻止后续本地副作用操作。"""
-
-
 class BranchPrepError(PRAssistError):
     """本地分支准备失败。"""
-
-
-class CommitPrepError(PRAssistError):
-    """本地提交准备失败。"""
 
 
 def to_pr_assist_jsonable(value: Any) -> Any:

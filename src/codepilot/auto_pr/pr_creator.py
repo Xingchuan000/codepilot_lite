@@ -8,7 +8,7 @@ from pathlib import Path
 
 from codepilot.auto_pr.github_client import GitHubClientProtocol
 from codepilot.auto_pr.models import GitHubRepoRef, PRCreateRequest, PRCreateResult
-from codepilot.pr_assist.manifest_loader import scan_token_like_strings
+from codepilot.security.secrets import scan_token_like_strings
 
 
 def sanitize_pr_title(value: str | None) -> str:

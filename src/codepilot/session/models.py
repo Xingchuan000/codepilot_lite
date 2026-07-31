@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
+
+from codepilot.common.serialization import to_jsonable
 
 
 SessionStatus = Literal["active", "archived"]
@@ -330,19 +332,3 @@ class ArtifactRecord:
     created_at: str
     content: Any | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-def to_jsonable(value: Any) -> Any:
-    """把 Path / dataclass 递归转换成可直接 JSON 编码的结构。"""
-
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return {key: to_jsonable(item) for key, item in asdict(value).items()}
-    if isinstance(value, dict):
-        return {str(key): to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [to_jsonable(item) for item in value]
-    if isinstance(value, set):
-        return [to_jsonable(item) for item in sorted(value, key=repr)]
-    return value

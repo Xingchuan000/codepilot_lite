@@ -112,7 +112,6 @@ def build_mcp_descriptor_hash(tool: MCPToolInfo) -> str:
         }
     )
 
-
 def build_mcp_config_hash(server: MCPServerConfig) -> str:
     return canonical_json_hash(
         {
@@ -134,16 +133,3 @@ def build_mcp_config_hash(server: MCPServerConfig) -> str:
             "env_keys": sorted(server.env),
         }
     )
-
-
-def summarize_mcp_command(command: list[str]) -> dict[str, Any]:
-    if not command:
-        return {}
-    executable = Path(command[0]).name
-    args = [truncate_mcp_text(arg, 80)[0] for arg in command[1:4]]
-    return {
-        "executable": executable,
-        "arg_count": max(0, len(command) - 1),
-        "args_preview": args,
-        "args_preview_truncated": len(command) > 4,
-    }

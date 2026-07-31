@@ -64,18 +64,6 @@ def test_copy_command_supports_last_and_errors_targets(tmp_path: Path) -> None:
     assert errors_result.copy_target == "errors"
 
 
-def test_export_transcript_command_requests_export(tmp_path: Path) -> None:
-    result = handle_command(
-        "/export-transcript",
-        view=AgentRunView(),
-        project=_project(tmp_path),
-        session=_session(tmp_path),
-        permission_mode="manual",
-    )
-
-    assert result.export_transcript_requested is True
-
-
 def test_move_command_only_sets_next_session_project(tmp_path: Path) -> None:
     project = _project(tmp_path)
     moved = tmp_path / "moved"

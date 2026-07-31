@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from inspect import signature
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
-from codepilot.session.database import SessionDatabase
+from codepilot.memory.models import SessionSummaryContent
+from codepilot.memory.summarizer import StructuredSummaryGenerator
 from codepilot.session.context import ContextAssembler
 from codepilot.session.context_budget import ContextBudgetAllocator, ContextBudgetExceeded, ContextItem, estimate_tokens
+from codepilot.session.database import SessionDatabase
 from codepilot.session.model_capabilities import ModelContextProfile, resolve_model_context_profile
 from codepilot.session.models import ContextSummaryRecord
 from codepilot.session.store import SessionStore
@@ -168,11 +170,11 @@ def _retain_call(
 class CompactionService:
     """把旧历史压缩成摘要，但不删除原始事实。"""
 
-    def __init__(self, database: SessionDatabase, summarizer: Callable[[list[dict[str, Any]]], str] | None = None, threshold: float = 0.8) -> None:
+    def __init__(self, database: SessionDatabase, summarizer: Callable[..., Any] | None = None, threshold: float = 0.7) -> None:
         if not 0 < threshold <= 1:
             raise ValueError("threshold must be between 0 and 1")
         self.store = SessionStore(database)
-        self.summarizer = summarizer or _default_summary
+        self.summarizer = summarizer or StructuredSummaryGenerator()
         self.threshold = threshold
         self.planning = ContextPlanningService(database)
 
@@ -215,16 +217,16 @@ class CompactionService:
         if not summary_payload:
             raise ContextBudgetExceeded("no new history is available for compaction", reason="no_compactable_history")
         try:
-            previous_summary = latest_summary.content if latest_summary is not None else None
+            previous_summary = latest_summary.content if latest_summary is not None and isinstance(latest_summary.content, dict) else None
             max_output_tokens = max(1, min(4_000, int(profile.max_input_tokens * 0.1)))
             summary_input = ([{"role": "system", "content": previous_summary}] if previous_summary else []) + summary_payload
             if "max_output_tokens" in signature(self.summarizer).parameters:
-                summary_text = self.summarizer(summary_input, max_output_tokens=max_output_tokens, previous_summary=previous_summary)
+                summary_value = self.summarizer(summary_input, max_output_tokens=max_output_tokens, previous_summary=previous_summary)
             else:
-                summary_text = self.summarizer(summary_input)
-            if estimate_tokens(summary_text) > max_output_tokens:
+                summary_value = self.summarizer(summary_input)
+            summary_content = _validate_summary(summary_value)
+            if estimate_tokens(summary_content) > max_output_tokens:
                 raise ContextBudgetExceeded("compaction summary exceeds its output budget", reason="summary_output_overflow")
-            _validate_summary(summary_text)
         except Exception as exc:
             self.store.append_event(
                 session_id=session_id,
@@ -271,7 +273,7 @@ class CompactionService:
             summary_record = self.store.replace_context_summary(
                 session_id=session_id,
                 previous_summary_id=latest_summary.summary_id if latest_summary is not None else None,
-                summary_content=summary_text,
+                summary_content=summary_content,
                 turn_id=current_turn_id,
                 source_start_sequence=selection.source_start_sequence,
                 source_end_sequence=selection.source_end_sequence,
@@ -333,19 +335,12 @@ class ContextPlanningService:
                 selected.append(item)
         return ContextEstimate(allocator.used_tokens + profile.protocol_overhead_tokens, tuple(selected))
 
-def _default_summary(messages: list[dict[str, Any]], *, max_output_tokens: int = 4_000, previous_summary: str | None = None) -> str:
-    lines = ["Session summary:"]
-    if previous_summary:
-        lines.append(f"Previous summary: {previous_summary[:1000]}")
-    for message in messages:
-        lines.append(f"- {message['role']}: {str(message['content'])[:800]}")
-    lines.extend(["Key decisions: preserved in the summarized messages.", "Files/tests/diff: see the listed tool results.", "Unfinished work: continue from the latest message."])
-    return "\n".join(lines)[: max_output_tokens * 4]
-
-
-def _validate_summary(summary: str) -> None:
-    if not summary.strip():
+def _validate_summary(summary: Any) -> dict[str, Any] | str:
+    if isinstance(summary, dict):
+        return SessionSummaryContent.from_dict(summary).to_dict()
+    if not isinstance(summary, str) or not summary.strip():
         raise ValueError("compaction summary is empty")
     required = ("Key decisions", "Files/tests/diff", "Unfinished work")
     if any(item not in summary for item in required):
         raise ValueError("compaction summary does not cover required fields")
+    return summary

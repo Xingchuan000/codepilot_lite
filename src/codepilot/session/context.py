@@ -3,8 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from codepilot.llm.types import ChatMessage, RichChatMessage
+from codepilot.memory.context_provider import MemoryContextProvider
+from codepilot.memory.repository import TurnCheckpointRepository
+from codepilot.memory.turn_window import render_turn_checkpoint
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.context_adapters import SessionHistory, TextActionContextAdapter
+from codepilot.session.context_budget import ContextItem, estimate_tokens
 from codepilot.session.database import SessionDatabase
 from codepilot.session.model_capabilities import resolve_model_context_profile
 from codepilot.session.models import MessagePartRecord, MessageRecord
@@ -18,6 +22,8 @@ class ContextAssembler:
         self.store = store or SessionStore(database)
         self.artifacts = ArtifactStore(database)
         self.adapter = TextActionContextAdapter(self.store, self.artifacts)
+        self.memory = MemoryContextProvider(database)
+        self.checkpoints = TurnCheckpointRepository(database)
 
     def build(self, session_id: str, current_turn_id: str, provider: str, model: str, profile=None) -> list[ChatMessage | RichChatMessage]:
         return self.adapter.build_messages(self.build_history(session_id, current_turn_id), profile or resolve_model_context_profile(provider, model))
@@ -34,15 +40,42 @@ class ContextAssembler:
             project_path = Path(connection.execute("SELECT path FROM projects WHERE project_id = ?", (session.project_id,)).fetchone()[0])
         latest_summary = self.store.get_latest_context_summary(session_id)
         summaries = (latest_summary,) if latest_summary is not None else ()
-        history = SessionHistory(
+        checkpoint = self.checkpoints.latest(current_turn_id)
+        checkpoint_message = (
+            ChatMessage("system", render_turn_checkpoint(checkpoint.content))
+            if checkpoint is not None
+            else None
+        )
+        return SessionHistory(
             session_id=session_id,
             current_turn_id=current_turn_id,
             project_path=project_path,
             summaries=summaries,
             messages=_messages_for_turn(self.store, session_id, turn.sequence),
             branch_events=tuple(_branch_messages(self.store, session_id, turn.sequence)),
+            instruction_items=self.memory.instruction_items(session.project_id, project_path),
+            memory_items=self.memory.memory_items(
+                session.project_id,
+                str(self.store.get_user_message_for_turn(current_turn_id).content)
+                if self.store.get_user_message_for_turn(current_turn_id) is not None
+                else "",
+                turn.branch_snapshot,
+            ),
+            turn_checkpoint_items=(
+                (
+                    ContextItem(
+                        key=f"turn-checkpoint-{checkpoint.checkpoint_id}",
+                        messages=(checkpoint_message,),
+                        estimated_tokens=estimate_tokens(checkpoint_message),
+                        mandatory=True,
+                        priority=880,
+                    ),
+                )
+                if checkpoint is not None and checkpoint_message is not None
+                else ()
+            ),
+            turn_checkpoint_covered_ids=checkpoint.covered_message_ids if checkpoint is not None else (),
         )
-        return history
 
 
 def _messages_for_turn(store: SessionStore, session_id: str, current_turn_sequence: int) -> tuple[tuple[MessageRecord, tuple[MessagePartRecord, ...]], ...]:

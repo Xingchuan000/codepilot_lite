@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from collections.abc import Iterator
 from typing import Any, Protocol
 
 
@@ -60,9 +59,4 @@ class CodePilotLLMClient(Protocol):
     """MinimalAgentLoop 依赖的最小 LLM 协议。"""
 
     def complete(self, messages: list[ChatMessage | RichChatMessage]) -> LLMResponse:
-        ...
-
-
-class StreamingCodePilotLLMClient(Protocol):
-    def stream(self, messages: list[ChatMessage | RichChatMessage]) -> Iterator[LLMStreamEvent]:
         ...

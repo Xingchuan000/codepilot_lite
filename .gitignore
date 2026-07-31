@@ -186,4 +186,12 @@ poetry.toml
 # LSP config files
 pyrightconfig.json
 
+# CodePilot runtime and local artifacts
+.DS_Store
+__MACOSX/
+.idea/
+*.sqlite
+*.sqlite3
+*.db
+
 # End of https://www.toptal.com/developers/gitignore/api/python

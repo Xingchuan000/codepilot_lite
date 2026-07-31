@@ -11,8 +11,8 @@ from codepilot.post_pr.feedback_delta import extract_feedback_fingerprints, load
 from codepilot.post_pr.models import ArtifactSnapshotEntry, PostPRRoundPhase, PostPRRoundRef
 from codepilot.post_pr.state_store import atomic_write_json
 from codepilot.pr_feedback.github_client import PRFeedbackGitHubClientProtocol
-from codepilot.pr_feedback.models import PRFeedbackResult, PRRef
-from codepilot.pr_feedback.workflow import PR_FEEDBACK_ARTIFACT_NAMES, run_pr_feedback_loop
+from codepilot.pr_feedback.models import PRRef
+from codepilot.pr_feedback.workflow import run_pr_feedback_loop
 from codepilot.repo.git_utils import sha256_file
 
 

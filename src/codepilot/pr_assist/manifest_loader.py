@@ -3,23 +3,12 @@ from __future__ import annotations
 """读取并校验第十一步生成的 artifact manifest。"""
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
-from codepilot.pr_assist.models import ManifestInvalidError, PRAssistInput, PRAssistSafetyGate
+from codepilot.pr_assist.models import ManifestInvalidError, PRAssistSafetyGate
 from codepilot.repo.git_utils import sha256_file
-
-
-TOKEN_LIKE_PATTERNS = [
-    re.compile(r"ghp_[A-Za-z0-9_]{20,}"),
-    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),
-    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),
-    re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,}"),
-    re.compile(r"(?i)OPENAI_API_KEY"),
-    re.compile(r"(?i)ANTHROPIC_API_KEY"),
-    re.compile(r"(?i)GITHUB_TOKEN"),
-]
+from codepilot.security.secrets import scan_token_like_strings
 
 
 def load_artifact_manifest(path: str | Path) -> dict[str, Any]:
@@ -37,17 +26,6 @@ def load_artifact_manifest(path: str | Path) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ManifestInvalidError("artifact_manifest must be a JSON object")
     return data
-
-
-def scan_token_like_strings(value: Any) -> list[str]:
-    """把任意结构序列化成文本后做轻量 token 模式扫描。"""
-
-    text = json.dumps(value, ensure_ascii=False, default=str)
-    matches: list[str] = []
-    for pattern in TOKEN_LIKE_PATTERNS:
-        if pattern.search(text):
-            matches.append(pattern.pattern)
-    return matches
 
 
 def validate_artifact_manifest(manifest: dict[str, Any]) -> list[str]:
@@ -212,24 +190,3 @@ def build_safety_gate(manifest: dict[str, Any]) -> PRAssistSafetyGate:
     if safety_decision == "warn" or manifest.get("success") is False or safety_summary.get("baseline_dirty") is True:
         return PRAssistSafetyGate(status="warn", reasons=reasons, warnings=warnings)
     return PRAssistSafetyGate(status="pass", reasons=reasons, warnings=warnings)
-
-
-def build_pr_assist_input(
-    run_dir: str | Path,
-    *,
-    redact_absolute_paths: bool = True,
-    strict_safety: bool = True,
-) -> PRAssistInput:
-    """根据 run_dir 构造 workflow 入口对象。"""
-
-    run_dir_path = Path(run_dir).expanduser().resolve()
-    manifest_path = run_dir_path / "artifact_manifest.json"
-    manifest = load_artifact_manifest(manifest_path)
-    run_id = str(manifest.get("run_id") or run_dir_path.name)
-    return PRAssistInput(
-        run_id=run_id,
-        run_dir=run_dir_path,
-        manifest_path=manifest_path,
-        redact_absolute_paths=redact_absolute_paths,
-        strict_safety=strict_safety,
-    )

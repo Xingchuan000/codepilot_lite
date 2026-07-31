@@ -5,6 +5,7 @@ from typing import Any
 
 from codepilot.trace.events import TraceEvent
 from codepilot.tui_agent.models import TUIEvent
+from codepilot.tui_agent.preview import safe_dict_preview
 
 
 TRACE_METADATA_KEYS = (
@@ -68,31 +69,6 @@ class MemoryEventStream:
         return events
 
 
-def _safe_dict_preview(value: Any, limit: int = 800) -> dict[str, Any] | None:
-    if not isinstance(value, dict):
-        return None
-    preview: dict[str, Any] = {}
-    current_length = 2
-    for key, item in value.items():
-        key_text = str(key)
-        if isinstance(item, dict):
-            preview_item: Any = _safe_dict_preview(item, max(80, limit // 4))
-        elif isinstance(item, list):
-            preview_item = [item_entry if isinstance(item_entry, (dict, list)) else str(item_entry) for item_entry in item[:5]]
-        elif isinstance(item, str):
-            preview_item = item if len(item) <= max(40, limit // 4) else f"{item[: max(0, max(40, limit // 4) - 13)]}... truncated"
-        else:
-            preview_item = item
-        candidate = {**preview, key_text: preview_item}
-        if len(str(candidate)) > limit:
-            break
-        preview[key_text] = preview_item
-        current_length = len(str(preview))
-        if current_length >= limit:
-            break
-    return preview
-
-
 def _flatten_metadata(payload: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
     metadata = payload.get("trace_metadata")
     if not isinstance(metadata, dict):
@@ -134,13 +110,13 @@ def _trace_payload(trace_event: TraceEvent) -> dict[str, Any]:
         input_value = trace_event.input if isinstance(trace_event.input, dict) else {}
         arguments = input_value.get("arguments") if isinstance(input_value, dict) else None
         if isinstance(arguments, dict):
-            normalized["input_preview"] = _safe_dict_preview(arguments) or {}
+            normalized["input_preview"] = safe_dict_preview(arguments) or {}
         elif isinstance(normalized["trace_metadata"].get("normalized_action_preview"), dict):
-            normalized["input_preview"] = _safe_dict_preview(normalized["trace_metadata"]["normalized_action_preview"]) or {}
+            normalized["input_preview"] = safe_dict_preview(normalized["trace_metadata"]["normalized_action_preview"]) or {}
         elif isinstance(normalized["trace_metadata"].get("raw_action_preview"), dict):
-            normalized["input_preview"] = _safe_dict_preview(normalized["trace_metadata"]["raw_action_preview"]) or {}
+            normalized["input_preview"] = safe_dict_preview(normalized["trace_metadata"]["raw_action_preview"]) or {}
         elif isinstance(input_value, dict):
-            normalized["input_preview"] = _safe_dict_preview(input_value) or {}
+            normalized["input_preview"] = safe_dict_preview(input_value) or {}
         else:
             normalized["input_preview"] = {}
     return normalized

@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field, is_dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from codepilot.common.serialization import to_jsonable
 from codepilot.tui import DASHBOARD_SCHEMA_VERSION
 
 RunStatus = Literal[
@@ -104,17 +105,3 @@ class RunDashboardModel:
 
     def to_json_dict(self) -> dict[str, Any]:
         return to_jsonable(self)
-
-
-def to_jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if is_dataclass(value):
-        return {key: to_jsonable(item) for key, item in asdict(value).items()}
-    if isinstance(value, dict):
-        return {str(key): to_jsonable(item) for key, item in value.items()}
-    if isinstance(value, tuple | list):
-        return [to_jsonable(item) for item in value]
-    if isinstance(value, set):
-        return sorted(to_jsonable(item) for item in value)
-    return value

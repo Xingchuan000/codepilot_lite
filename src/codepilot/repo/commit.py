@@ -5,10 +5,13 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from codepilot.pr_assist.models import CommitPrepError
 from codepilot.repo.git_utils import GitCommandError, run_git
 from codepilot.repo.protected_paths import DEFAULT_REPO_PROTECTED_PATHS
 from codepilot.repo.safety import find_protected_paths, normalize_repo_relative_path
+
+
+class CommitPrepError(RuntimeError):
+    """提交准备或安全校验失败。"""
 
 
 TOKEN_LINE_RE = re.compile(r"(?i)(api[_-]?key|token|secret|password|ghp_|github_pat_|sk-)")

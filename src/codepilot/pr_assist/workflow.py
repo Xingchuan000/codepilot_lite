@@ -10,13 +10,11 @@ from typing import Any
 from codepilot.pr_assist.branch import prepare_local_branch, sanitize_branch_name
 from codepilot.pr_assist.checklist import render_review_checklist, write_review_checklist
 from codepilot.pr_assist.commands import render_manual_pr_commands, write_manual_pr_commands
-from codepilot.pr_assist.commit import prepare_commit, render_commit_message
 from codepilot.pr_assist.github_action import write_github_action_template
 from codepilot.pr_assist.manifest_loader import (
     build_safety_gate,
     load_artifact_manifest,
     resolve_required_artifacts,
-    scan_token_like_strings,
     validate_required_artifacts,
 )
 from codepilot.pr_assist.models import (
@@ -27,6 +25,9 @@ from codepilot.pr_assist.models import (
 )
 from codepilot.pr_assist.pr_body import build_pr_body_data, read_json_if_exists, write_pr_body
 from codepilot.repo.git_utils import sha256_file
+from codepilot.repo.commit import prepare_commit, render_commit_message
+from codepilot.security.secrets import scan_token_like_strings
+from codepilot.workflow_artifacts import build_artifact_record, prepare_owned_artifacts
 
 
 PR_ASSIST_ARTIFACT_NAMES = [
@@ -38,39 +39,12 @@ PR_ASSIST_ARTIFACT_NAMES = [
 ]
 
 
-def _ensure_can_write(run_dir: Path, *, overwrite: bool) -> None:
-    """只管理第十二步自己的产物，避免误删第十一步已有文件。"""
-
-    existing = [run_dir / name for name in PR_ASSIST_ARTIFACT_NAMES if (run_dir / name).exists()]
-    if existing and not overwrite:
-        raise FileExistsError("PR assist artifacts already exist: " + ", ".join(str(path) for path in existing))
-    if overwrite:
-        for path in existing:
-            path.unlink()
-
-
 def _read_text(path: Path | None) -> str | None:
     """读取可选文本文件。"""
 
     if path is None or not path.exists():
         return None
     return path.read_text(encoding="utf-8", errors="replace")
-
-
-def _artifact_record(name: str, path: Path, *, run_dir: Path) -> dict[str, Any]:
-    """把新生成的 artifact 写成 manifest 可记录的轻量索引。"""
-
-    try:
-        display_path = str(path.resolve().relative_to(run_dir.resolve()))
-    except ValueError:
-        display_path = path.name
-    return {
-        "name": name,
-        "path": display_path,
-        "exists": path.exists(),
-        "size_bytes": path.stat().st_size if path.exists() else None,
-        "sha256": sha256_file(path) if path.exists() else None,
-    }
 
 
 def _assert_no_token_like_strings_in_path(path: Path) -> None:
@@ -101,7 +75,7 @@ def write_pr_assist_manifest(
     if path.exists() and not overwrite:
         raise FileExistsError(path)
     artifact_items = [
-        _artifact_record(name, artifact_path, run_dir=run_dir)
+        build_artifact_record(name, artifact_path, run_dir=run_dir)
         for name, artifact_path in generated_artifacts.items()
         if artifact_path is not None
     ]
@@ -167,7 +141,12 @@ def run_pr_assist(
     run_dir_path = Path(run_dir).expanduser().resolve()
     if not run_dir_path.exists() or not run_dir_path.is_dir():
         raise FileNotFoundError(f"run_dir does not exist: {run_dir_path}")
-    _ensure_can_write(run_dir_path, overwrite=overwrite)
+    prepare_owned_artifacts(
+        run_dir_path,
+        PR_ASSIST_ARTIFACT_NAMES,
+        overwrite=overwrite,
+        label="PR assist",
+    )
 
     manifest_path = run_dir_path / "artifact_manifest.json"
     manifest = load_artifact_manifest(manifest_path)

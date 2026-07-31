@@ -653,10 +653,10 @@ TUI 里现在还支持两种复制方式：
 /copy
 /copy last
 /copy errors
-/export-transcript
+/export-session [path]
 ```
 
-`/copy` 会打开纯文本复制视图，`Ctrl+A` 可全选，`Esc` 可关闭。`/export-transcript` 会把当前 transcript 导出到会话目录下的 `transcript.md`。
+`/copy` 会打开纯文本复制视图，`Ctrl+A` 可全选，`Esc` 可关闭。`/export-session` 会把当前 Session 的 SQLite 业务事实导出到指定目录。
 
 ### TraceLogger 使用说明
 

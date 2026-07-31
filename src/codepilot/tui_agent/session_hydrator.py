@@ -178,28 +178,6 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
     )
 
 
-def hydrate_transcript(store: SessionStore, session_id: str) -> tuple[TranscriptItem, ...]:
-    """只返回按业务表排序的 transcript。"""
-
-    return hydrate_session_view(store, session_id).transcript
-
-
-def hydrate_timeline(store: SessionStore, session_id: str) -> tuple[TimelineItem, ...]:
-    """只返回 Session Event 时间线。"""
-
-    return hydrate_session_view(store, session_id).timeline
-
-
-def hydrate_pending_permissions(store: SessionStore, session_id: str) -> tuple[PermissionRequest, ...]:
-    """当前 pending 直接来自权限业务表，不从历史 Event 推断。"""
-
-    return hydrate_session_view(store, session_id).permission_requests
-
-
-def hydrate_recovery_state(store: SessionStore, session_id: str) -> str | None:
-    return hydrate_session_view(store, session_id).recovery_state
-
-
 def _item(
     item_id: str,
     kind: str,

@@ -6,16 +6,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from codepilot.auto_pr.models import AutoPRInput, AutoPRManifestInvalidError
-from codepilot.auto_pr.workflow_inputs import validate_head_branch, validate_repo_slug, validate_run_id
+from codepilot.auto_pr.models import AutoPRManifestInvalidError
 from codepilot.pr_assist.manifest_loader import (
     artifact_entries_by_name,
-    load_artifact_manifest,
     resolve_artifact_path,
-    scan_token_like_strings,
     verify_artifact_integrity,
 )
 from codepilot.repo.git_utils import sha256_file
+from codepilot.security.secrets import scan_token_like_strings
+from codepilot.workflow_manifest import load_source_artifact_manifest
 
 
 def load_pr_assist_manifest(path: str | Path) -> dict[str, Any]:
@@ -82,25 +81,6 @@ def verify_generated_artifact_integrity(path: Path, entry: dict[str, Any]) -> li
     if isinstance(expected_sha, str) and expected_sha and sha256_file(path) != expected_sha:
         errors.append(f"generated artifact sha256 mismatch: {entry.get('name')}")
     return errors
-
-
-def load_source_artifact_manifest(run_dir: str | Path, pr_assist_manifest: dict[str, Any]) -> dict[str, Any]:
-    """按 pr_assist_manifest 的声明回溯读取第十一步 artifact_manifest。"""
-
-    run_dir_path = Path(run_dir).expanduser().resolve()
-    raw_path = pr_assist_manifest.get("source_artifact_manifest") or "artifact_manifest.json"
-    if not isinstance(raw_path, str):
-        raise AutoPRManifestInvalidError("source_artifact_manifest must be a string path")
-    source_path = resolve_generated_artifact_path(run_dir_path, {"path": raw_path})
-    if not source_path.exists():
-        raise AutoPRManifestInvalidError(f"source artifact manifest missing: {source_path.name}")
-    expected_sha = pr_assist_manifest.get("source_artifact_manifest_sha256")
-    if not isinstance(expected_sha, str) or not expected_sha:
-        raise AutoPRManifestInvalidError("missing source_artifact_manifest_sha256")
-    actual_sha = sha256_file(source_path)
-    if actual_sha != expected_sha:
-        raise AutoPRManifestInvalidError("source artifact manifest sha256 mismatch")
-    return load_artifact_manifest(source_path)
 
 
 def resolve_required_auto_pr_artifacts(
@@ -214,50 +194,3 @@ def validate_pr_assist_manifest(manifest: dict[str, Any], run_dir: str | Path, *
         except AutoPRManifestInvalidError as exc:
             errors.append(str(exc))
     return errors
-
-
-def resolve_auto_pr_inputs(
-    run_dir: str | Path,
-    *,
-    dry_run: bool = True,
-    execute: bool = False,
-    allow_push: bool = False,
-    allow_create_pr: bool = False,
-    allow_comment: bool = False,
-    allow_empty_pr: bool = False,
-    remote_name: str = "origin",
-    base_branch: str | None = None,
-    head_branch: str | None = None,
-    repo_slug: str | None = None,
-    token_env: str = "GITHUB_TOKEN",
-    draft: bool = True,
-    generate_workflow_template: bool = True,
-    overwrite: bool = False,
-) -> AutoPRInput:
-    """从 run_dir 与 pr_assist_manifest 推导 workflow 入口对象。"""
-
-    run_dir_path = Path(run_dir).expanduser().resolve()
-    if not run_dir_path.exists() or not run_dir_path.is_dir():
-        raise FileNotFoundError(run_dir_path)
-    manifest_path = run_dir_path / "pr_assist_manifest.json"
-    manifest = load_pr_assist_manifest(manifest_path)
-    run_id = validate_run_id(str(manifest.get("run_id") or run_dir_path.name))
-    return AutoPRInput(
-        run_id=run_id,
-        run_dir=run_dir_path,
-        pr_assist_manifest_path=manifest_path,
-        dry_run=dry_run,
-        execute=execute,
-        allow_push=allow_push,
-        allow_create_pr=allow_create_pr,
-        allow_comment=allow_comment,
-        allow_empty_pr=allow_empty_pr,
-        remote_name=remote_name,
-        base_branch=base_branch,
-        head_branch=validate_head_branch(head_branch, run_id=run_id),
-        repo_slug=validate_repo_slug(repo_slug),
-        token_env=token_env,
-        draft=draft,
-        generate_workflow_template=generate_workflow_template,
-        overwrite=overwrite,
-    )
