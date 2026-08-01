@@ -16,8 +16,8 @@ from codepilot.agent.actions import (
 from codepilot.agent.evidence import AssistantStopReason, CompletionKind, EvidenceDecision
 from codepilot.agent.observation import (
     format_finish_blocked_observation,
-    format_observation,
     format_parse_error_observation,
+    format_pruned_observation,
 )
 from codepilot.agent.outcome import RunOutcomeSnapshot, build_run_outcome
 from codepilot.agent.prompts import build_initial_messages
@@ -31,10 +31,17 @@ from codepilot.agent.state import (
     register_tool_attempt,
     update_state_from_route_result,
 )
+from codepilot.agent.tool_output_pruner import ToolOutputPruner
+from codepilot.agent.tool_observation_budget import ToolObservationBudgetPolicy
+from codepilot.llm.errors import LLMContextOverflowError, normalize_llm_exception
 from codepilot.llm.fake import FakeLLMExhaustedError
 from codepilot.llm.types import ChatMessage, CodePilotLLMClient, LLMResponse, RichChatMessage
+from codepilot.memory.policy import redact_memory_value
 from codepilot.router import ToolAction, ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError, ToolPreExecutionError
+from codepilot.session.context_adapters import PreparedContext
+from codepilot.session.context_budget import estimate_tokens
+from codepilot.session.model_capabilities import ModelContextProfile
 from codepilot.tools.base import ToolSpec
 from codepilot.tools.registry import list_tool_specs
 from codepilot.trace.protocol import TraceRecorder
@@ -133,6 +140,7 @@ class TurnExecutionContext:
     task: str
     repo: Path
     messages: list[ChatMessage | RichChatMessage]
+    prepared_context: PreparedContext | None = None
 
 
 class AgentEventSink(Protocol):
@@ -161,7 +169,13 @@ class AgentContextWindow(Protocol):
         base_message_count: int,
         task: str,
         evidence: dict[str, Any],
-    ) -> tuple[list[ChatMessage | RichChatMessage], int]: ...
+    ) -> Any: ...
+
+
+class AgentContextRecovery(Protocol):
+    def recover_from_provider_overflow(self, **kwargs: Any) -> Any: ...
+
+    def retry_exhausted(self, **kwargs: Any) -> None: ...
 
 
 def _inject_repo_if_missing(arguments: dict[str, Any], repo: Path) -> dict[str, Any]:
@@ -176,6 +190,19 @@ def _inject_repo_if_missing(arguments: dict[str, Any], repo: Path) -> dict[str, 
         raise ValueError("repo argument must match the current repository")
     injected["repo"] = str(repo)
     return injected
+
+
+def _safe_error(exc: BaseException) -> str:
+    return str(redact_memory_value(str(exc)).value)
+
+
+def _checkpoint_evidence(state: AgentState) -> dict[str, Any]:
+    return {
+        **evidence_snapshot(state).to_payload(),
+        "last_test_status": state.last_test_status,
+        "last_test_command": state.last_test_command,
+        "last_failed_tests": state.last_failed_tests,
+    }
 
 
 def _infer_finish_delivery_kind(state: AgentState, action: AgentFinishAction) -> str:
@@ -251,6 +278,11 @@ class MinimalAgentLoop:
         cancellation_token: Any | None = None,
         event_sink: AgentEventSink | None = None,
         context_window: AgentContextWindow | None = None,
+        tool_output_pruner: ToolOutputPruner | None = None,
+        tool_observation_token_budget: int | None = None,
+        tool_observation_budget_policy: ToolObservationBudgetPolicy | None = None,
+        model_context_profile: ModelContextProfile | None = None,
+        context_recovery: AgentContextRecovery | None = None,
     ) -> None:
         if max_steps <= 0:
             raise ValueError("max_steps must be greater than 0")
@@ -269,6 +301,11 @@ class MinimalAgentLoop:
         self.cancellation_token = cancellation_token
         self.event_sink = event_sink
         self.context_window = context_window
+        self.tool_output_pruner = tool_output_pruner or ToolOutputPruner()
+        self.tool_observation_token_budget = tool_observation_token_budget
+        self.tool_observation_budget_policy = tool_observation_budget_policy
+        self.model_context_profile = model_context_profile
+        self.context_recovery = context_recovery
         self.tool_specs_by_name = {}
         for spec in list_tool_specs():
             self.tool_specs_by_name[spec.name] = spec
@@ -288,23 +325,34 @@ class MinimalAgentLoop:
         if stream is None:
             if self.event_sink is not None:
                 self.event_sink.assistant_message_started(turn_id=context.turn_id, attempt_id=context.attempt_id, streaming=False)
-            return self.llm.complete(messages)  # type: ignore[arg-type]
+            try:
+                return self.llm.complete(messages)  # type: ignore[arg-type]
+            except FakeLLMExhaustedError:
+                raise
+            except Exception as exc:
+                raise normalize_llm_exception(exc, output_started=False) from exc
         content: list[str] = []
         usage: dict[str, Any] = {}
         if self.event_sink is not None:
             self.event_sink.assistant_message_started(turn_id=context.turn_id, attempt_id=context.attempt_id, streaming=True)
-        for event in stream(messages):
-            if event.type == "text_delta":
-                content.append(event.content)
-                if self.event_sink is not None:
-                    self.event_sink.assistant_text_delta(content=event.content, type="text", provider_format=event.provider_format, replayable=event.replayable)
-            elif event.type == "reasoning_delta":
-                if self.event_sink is not None:
-                    self.event_sink.assistant_text_delta(content=event.content, type="reasoning", provider_format=event.provider_format, replayable=event.replayable)
-            elif event.type == "usage":
-                usage = event.usage
-            elif event.type == "error":
-                raise RuntimeError(event.content or "streaming LLM error")
+        output_started = False
+        try:
+            for event in stream(messages):
+                if event.type == "text_delta":
+                    output_started = output_started or bool(event.content)
+                    content.append(event.content)
+                    if self.event_sink is not None:
+                        self.event_sink.assistant_text_delta(content=event.content, type="text", provider_format=event.provider_format, replayable=event.replayable)
+                elif event.type == "reasoning_delta":
+                    output_started = output_started or bool(event.content)
+                    if self.event_sink is not None:
+                        self.event_sink.assistant_text_delta(content=event.content, type="reasoning", provider_format=event.provider_format, replayable=event.replayable)
+                elif event.type == "usage":
+                    usage = event.usage
+                elif event.type == "error":
+                    raise RuntimeError(event.content or "streaming LLM error")
+        except Exception as exc:
+            raise normalize_llm_exception(exc, output_started=output_started) from exc
         return LLMResponse(content="".join(content), usage=usage)
 
     def _cancelled_result(self, state: AgentState) -> AgentRunResult:
@@ -585,7 +633,14 @@ class MinimalAgentLoop:
 
         self._context_turn_id = context.turn_id
         self._context_attempt_id = context.attempt_id
-        state = create_initial_state(context.task, context.repo, max_steps=self.max_steps, messages=context.messages)
+        state = create_initial_state(
+            context.task,
+            context.repo,
+            max_steps=self.max_steps,
+            messages=context.messages,
+            base_context_items=context.prepared_context.selected_items if context.prepared_context is not None else (),
+            omitted_context_items=context.prepared_context.omitted_items if context.prepared_context is not None else (),
+        )
         initial_evidence = evidence_snapshot(state)
         self.trace_logger.record_run_start(
             task=context.task,
@@ -606,7 +661,7 @@ class MinimalAgentLoop:
                     return self._cancelled_result(state)
                 state.step += 1
                 if self.context_window is not None:
-                    state.messages, state.base_message_count = self.context_window.prepare_for_llm(
+                    preparation = self.context_window.prepare_for_llm(
                         session_id=context.session_id,
                         turn_id=context.turn_id,
                         attempt_id=context.attempt_id,
@@ -614,26 +669,51 @@ class MinimalAgentLoop:
                         messages=state.messages,
                         base_message_count=state.base_message_count,
                         task=state.task,
-                        evidence=evidence_snapshot(state).to_payload(),
+                        evidence=_checkpoint_evidence(state),
+                        selected_context_items=state.base_context_items,
+                        omitted_context_items=state.omitted_context_items,
                     )
-                try:
-                    response = self._complete_llm(state.messages, context)
-                except FakeLLMExhaustedError as exc:
-                    return self._runtime_failure_result(
-                        state,
-                        status="llm_exhausted",
-                        stop_reason="llm_exhausted",
-                        error=str(exc),
-                    )
-                except Exception as exc:
-                    if self.event_sink is not None:
-                        self.event_sink.assistant_message_interrupted(error=str(exc), turn_id=context.turn_id, attempt_id=context.attempt_id)
-                    return self._runtime_failure_result(
-                        state,
-                        status="llm_error",
-                        stop_reason="llm_error",
-                        error=str(exc),
-                    )
+                    state.messages, state.base_message_count = preparation
+                    if hasattr(preparation, "selected_context_items"):
+                        state.base_context_items = preparation.selected_context_items
+                        state.omitted_context_items = preparation.omitted_context_items
+                overflow_retried = False
+                while True:
+                    try:
+                        response = self._complete_llm(state.messages, context)
+                        break
+                    except FakeLLMExhaustedError as exc:
+                        return self._runtime_failure_result(state, status="llm_exhausted", stop_reason="llm_exhausted", error=str(exc))
+                    except LLMContextOverflowError as exc:
+                        if self.event_sink is not None:
+                            self.event_sink.assistant_message_interrupted(error=_safe_error(exc), turn_id=context.turn_id, attempt_id=context.attempt_id)
+                        if exc.output_started or overflow_retried or self.context_recovery is None or self._cancel_requested():
+                            if overflow_retried and self.context_recovery is not None:
+                                self.context_recovery.retry_exhausted(session_id=context.session_id, turn_id=context.turn_id, attempt_id=context.attempt_id, step=state.step, error=exc)
+                            return self._runtime_failure_result(state, status="llm_error", stop_reason="llm_error", error=_safe_error(exc))
+                        try:
+                            recovered = self.context_recovery.recover_from_provider_overflow(
+                                session_id=context.session_id,
+                                turn_id=context.turn_id,
+                                attempt_id=context.attempt_id,
+                                step=state.step,
+                                task=state.task,
+                                evidence=_checkpoint_evidence(state),
+                                original_messages=list(state.messages),
+                                original_base_message_count=state.base_message_count,
+                                error=exc,
+                            )
+                        except Exception as recovery_error:
+                            return self._runtime_failure_result(state, status="llm_error", stop_reason="llm_error", error=_safe_error(recovery_error))
+                        state.messages = recovered.messages
+                        state.base_message_count = recovered.base_message_count
+                        state.base_context_items = getattr(recovered, "selected_context_items", state.base_context_items)
+                        state.omitted_context_items = getattr(recovered, "omitted_context_items", state.omitted_context_items)
+                        overflow_retried = True
+                    except Exception as exc:
+                        if self.event_sink is not None:
+                            self.event_sink.assistant_message_interrupted(error=_safe_error(exc), turn_id=context.turn_id, attempt_id=context.attempt_id)
+                        return self._runtime_failure_result(state, status="llm_error", stop_reason="llm_error", error=_safe_error(exc))
                 if self.event_sink is not None:
                     self.event_sink.assistant_message_completed(content=response.content, turn_id=context.turn_id, attempt_id=context.attempt_id)
                 # 模型调用可能耗时，返回后必须再次检查，取消时不再处理这次响应。
@@ -770,7 +850,21 @@ class MinimalAgentLoop:
                     # execution_started 之后副作用未知，绝不能把异常伪装成普通
                     # observation；Runtime 会把当前 Attempt 标为 recovery_required。
                     raise
-                observation = format_observation(route_result)
+                token_budget = self.tool_observation_token_budget
+                if token_budget is None:
+                    if self.tool_observation_budget_policy is None or self.model_context_profile is None:
+                        token_budget = 2000
+                    else:
+                        token_budget = self.tool_observation_budget_policy.resolve(
+                            tool_name=route_result.tool_name,
+                            profile=self.model_context_profile,
+                            estimated_result_tokens=estimate_tokens(route_result.result.output or route_result.result.error or ""),
+                        ).token_limit
+                pruned = self.tool_output_pruner.prune(
+                    route_result,
+                    token_budget=token_budget,
+                )
+                observation = format_pruned_observation(route_result, pruned)
                 if self.event_sink is not None:
                     self.event_sink.tool_result_created(
                         tool_name=route_result.tool_name,
@@ -780,6 +874,14 @@ class MinimalAgentLoop:
                         attempt_id=context.attempt_id,
                         tool_call_id=route_result.metadata.get("tool_call_id"),
                         observation=observation,
+                        prune_metadata={
+                            "pruned": pruned.truncated,
+                            "prune_strategy": pruned.strategy,
+                            "original_chars": pruned.original_chars,
+                            "retained_chars": pruned.retained_chars,
+                            "transformed": pruned.transformed,
+                            "length_truncated": pruned.length_truncated,
+                        },
                     )
                 update_state_from_route_result(state, route_result)
                 refresh_evidence_state(state)

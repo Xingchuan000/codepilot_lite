@@ -206,6 +206,21 @@ def test_update_state_from_run_shell_pytest_command_marks_passed(tmp_path: Path)
     assert state.last_failed_tests == []
 
 
+def test_non_executing_pytest_command_does_not_create_test_evidence(tmp_path: Path) -> None:
+    state = create_initial_state("demo", tmp_path, max_steps=3)
+    result = ToolRouteResult(
+        action_id="a1",
+        tool_name="run_tests",
+        success=True,
+        result=ToolResult(success=True, metadata={"command": "pytest --collect-only", "returncode": 0, "status": "passed"}),
+    )
+
+    update_state_from_route_result(state, result)
+
+    assert state.last_test_status is None
+    assert state.last_test_command is None
+
+
 def test_register_tool_attempt_marks_write_attempt(tmp_path: Path) -> None:
     state = create_initial_state("修复 add bug", tmp_path, max_steps=3)
 

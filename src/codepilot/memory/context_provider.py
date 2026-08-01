@@ -32,13 +32,13 @@ class MemoryContextProvider:
         items = []
         if instructions:
             message = _instruction_message(instructions, mandatory_limit)
-            items.append(ContextItem("project-instructions", (message,), estimate_tokens(message), True, 930))
+            items.append(ContextItem("project-instructions", (message,), estimate_tokens(message), True, 930, source_kind="instruction", source_ids=tuple(record.instruction_id for record in instructions)))
         if references:
             reference_limit = budget.total_tokens - sum(item.estimated_tokens for item in items)
             if reference_limit > 0:
                 message = _reference_message(references[0], reference_limit)
                 if message is not None:
-                    items.append(ContextItem("project-reference-readme", (message,), estimate_tokens(message), False, 300))
+                    items.append(ContextItem("project-reference-readme", (message,), estimate_tokens(message), False, 300, source_kind="instruction", source_ids=(references[0].instruction_id,)))
         if sum(item.estimated_tokens for item in items) > budget.total_tokens:
             raise RuntimeError("project instruction context exceeds its resolved budget")
         return tuple(items)
@@ -69,6 +69,8 @@ class MemoryContextProvider:
                 estimated_tokens=estimate_tokens(message),
                 mandatory=False,
                 priority=820,
+                source_kind="memory",
+                source_ids=tuple(memory.memory_id for memory in selected),
             ),
         )
 

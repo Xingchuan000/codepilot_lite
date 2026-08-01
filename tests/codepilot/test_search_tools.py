@@ -95,3 +95,29 @@ def test_search_code_truncates_max_results(tmp_path: Path) -> None:
     assert len(result.output.splitlines()) == 4  # 3 条结果 + 1 行截断提示
     assert result.metadata["truncated"] is True
     assert "truncated after 3 results" in result.output
+
+
+def test_search_code_skips_default_protected_files_and_directories(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("API_KEY=secret-value\n", encoding="utf-8")
+    (tmp_path / "secrets").mkdir()
+    (tmp_path / "secrets" / "token.txt").write_text("API_KEY=secret-value\n", encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("API_KEY = os.getenv('API_KEY')\n", encoding="utf-8")
+
+    result = search_code(tmp_path, query="API_KEY")
+
+    assert result.output == "src/app.py:1: API_KEY = os.getenv('API_KEY')"
+    assert result.metadata["protected_paths_skipped"] == 2
+
+
+def test_search_code_skips_symlink_directory_and_file(tmp_path: Path) -> None:
+    outside = tmp_path.parent / "search-outside"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("TOPSECRET_MARKER\n", encoding="utf-8")
+    (tmp_path / "outside-dir").symlink_to(outside, target_is_directory=True)
+    (tmp_path / "outside-file").symlink_to(outside / "secret.txt")
+
+    result = search_code(tmp_path, query="TOPSECRET_MARKER")
+
+    assert result.output == "No matches found."
+    assert result.metadata["symlinks_skipped"] == 2

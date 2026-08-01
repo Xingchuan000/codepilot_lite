@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from inspect import signature
 from typing import Any, Literal
 
+from codepilot.memory.compaction_types import CompactionTrigger
 from codepilot.memory.models import SessionSummaryContent
 from codepilot.memory.policy import redact_memory_value, sanitize_memory_content, validate_memory_content
 from codepilot.memory.summarizer import (
@@ -14,6 +15,7 @@ from codepilot.memory.summarizer import (
     sanitize_summary_evidence,
 )
 from codepilot.session.context import ContextAssembler
+from codepilot.session.context_audit import ContextAuditRepository
 from codepilot.session.context_budget import ContextBudgetAllocator, ContextBudgetExceeded, ContextItem, estimate_tokens
 from codepilot.session.database import SessionDatabase
 from codepilot.session.model_capabilities import ModelContextProfile, resolve_model_context_profile
@@ -184,17 +186,22 @@ class CompactionService:
         self.evidence = SessionSummaryEvidenceCollector(database)
         self.threshold = threshold
         self.planning = ContextPlanningService(database)
+        self.assembler = ContextAssembler(database)
+        self.audit = ContextAuditRepository(database)
 
     def compact(
         self,
         session_id: str,
         *,
         force: bool = False,
+        trigger: CompactionTrigger | None = None,
+        audit: bool = True,
         current_turn_id: str | None = None,
         profile: ModelContextProfile | None = None,
     ) -> CompactionResult:
         session = self.store.get_session(session_id)
         profile = profile or resolve_model_context_profile(session.provider, session.current_model)
+        effective_trigger: CompactionTrigger = trigger or ("manual" if force else "soft_budget")
         messages = self.store.list_messages_with_parts(session_id)
         latest_summary = self.store.get_latest_context_summary(session_id)
         covered_before = set(latest_summary.metadata.get("covered_message_ids", [])) if latest_summary is not None else set()
@@ -269,6 +276,8 @@ class CompactionService:
                 turn_id=current_turn_id,
                 metadata={"source": "compaction_service"},
             )
+            if audit:
+                self._record_failed_snapshot(session_id, current_turn_id, profile, effective_trigger, exc, sum(estimate_tokens(item) for item in payload))
             raise
         if redaction_count:
             self.store.append_event(
@@ -304,12 +313,14 @@ class CompactionService:
             "retained_reasons": {key: list(value) for key, value in retained.reasons.items()},
             "provider": profile.provider,
             "model": profile.model,
+            "trigger": effective_trigger,
         }
         event_payload = {
             "covered_message_count": len(covered_message_ids),
             "retained_message_count": len(retained_message_ids),
             "retained_tool_call_count": len(retained_tool_call_ids),
             "force": force,
+            "trigger": effective_trigger,
         }
         try:
             summary_record = self.store.replace_context_summary(
@@ -331,8 +342,57 @@ class CompactionService:
                 turn_id=current_turn_id,
                 metadata={"source": "compaction_service"},
             )
+            if audit:
+                self._record_failed_snapshot(session_id, current_turn_id, profile, effective_trigger, exc, sum(estimate_tokens(item) for item in payload))
             raise
+        if current_turn_id is not None and audit:
+            try:
+                prepared = self.assembler.build_with_manifest(session_id, current_turn_id, profile.provider, profile.model, profile=profile)
+                snapshot = self.audit.record(
+                    session_id=session_id,
+                    turn_id=current_turn_id,
+                    trigger=effective_trigger,
+                    scope="session",
+                    status="completed",
+                    summary_id=summary_record.summary_id,
+                    estimated_tokens_before=sum(estimate_tokens(item) for item in payload),
+                    estimated_tokens_after=prepared.estimated_tokens,
+                    protocol_overhead_tokens=profile.protocol_overhead_tokens,
+                    max_input_tokens=profile.max_input_tokens,
+                    prepared=prepared,
+                    covered_message_ids=selection.covered_message_ids,
+                    retained_message_ids=selection.retained_message_ids,
+                    metadata={"force": force},
+                )
+                self.store.append_event(
+                    session_id=session_id,
+                    turn_id=current_turn_id,
+                    event_type="context_compaction_snapshot_recorded",
+                    payload={"snapshot_id": snapshot.snapshot_id, "trigger": effective_trigger, "estimated_tokens_before": sum(estimate_tokens(item) for item in payload), "estimated_tokens_after": prepared.estimated_tokens},
+                    metadata={"source": "compaction_service"},
+                )
+            except Exception:
+                pass
         return CompactionResult(summary_record, selection.covered_message_ids, selection.retained_message_ids)
+
+    def _record_failed_snapshot(self, session_id: str, turn_id: str | None, profile: ModelContextProfile, trigger: CompactionTrigger, exc: Exception, estimated_tokens_before: int) -> None:
+        if turn_id is None:
+            return
+        try:
+            self.audit.record(
+                session_id=session_id,
+                turn_id=turn_id,
+                trigger=trigger,
+                scope="session",
+                status="failed",
+                estimated_tokens_before=estimated_tokens_before,
+                estimated_tokens_after=0,
+                protocol_overhead_tokens=profile.protocol_overhead_tokens,
+                max_input_tokens=profile.max_input_tokens,
+                metadata={"error_type": type(exc).__name__, "error": str(exc)},
+            )
+        except Exception:
+            pass
 
     def ensure_context_budget(self, session_id: str, current_turn_id: str, profile: ModelContextProfile) -> CompactionOutcome:
         """按有效 ContextPlan 判断是否需要 Compact，而不是重复统计 SQLite 原文。"""

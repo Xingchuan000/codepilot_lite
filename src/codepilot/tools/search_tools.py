@@ -3,12 +3,14 @@
 第二步使用纯 Python 实现，避免依赖用户机器是否安装 `rg`。
 """
 
+from collections.abc import Iterator
 from fnmatch import fnmatch
 from pathlib import Path
 from time import perf_counter
 
+from codepilot.repo.protected_paths import DEFAULT_REPO_PROTECTED_PATHS
+from codepilot.repo.safety import normalize_repo_relative_path, path_matches_any
 from codepilot.tools.base import ToolResult, ToolRisk, elapsed_ms
-from codepilot.tools.file_tools import _safe_join
 
 DEFAULT_EXCLUDE_DIRS = {
     ".git",
@@ -23,22 +25,75 @@ DEFAULT_EXCLUDE_DIRS = {
 }
 
 
-def _iter_search_files(base: Path, file_glob: str) -> list[Path]:
-    """收集需要搜索的文件，并跳过默认排除目录。"""
+def _iter_search_files(
+    base: Path,
+    *,
+    repo_root: Path,
+    file_glob: str,
+    protected_patterns: tuple[str, ...] = tuple(DEFAULT_REPO_PROTECTED_PATHS),
+    skipped: dict[str, int] | None = None,
+) -> Iterator[Path]:
+    """遍历仓库内普通文件，不跟随链接或进入受保护路径。"""
 
+    if _has_symlink_component(base, repo_root):
+        _count_skip(skipped, "symlinks")
+        return
     if base.is_file():
-        return [base] if fnmatch(base.name, file_glob) else []
+        relative = _canonical_relative(base, repo_root)
+        if path_matches_any(relative, list(protected_patterns)) is None and fnmatch(base.name, file_glob):
+            yield base
+        elif path_matches_any(relative, list(protected_patterns)) is not None:
+            _count_skip(skipped, "protected_paths")
+        return
 
-    files: list[Path] = []
     for child in sorted(base.iterdir(), key=lambda item: (item.is_file(), item.name.lower())):
+        if child.is_symlink():
+            _count_skip(skipped, "symlinks")
+            continue
+        relative = _canonical_relative(child, repo_root)
+        if path_matches_any(relative, list(protected_patterns)) is not None:
+            _count_skip(skipped, "protected_paths")
+            continue
         if child.is_dir():
             if child.name in DEFAULT_EXCLUDE_DIRS:
                 continue
-            files.extend(_iter_search_files(child, file_glob))
+            yield from _iter_search_files(
+                child,
+                repo_root=repo_root,
+                file_glob=file_glob,
+                protected_patterns=protected_patterns,
+                skipped=skipped,
+            )
             continue
-        if fnmatch(child.name, file_glob):
-            files.append(child)
-    return files
+        if child.is_file() and fnmatch(child.name, file_glob):
+            yield child
+
+
+def _count_skip(skipped: dict[str, int] | None, kind: str) -> None:
+    if skipped is not None:
+        skipped[kind] = skipped.get(kind, 0) + 1
+
+
+def _has_symlink_component(path: Path, repo_root: Path) -> bool:
+    current = repo_root
+    for part in path.relative_to(repo_root).parts:
+        current /= part
+        if current.is_symlink():
+            return True
+    return False
+
+
+def _safe_search_path(repo_root: Path, path: str | Path) -> Path:
+    requested = repo_root / path
+    try:
+        requested.resolve().relative_to(repo_root)
+    except ValueError as exc:
+        raise ValueError(f"Path escapes repository root: {path}") from exc
+    return requested
+
+
+def _canonical_relative(path: Path, repo_root: Path) -> str:
+    return normalize_repo_relative_path(path.resolve().relative_to(repo_root))
 
 
 def search_code(
@@ -60,7 +115,8 @@ def search_code(
         )
 
     try:
-        base = _safe_join(repo, path)
+        repo_root = Path(repo).resolve()
+        base = _safe_search_path(repo_root, path)
         if not base.exists():
             return ToolResult(
                 success=False,
@@ -70,11 +126,13 @@ def search_code(
 
         query_key = query if case_sensitive else query.lower()
         results: list[str] = []
-        for file_path in _iter_search_files(base, file_glob):
-            relative = file_path.relative_to(Path(repo).resolve()).as_posix()
+        skipped: dict[str, int] = {}
+        for file_path in _iter_search_files(base, repo_root=repo_root, file_glob=file_glob, skipped=skipped):
+            relative = _canonical_relative(file_path, repo_root)
             try:
                 text = file_path.read_text(encoding="utf-8", errors="replace")
-            except IsADirectoryError:
+            except (IsADirectoryError, PermissionError, OSError):
+                _count_skip(skipped, "unreadable")
                 continue
             for line_number, line in enumerate(text.splitlines(), start=1):
                 haystack = line if case_sensitive else line.lower()
@@ -107,6 +165,9 @@ def search_code(
                 "truncated": truncated,
                 "duration_ms": elapsed_ms(start),
                 "risk": ToolRisk.READ_ONLY.value,
+                "protected_paths_skipped": skipped.get("protected_paths", 0),
+                "symlinks_skipped": skipped.get("symlinks", 0),
+                "unreadable_skipped": skipped.get("unreadable", 0),
             },
         )
     except ValueError as exc:

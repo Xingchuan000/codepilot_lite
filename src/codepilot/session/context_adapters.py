@@ -28,6 +28,15 @@ class SessionHistory:
     turn_checkpoint_covered_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class PreparedContext:
+    messages: list[ChatMessage | RichChatMessage]
+    selected_items: tuple[ContextItem, ...]
+    omitted_items: tuple[ContextItem, ...]
+    estimated_tokens: int
+    metadata: dict[str, object]
+
+
 class TextActionContextAdapter:
     """把 SQLite 历史按完整消息组装成文本上下文。"""
 
@@ -52,6 +61,7 @@ class TextActionContextAdapter:
                 estimated_tokens=estimate_tokens(message),
                 mandatory=True,
                 priority=1000 - index,
+                source_kind="system_prompt" if index == 0 else "system_event",
             )
             for index, message in enumerate(system_messages)
         ) + tuple(item for item in history.instruction_items if item.mandatory)
@@ -76,6 +86,8 @@ class TextActionContextAdapter:
                         estimated_tokens=estimate_tokens(message),
                         mandatory=bool(summary.metadata.get("covered_message_ids")),
                         priority=900 - index,
+                        source_kind="summary",
+                        source_ids=(summary.summary_id,),
                     )
                 )
         summary_items.extend(history.turn_checkpoint_items)
@@ -118,6 +130,11 @@ class TextActionContextAdapter:
         message_order = {message.message_id: index for index, (message, _) in enumerate(history.messages)}
         for key, messages in grouped.items():
             mandatory, priority, atomic_group = group_metadata[key]
+            first_message_id = next(
+                message.message_id
+                for message, parts in history.messages
+                if _context_key(message, parts) == key
+            )
             item = ContextItem(
                 key=key,
                 messages=tuple(messages),
@@ -125,11 +142,8 @@ class TextActionContextAdapter:
                 mandatory=mandatory,
                 priority=priority,
                 atomic_group=atomic_group,
-            )
-            first_message_id = next(
-                message.message_id
-                for message, parts in history.messages
-                if _context_key(message, parts) == key
+                source_kind="tool_exchange" if key.startswith("tool-") else "message",
+                source_ids=(key.removeprefix("tool-"),) if key.startswith("tool-") else (first_message_id,),
             )
             if mandatory:
                 current_turn_items.append(item)
@@ -141,6 +155,9 @@ class TextActionContextAdapter:
         return ContextPlan(system_items=system_items, summary_items=tuple(summary_items), history_items=tuple(item for item in history_items), current_turn_items=tuple(current_turn_items))
 
     def build_messages(self, history: SessionHistory, profile: ModelContextProfile) -> list[ChatMessage | RichChatMessage]:
+        return self.build_prepared_context(history, profile).messages
+
+    def build_prepared_context(self, history: SessionHistory, profile: ModelContextProfile) -> PreparedContext:
         plan = self.build_context_plan(history, profile)
         budget = ContextBudgetAllocator(profile.max_input_tokens, protocol_overhead_tokens=profile.protocol_overhead_tokens)
         selected: list[ContextItem] = []
@@ -168,7 +185,14 @@ class TextActionContextAdapter:
         ordered = plan.system_items + tuple(selected_summaries) + tuple(selected_history) + tuple(selected_current_turn)
         messages = [message for item in ordered for message in item.messages]
         budget.verify(messages)
-        return messages
+        all_items = plan.system_items + plan.summary_items + plan.history_items + plan.current_turn_items
+        return PreparedContext(
+            messages,
+            ordered,
+            tuple(item for item in all_items if item.key not in selected_keys),
+            sum(estimate_tokens(message) for message in messages) + profile.protocol_overhead_tokens,
+            {"max_input_tokens": profile.max_input_tokens, "protocol_overhead_tokens": profile.protocol_overhead_tokens},
+        )
 
 
 def _context_role(role: str) -> str:
@@ -225,6 +249,8 @@ def _message_content(artifacts: ArtifactStore, message: MessageRecord, parts: tu
         content = "\n".join(values)
     else:
         content = _message_text(message.content)
+    if message.status == "interrupted" and message.role == "assistant" and not content:
+        return ""
     if message.status == "interrupted" and message.role == "assistant":
         content += "\nThe previous assistant response was interrupted. Use the persisted content only as evidence and produce a complete response again. Do not continue from the last character."
     return content

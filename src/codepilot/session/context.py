@@ -8,7 +8,7 @@ from codepilot.memory.repository import TurnCheckpointRepository
 from codepilot.memory.retrieval import MemoryQueryBuilder
 from codepilot.memory.turn_window import render_turn_checkpoint
 from codepilot.session.artifacts import ArtifactStore
-from codepilot.session.context_adapters import SessionHistory, TextActionContextAdapter
+from codepilot.session.context_adapters import PreparedContext, SessionHistory, TextActionContextAdapter
 from codepilot.session.context_budget import ContextItem, estimate_tokens
 from codepilot.session.database import SessionDatabase
 from codepilot.session.model_capabilities import resolve_model_context_profile
@@ -28,8 +28,11 @@ class ContextAssembler:
         self.checkpoints = TurnCheckpointRepository(database)
 
     def build(self, session_id: str, current_turn_id: str, provider: str, model: str, profile=None) -> list[ChatMessage | RichChatMessage]:
+        return self.build_with_manifest(session_id, current_turn_id, provider, model, profile=profile).messages
+
+    def build_with_manifest(self, session_id: str, current_turn_id: str, provider: str, model: str, profile=None) -> PreparedContext:
         profile = profile or resolve_model_context_profile(provider, model)
-        return self.adapter.build_messages(self.build_history(session_id, current_turn_id, profile), profile)
+        return self.adapter.build_prepared_context(self.build_history(session_id, current_turn_id, profile), profile)
 
     def build_plan(self, session_id: str, current_turn_id: str, provider: str, model: str, profile=None):
         """暴露预算规划，供 Compact 估算有效上下文而不重复统计已覆盖原文。"""
@@ -82,6 +85,8 @@ class ContextAssembler:
                         estimated_tokens=estimate_tokens(checkpoint_message),
                         mandatory=True,
                         priority=880,
+                        source_kind="turn_checkpoint",
+                        source_ids=(checkpoint.checkpoint_id,),
                     ),
                 )
                 if checkpoint is not None and checkpoint_message is not None

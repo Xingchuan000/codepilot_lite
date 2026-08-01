@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from codepilot.llm.errors import normalize_llm_exception
 from codepilot.llm.types import ChatMessage, LLMResponse, RichChatMessage
 from codepilot.session.provider_messages import to_provider_messages
 
@@ -100,14 +101,17 @@ class SweAgentModelAdapter:
         """只取纯文本响应，不允许走工具调用解析或执行路径。"""
 
         provider_messages = to_provider_messages(messages)
-        if hasattr(self.model, "query_without_default_tools"):
-            raw = self.model.query_without_default_tools(provider_messages)
-        else:
-            if not _looks_like_safe_text_model(self.model):
-                raise RuntimeError(
-                    "Model does not support query_without_default_tools; refusing to use bash-only query path"
-                )
-            raw = self.model.query(provider_messages)
+        try:
+            if hasattr(self.model, "query_without_default_tools"):
+                raw = self.model.query_without_default_tools(provider_messages)
+            else:
+                if not _looks_like_safe_text_model(self.model):
+                    raise RuntimeError(
+                        "Model does not support query_without_default_tools; refusing to use bash-only query path"
+                    )
+                raw = self.model.query(provider_messages)
+        except Exception as exc:
+            raise normalize_llm_exception(exc, output_started=False) from exc
         usage: dict[str, Any] = {}
         model_name: str | None = None
         if isinstance(raw, dict):

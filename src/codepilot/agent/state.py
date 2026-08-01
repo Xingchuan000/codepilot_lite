@@ -15,6 +15,8 @@ from codepilot.agent.evidence import (
 )
 from codepilot.llm.types import ChatMessage, RichChatMessage
 from codepilot.router.actions import ToolRouteResult
+from codepilot.session.context_budget import ContextItem
+from codepilot.memory.test_scope import parse_test_scope
 from codepilot.tools.test_tools import looks_like_pytest_command
 
 
@@ -41,6 +43,8 @@ class AgentState:
     delivery_kind: str | None = None
     messages: list[ChatMessage | RichChatMessage] = field(default_factory=list)
     base_message_count: int = 0
+    base_context_items: tuple[ContextItem, ...] = ()
+    omitted_context_items: tuple[ContextItem, ...] = ()
     step: int = 0
     max_steps: int = 12
     finished: bool = False
@@ -119,6 +123,8 @@ def create_initial_state(
     *,
     max_steps: int,
     messages: list[ChatMessage | RichChatMessage] | None = None,
+    base_context_items: tuple[ContextItem, ...] = (),
+    omitted_context_items: tuple[ContextItem, ...] = (),
 ) -> AgentState:
     """创建 loop 初始状态。"""
 
@@ -135,6 +141,8 @@ def create_initial_state(
         max_steps=max_steps,
         messages=list(messages or []),
         base_message_count=len(messages or []),
+        base_context_items=base_context_items,
+        omitted_context_items=omitted_context_items,
     )
     refresh_evidence_state(state)
     return state
@@ -167,13 +175,16 @@ def update_state_from_route_result(state: AgentState, route_result: ToolRouteRes
     if metadata.get("policy_decision") == "deny" or metadata.get("policy_violation") is True:
         state.policy_violations += 1
     if route_result.tool_name == "run_tests":
-        if isinstance(metadata.get("status"), str):
-            state.last_test_status = metadata["status"]
-        if isinstance(metadata.get("command"), str):
-            state.last_test_command = metadata["command"]
-        if isinstance(metadata.get("failed_tests"), list):
-            state.last_failed_tests = [str(item) for item in metadata["failed_tests"]]
-    if route_result.tool_name == "run_shell" and isinstance(metadata.get("command"), str) and looks_like_pytest_command(metadata["command"]):
+        command = metadata.get("command")
+        scope = parse_test_scope(command) if isinstance(command, str) else None
+        if scope is None or scope.executing:
+            if isinstance(metadata.get("status"), str):
+                state.last_test_status = metadata["status"]
+            if isinstance(metadata.get("command"), str):
+                state.last_test_command = metadata["command"]
+            if isinstance(metadata.get("failed_tests"), list):
+                state.last_failed_tests = [str(item) for item in metadata["failed_tests"]]
+    if route_result.tool_name == "run_shell" and isinstance(metadata.get("command"), str) and looks_like_pytest_command(metadata["command"]) and (parse_test_scope(metadata["command"]) is None or parse_test_scope(metadata["command"]).executing):
         if route_result.success and metadata.get("returncode") == 0:
             state.last_test_status = "passed"
             state.last_test_command = metadata["command"]

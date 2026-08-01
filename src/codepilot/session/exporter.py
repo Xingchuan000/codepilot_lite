@@ -30,11 +30,11 @@ class SessionExporter:
         try:
             staging_dir.mkdir(parents=True, exist_ok=False)
             (staging_dir / "artifacts").mkdir()
-            session, project, turns, attempts, messages, parts, events, tool_calls, tool_results, requests, responses, grants, summaries, artifacts = snapshot
+            session, project, turns, attempts, messages, parts, events, tool_calls, tool_results, requests, responses, grants, summaries, context_snapshots, artifacts = snapshot
             self._write_json(staging_dir / "session.json", {"schema_version": "codepilot.session.export.v2", "project": self._row_dict(project), "session": self._row_dict(session)})
             self._write_jsonl(staging_dir / "turns.jsonl", [self._record("turn", row) for row in turns] + [self._record("attempt", row) for row in attempts])
             self._write_jsonl(staging_dir / "messages.jsonl", [self._record("message", row) for row in messages] + [self._record("message_part", row) for row in parts])
-            self._write_jsonl(staging_dir / "events.jsonl", [self._record("event", row) for row in events] + [self._record("context_summary", row) for row in summaries])
+            self._write_jsonl(staging_dir / "events.jsonl", [self._record("event", row) for row in events] + [self._record("context_summary", row) for row in summaries] + [self._record("context_compaction_snapshot", row) for row in context_snapshots])
             self._write_jsonl(staging_dir / "trace.jsonl", [self._record_trace(session_id, row) for row in events])
             self._write_json(
                 staging_dir / "report.json",
@@ -48,6 +48,7 @@ class SessionExporter:
                     "permission_requests": [self._row_dict(row) for row in requests],
                     "permission_responses": [self._row_dict(row) for row in responses],
                     "grants": [self._row_dict(row) for row in grants],
+                    "context_compaction_snapshots": [self._row_dict(row) for row in context_snapshots],
                     "compact_count": sum(row["event_type"] == "context_compacted" for row in events),
                     "artifact_count": len(artifacts),
                     "artifact_size_bytes": sum(row["size_bytes"] for row in artifacts),
@@ -94,8 +95,9 @@ class SessionExporter:
             responses = connection.execute("SELECT * FROM permission_responses WHERE request_id IN (SELECT request_id FROM permission_requests WHERE session_id = ?) ORDER BY responded_at, response_id", (session_id,)).fetchall()
             grants = connection.execute("SELECT * FROM permission_grants WHERE session_id = ? ORDER BY created_at, grant_id", (session_id,)).fetchall()
             summaries = connection.execute("SELECT * FROM context_summaries WHERE session_id = ? ORDER BY created_at, summary_id", (session_id,)).fetchall()
+            context_snapshots = connection.execute("SELECT * FROM context_compaction_snapshots WHERE session_id = ? ORDER BY created_at, snapshot_id", (session_id,)).fetchall()
             artifacts = connection.execute("SELECT * FROM artifacts WHERE session_id = ? ORDER BY created_at, artifact_id", (session_id,)).fetchall()
-        return session, project, turns, attempts, messages, parts, events, tool_calls, tool_results, requests, responses, grants, summaries, artifacts
+        return session, project, turns, attempts, messages, parts, events, tool_calls, tool_results, requests, responses, grants, summaries, context_snapshots, artifacts
 
     @staticmethod
     def _record(record_type: str, row: object) -> dict[str, object]:

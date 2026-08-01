@@ -110,6 +110,67 @@ class TurnMemoryCheckpoint:
 
 
 @dataclass(frozen=True)
+class TurnCheckpointContent:
+    schema_version: int = 2
+    current_goal: str = ""
+    current_step: int = 0
+    user_constraints: tuple[str, ...] = ()
+    confirmed_decisions: tuple[str, ...] = ()
+    files_read: tuple[str, ...] = ()
+    files_modified: tuple[str, ...] = ()
+    commands_run: tuple[str, ...] = ()
+    test_results: tuple[str, ...] = ()
+    current_errors: tuple[str, ...] = ()
+    pending_tool_calls: tuple[dict[str, Any], ...] = ()
+    recent_tool_facts: tuple[dict[str, Any], ...] = ()
+    next_step: str = ""
+    evidence: dict[str, Any] = field(default_factory=dict)
+    fallback_previews: tuple[str, ...] = ()
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> TurnCheckpointContent:
+        legacy = "schema_version" not in value and any(
+            key in value for key in ("task_goal", "step", "earlier_exchanges")
+        )
+        return cls(
+            schema_version=1 if legacy else int(value.get("schema_version", 2)),
+            current_goal=str(value.get("current_goal", value.get("task_goal", ""))),
+            current_step=int(value.get("current_step", value.get("step", 0))),
+            user_constraints=_optional_strings(value.get("user_constraints", [])),
+            confirmed_decisions=_optional_strings(value.get("confirmed_decisions", [])),
+            files_read=_optional_strings(value.get("files_read", [])),
+            files_modified=_optional_strings(value.get("files_modified", [])),
+            commands_run=_optional_strings(value.get("commands_run", [])),
+            test_results=_optional_strings(value.get("test_results", [])),
+            current_errors=_optional_strings(value.get("current_errors", [])),
+            pending_tool_calls=_dicts(value.get("pending_tool_calls", [])),
+            recent_tool_facts=_dicts(value.get("recent_tool_facts", [])),
+            next_step=str(value.get("next_step", "")),
+            evidence=dict(value.get("evidence", {})),
+            fallback_previews=_optional_strings(value.get("fallback_previews", value.get("earlier_exchanges", []))),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "current_goal": self.current_goal,
+            "current_step": self.current_step,
+            "user_constraints": list(self.user_constraints),
+            "confirmed_decisions": list(self.confirmed_decisions),
+            "files_read": list(self.files_read),
+            "files_modified": list(self.files_modified),
+            "commands_run": list(self.commands_run),
+            "test_results": list(self.test_results),
+            "current_errors": list(self.current_errors),
+            "pending_tool_calls": list(self.pending_tool_calls),
+            "recent_tool_facts": list(self.recent_tool_facts),
+            "next_step": self.next_step,
+            "evidence": self.evidence,
+            "fallback_previews": list(self.fallback_previews),
+        }
+
+
+@dataclass(frozen=True)
 class SessionSummaryContent:
     task_goal: str = ""
     user_constraints: tuple[str, ...] = ()
@@ -190,3 +251,11 @@ def _strings(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise ValueError("session summary list field has invalid type")
     return tuple(str(item) for item in value)
+
+
+def _optional_strings(value: Any) -> tuple[str, ...]:
+    return tuple(str(item) for item in value) if isinstance(value, (list, tuple)) else ()
+
+
+def _dicts(value: Any) -> tuple[dict[str, Any], ...]:
+    return tuple(dict(item) for item in value if isinstance(item, dict)) if isinstance(value, (list, tuple)) else ()

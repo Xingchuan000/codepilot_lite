@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from codepilot.agent.tool_output_pruner import PrunedToolObservation
 from codepilot.router.actions import ToolRouteResult
 from codepilot.tools.file_tools import LIST_FILES_PAGE_MAX_CHARS
 
@@ -108,6 +109,10 @@ def format_observation(route_result: ToolRouteResult, *, max_output_chars: int =
         lines.append("Output preview:")
         lines.append(output_preview)
     return "\n".join(lines)
+
+
+def format_pruned_observation(route_result: ToolRouteResult, pruned: PrunedToolObservation) -> str:
+    return pruned.content
 
 
 def format_parse_error_observation(error: Exception) -> str:

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 from uuid import uuid4
 
 from codepilot.session.artifacts import ArtifactStore
@@ -110,6 +111,7 @@ class SessionTraceRecorder:
             artifact_id = persisted.artifact_id
             if observation is None:
                 message_content = persisted.inline_content if persisted.inline_content is not None else persisted.preview
+        prune_metadata = dict(_.get("prune_metadata") or {})
         message = self.store.create_message(
             session_id=self.session_id,
             turn_id=self.turn_id or "",
@@ -117,7 +119,7 @@ class SessionTraceRecorder:
             role="tool",
             status="completed",
             content=message_content,
-            metadata={"tool_name": tool_name, "success": success, "tool_call_id": tool_call_id},
+            metadata={"tool_name": tool_name, "success": success, "tool_call_id": tool_call_id, **prune_metadata},
         )
         self.store.append_message_part(
             message.message_id,
@@ -126,7 +128,7 @@ class SessionTraceRecorder:
             # ToolResult 已持久化的原始大输出，不在消息层重复创建第二份内容。
             content=message_content,
             artifact_id=artifact_id,
-            metadata={"tool_call_id": tool_call_id, "tool_name": tool_name, "success": success},
+            metadata={"tool_call_id": tool_call_id, "tool_name": tool_name, "success": success, **prune_metadata},
         )
 
     def loop_observation_created(self, *, content: str, category: str, **_: Any) -> None:

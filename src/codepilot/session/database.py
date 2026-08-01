@@ -5,7 +5,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 class SessionDatabase:
@@ -67,6 +67,9 @@ class SessionDatabase:
             if version < 7:
                 _migrate_v6_to_v7(connection)
                 version = 7
+            if version < 8:
+                _migrate_v7_to_v8(connection)
+                version = 8
             _create_latest_indexes(connection)
             _verify_schema(connection, version)
             _write_schema_version(connection, version)
@@ -223,6 +226,10 @@ def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
     connection.executescript(_turn_checkpoint_tables_sql())
 
 
+def _migrate_v7_to_v8(connection: sqlite3.Connection) -> None:
+    connection.executescript(_context_compaction_snapshot_tables_sql())
+
+
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
     return connection.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)
@@ -249,6 +256,7 @@ def _verify_schema(connection: sqlite3.Connection, expected_version: int) -> Non
         "memory_candidates": {"project_id", "session_id", "turn_id", "status"},
         "project_instruction_snapshots": {"project_id", "path", "sha256", "status"},
         "turn_memory_checkpoints": {"session_id", "turn_id", "step", "status"},
+        "context_compaction_snapshots": {"session_id", "turn_id", "trigger", "scope", "status"},
     }
     for table, columns in required_columns.items():
         actual = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
@@ -275,6 +283,8 @@ def _verify_schema(connection: sqlite3.Connection, expected_version: int) -> Non
         "idx_memory_candidates_project_status",
         "idx_project_instruction_snapshots_project_path",
         "idx_turn_memory_checkpoints_turn_status_step",
+        "idx_context_compaction_snapshots_turn_step",
+        "idx_context_compaction_snapshots_session_created",
     }
     actual_indexes = {
         row[0]
@@ -518,7 +528,7 @@ def _schema_tables_sql() -> str:
         FOREIGN KEY(session_id) REFERENCES sessions(session_id)
     );
 
-    """ + _memory_tables_sql() + _turn_checkpoint_tables_sql() + """
+    """ + _memory_tables_sql() + _turn_checkpoint_tables_sql() + _context_compaction_snapshot_tables_sql() + """
 
     """
 
@@ -634,6 +644,42 @@ def _turn_checkpoint_tables_sql() -> str:
     """
 
 
+def _context_compaction_snapshot_tables_sql() -> str:
+    return """
+    CREATE TABLE IF NOT EXISTS context_compaction_snapshots (
+        snapshot_id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        turn_id TEXT NOT NULL,
+        attempt_id TEXT,
+        step INTEGER,
+        trigger TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        status TEXT NOT NULL,
+        summary_id TEXT,
+        checkpoint_id TEXT,
+        estimated_tokens_before INTEGER NOT NULL,
+        estimated_tokens_after INTEGER NOT NULL,
+        protocol_overhead_tokens INTEGER NOT NULL,
+        max_input_tokens INTEGER NOT NULL,
+        selected_context_keys_json TEXT NOT NULL,
+        omitted_context_keys_json TEXT NOT NULL,
+        covered_message_ids_json TEXT NOT NULL,
+        retained_message_ids_json TEXT NOT NULL,
+        memory_ids_json TEXT NOT NULL,
+        instruction_ids_json TEXT NOT NULL,
+        message_manifest_json TEXT NOT NULL,
+        redacted_preview_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+        FOREIGN KEY(turn_id) REFERENCES turns(turn_id),
+        FOREIGN KEY(attempt_id) REFERENCES run_attempts(attempt_id),
+        FOREIGN KEY(summary_id) REFERENCES context_summaries(summary_id),
+        FOREIGN KEY(checkpoint_id) REFERENCES turn_memory_checkpoints(checkpoint_id)
+    );
+    """
+
+
 def _indexes_sql() -> str:
     return """
     CREATE INDEX IF NOT EXISTS idx_sessions_last_activity_at ON sessions(last_activity_at);
@@ -655,6 +701,8 @@ def _indexes_sql() -> str:
     CREATE INDEX IF NOT EXISTS idx_memory_candidates_project_status ON memory_candidates(project_id, status);
     CREATE INDEX IF NOT EXISTS idx_project_instruction_snapshots_project_path ON project_instruction_snapshots(project_id, path, scanned_at);
     CREATE INDEX IF NOT EXISTS idx_turn_memory_checkpoints_turn_status_step ON turn_memory_checkpoints(turn_id, status, step);
+    CREATE INDEX IF NOT EXISTS idx_context_compaction_snapshots_turn_step ON context_compaction_snapshots(turn_id, step, created_at);
+    CREATE INDEX IF NOT EXISTS idx_context_compaction_snapshots_session_created ON context_compaction_snapshots(session_id, created_at);
     """
 
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from codepilot.agent.loop import MinimalAgentLoop
 from codepilot.llm.fake import FakeLLMClient
 from codepilot.llm.types import ChatMessage
@@ -9,7 +11,7 @@ from codepilot.memory.repository import TurnCheckpointRepository
 from codepilot.memory.turn_window import CHECKPOINT_PREFIX, TurnContextWindow
 from codepilot.router import ToolRouter
 from codepilot.session.context import ContextAssembler
-from codepilot.session.context_budget import estimate_tokens
+from codepilot.session.context_budget import ContextBudgetExceeded, estimate_tokens
 from codepilot.session.database import SessionDatabase
 from codepilot.session.model_capabilities import ModelContextProfile
 from codepilot.session.store import SessionStore
@@ -138,3 +140,71 @@ def test_agent_loop_checks_context_before_every_llm_call(tmp_path: Path) -> None
 
     assert result.status == "partial"
     assert window.steps == [1, 2]
+
+
+def test_turn_window_fits_checkpoint_with_large_pending_replacement(tmp_path: Path) -> None:
+    database, store, session, turn = _turn(tmp_path)
+    replacement = "new line\n" * 2500
+    call = store.create_tool_call(
+        turn_id=turn.turn_id,
+        tool_name="replace_range",
+        arguments={"path": "src/app.py", "start_line": 1, "end_line": 2, "replacement": replacement},
+    )
+    dynamic = []
+    for index in range(4):
+        assistant = ChatMessage("assistant", f"call-{index}")
+        observation = ChatMessage("user", "Tool: read_file\n" + "x" * 900)
+        dynamic.extend((assistant, observation))
+        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content=assistant.content)
+        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content=observation.content)
+    profile = ModelContextProfile("openai", "tiny", 900, False, protocol_overhead_tokens=0)
+
+    prepared, _ = TurnContextWindow(database, profile, soft_limit=0.5, recent_group_count=1).prepare_for_llm(
+        session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=5,
+        messages=[ChatMessage("system", "system"), ChatMessage("user", "fix"), *dynamic], base_message_count=2,
+        task="fix", evidence={},
+    )
+    checkpoint = TurnCheckpointRepository(database).latest(turn.turn_id)
+
+    assert checkpoint is not None
+    assert replacement not in str(checkpoint.content)
+    assert checkpoint.content["pending_tool_calls"][0]["arguments"]["replacement_chars"] == len(replacement)
+    assert store.get_tool_call(call.tool_call_id).arguments["replacement"] == replacement
+    assert sum(estimate_tokens(message) for message in prepared) <= profile.max_input_tokens
+
+
+def test_turn_window_covers_oversized_latest_completed_tool_group(tmp_path: Path) -> None:
+    database, store, session, turn = _turn(tmp_path)
+    small_assistant = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="small")
+    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="small result")
+    patch = "x" * 30_000
+    assistant = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="apply patch " + patch)
+    call = store.create_tool_call(turn_id=turn.turn_id, tool_name="apply_patch", arguments={"path": "src/app.py", "patch": patch}, message_id=assistant.message_id)
+    store.persist_tool_result(call.tool_call_id, call_status="completed", result_status="success", content="changed", success=True, metadata={"changed": True, "changed_files": ["src/app.py"]})
+    result_message = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="changed", metadata={"tool_call_id": call.tool_call_id, "success": True})
+    profile = ModelContextProfile("openai", "tiny", 500, False, protocol_overhead_tokens=0)
+
+    prepared = TurnContextWindow(database, profile, soft_limit=0.4, recent_group_count=2).prepare_for_llm(
+        session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=3,
+        messages=[ChatMessage("system", "system"), ChatMessage("user", "fix"), ChatMessage("assistant", "small"), ChatMessage("user", "Tool: read_file\nsmall result"), ChatMessage("assistant", "apply patch " + patch), ChatMessage("user", "Tool: apply_patch\nchanged")],
+        base_message_count=2, task="fix", evidence={},
+    )
+    checkpoint = TurnCheckpointRepository(database).latest(turn.turn_id)
+
+    assert checkpoint is not None
+    assert result_message.message_id in checkpoint.covered_message_ids
+    assert "src/app.py" in str(checkpoint.content)
+    assert sum(estimate_tokens(message) for message in prepared.messages) <= profile.max_input_tokens
+    assert store.get_tool_call(call.tool_call_id).arguments["patch"] == patch
+
+
+def test_minimal_checkpoint_still_fails_when_mandatory_base_cannot_fit(tmp_path: Path) -> None:
+    database, _, session, turn = _turn(tmp_path)
+    profile = ModelContextProfile("openai", "tiny", 20, False, protocol_overhead_tokens=0)
+
+    with pytest.raises(ContextBudgetExceeded):
+        TurnContextWindow(database, profile, soft_limit=0.1).prepare_for_llm(
+            session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=1,
+            messages=[ChatMessage("system", "x" * 200), ChatMessage("user", "fix")], base_message_count=2,
+            task="fix", evidence={},
+        )

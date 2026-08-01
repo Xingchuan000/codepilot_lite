@@ -39,6 +39,8 @@ class ContextItem:
     mandatory: bool
     priority: int
     atomic_group: str | None = None
+    source_kind: str | None = None
+    source_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

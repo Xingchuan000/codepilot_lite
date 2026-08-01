@@ -16,10 +16,12 @@ from codepilot.llm.types import CodePilotLLMClient
 from codepilot.memory.candidates import MemoryCandidateExtractor
 from codepilot.memory.summarizer import LLMSummaryGenerator
 from codepilot.memory.turn_window import TurnContextWindow
+from codepilot.agent.tool_observation_budget import ToolObservationBudgetPolicy
 from codepilot.router import ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError
 from codepilot.session.compaction import CompactionService
 from codepilot.session.context import ContextAssembler
+from codepilot.session.context_recovery import SessionContextRecoveryCoordinator
 from codepilot.session.database import SessionDatabase
 from codepilot.session.git_context import read_git_context
 from codepilot.session.model_capabilities import ModelCapabilities, resolve_model_context_profile
@@ -138,6 +140,14 @@ class SessionRuntime:
                 cancellation_token=_LeaseAwareCancellationToken(cancellation_token, lease_lost),
                 event_sink=trace,
                 context_window=TurnContextWindow(self.database, profile),
+                tool_observation_budget_policy=ToolObservationBudgetPolicy(),
+                model_context_profile=profile,
+                context_recovery=SessionContextRecoveryCoordinator(
+                    self.database,
+                    self.compaction_service,
+                    self.assembler,
+                    profile,
+                ),
             )
             self.store.update_turn_metadata(
                 turn_id,
@@ -161,12 +171,22 @@ class SessionRuntime:
                 )
             try:
                 self.compaction_service.ensure_context_budget(session.session_id, turn_id, profile)
-                context = self.assembler.build(session.session_id, turn_id, turn.provider_snapshot, turn.model_snapshot, profile=profile)
+                context = self.assembler.build_with_manifest(session.session_id, turn_id, turn.provider_snapshot, turn.model_snapshot, profile=profile)
             except Exception:
                 self.store.interrupt_turn_attempt(turn_id, attempt_id, "context compaction failed", worker_id=worker_id)
                 self.store.update_turn_status(turn_id, "recovery_required")
                 raise
-            result = loop.run_turn(TurnExecutionContext(session.session_id, turn_id, attempt.attempt_id, str(user_message.content), opened.project_path, context))
+            result = loop.run_turn(
+                TurnExecutionContext(
+                    session.session_id,
+                    turn_id,
+                    attempt.attempt_id,
+                    str(user_message.content),
+                    opened.project_path,
+                    context.messages,
+                    context,
+                )
+            )
         except ToolExecutionUncertainError as exc:
             heartbeat_stop.set()
             heartbeat.join()
