@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 from codepilot.agent.actions import (
@@ -178,10 +179,16 @@ class AgentContextRecovery(Protocol):
     def retry_exhausted(self, **kwargs: Any) -> None: ...
 
 
-def _inject_repo_if_missing(arguments: dict[str, Any], repo: Path) -> dict[str, Any]:
+def _inject_repo_if_required(
+    arguments: dict[str, Any] | None,
+    repo: Path,
+    spec: ToolSpec | None,
+) -> dict[str, Any]:
     """确保模型不能借 repo 参数切换到当前仓库之外。"""
 
-    injected = dict(arguments)
+    injected = dict(arguments or {})
+    if spec is None or "repo" not in spec.parameters:
+        return injected
     if "repo" not in injected:
         injected["repo"] = str(repo)
         return injected
@@ -274,7 +281,8 @@ class MinimalAgentLoop:
         router: ToolRouter,
         trace_logger: TraceRecorder | None = None,
         max_steps: int = 12,
-        prompt_extra_tool_specs: list[ToolSpec] | None = None,
+        prompt_extra_tool_specs: Sequence[ToolSpec] | None = None,
+        visible_tool_specs: Sequence[ToolSpec] | None = None,
         cancellation_token: Any | None = None,
         event_sink: AgentEventSink | None = None,
         context_window: AgentContextWindow | None = None,
@@ -298,6 +306,7 @@ class MinimalAgentLoop:
         self.max_steps = max_steps
         self.trace_logger = router.trace_logger
         self.prompt_extra_tool_specs = list(prompt_extra_tool_specs or [])
+        self.visible_tool_specs = list(visible_tool_specs) if visible_tool_specs is not None else None
         self.cancellation_token = cancellation_token
         self.event_sink = event_sink
         self.context_window = context_window
@@ -307,13 +316,16 @@ class MinimalAgentLoop:
         self.model_context_profile = model_context_profile
         self.context_recovery = context_recovery
         self.tool_specs_by_name = {}
-        for spec in list_tool_specs():
+        base_specs = self.visible_tool_specs if self.visible_tool_specs is not None else list_tool_specs()
+        for spec in base_specs:
             self.tool_specs_by_name[spec.name] = spec
         for spec in self.prompt_extra_tool_specs:
             existing = self.tool_specs_by_name.get(spec.name)
             if existing is not None and existing != spec:
                 raise ValueError(f"Duplicate tool spec: {spec.name}")
             self.tool_specs_by_name[spec.name] = spec
+        if visible_tool_specs is not None or self.prompt_extra_tool_specs:
+            self.router.configure_allowed_tools(self.tool_specs_by_name)
 
     def _cancel_requested(self) -> bool:
         return bool(self.cancellation_token and self.cancellation_token.is_cancelled())
@@ -798,7 +810,11 @@ class MinimalAgentLoop:
                     metadata=_parsed_action_metadata(parsed_action),
                 )
                 try:
-                    injected_args = _inject_repo_if_missing(action.arguments, state.repo)
+                    injected_args = _inject_repo_if_required(
+                        action.arguments,
+                        state.repo,
+                        self.tool_specs_by_name.get(action.tool_name),
+                    )
                     register_tool_attempt(
                         state,
                         tool_name=action.tool_name,
@@ -914,6 +930,11 @@ class MinimalAgentLoop:
                 attempt_id=None,
                 task=task,
                 repo=repository,
-                messages=build_initial_messages(task, repository, extra_tool_specs=self.prompt_extra_tool_specs),
+                messages=build_initial_messages(
+                    task,
+                    repository,
+                    extra_tool_specs=self.prompt_extra_tool_specs,
+                    tool_specs=self.visible_tool_specs,
+                ),
             )
         )

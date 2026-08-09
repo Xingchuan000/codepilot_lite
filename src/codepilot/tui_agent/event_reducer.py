@@ -502,6 +502,39 @@ def _reduce_test_status_changed(view: AgentRunView, event: TUIEvent) -> AgentRun
     return replace(view, test_status=str(status) if isinstance(status, str) else view.test_status)
 
 
+def _reduce_agent_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
+    payload = event.payload
+    agent_type = str(payload.get("agent_type") or "agent")
+    agent_id = str(payload.get("child_session_id") or payload.get("agent_id") or "unknown")
+    labels = {
+        "agent_spawned": "queued",
+        "agent_started": "started",
+        "agent_completed": "completed",
+        "agent_failed": "failed",
+        "agent_cancelled": "cancelled",
+        "agent_patch_ready": "patch ready",
+        "agent_patch_applied": "patch applied",
+    }
+    suffix = labels.get(event.type, event.type.removeprefix("agent_"))
+    if event.type == "agent_patch_ready":
+        changed_files = payload.get("changed_files")
+        if isinstance(changed_files, list):
+            suffix = f"patch ready: {len(changed_files)} files"
+    body = f"[agent] {agent_type} {agent_id} {suffix}"
+    if isinstance(payload.get("error"), str) and payload["error"]:
+        body += f": {payload['error']}"
+    item = TranscriptItem(
+        id=_make_item_id(event, f"agent-{agent_id}"),
+        kind="system_status",
+        timestamp=event.timestamp,
+        title="Agent status",
+        body=body,
+        copy_text=body,
+        metadata=dict(payload),
+    )
+    return _append_transcript(view, item)
+
+
 def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
     if event.type == "run_started":
         return _reduce_run_started(view, event)
@@ -540,6 +573,16 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
         return _reduce_file_changed(view, event)
     if event.type == "test_status_changed":
         return _reduce_test_status_changed(view, event)
+    if event.type in {
+        "agent_spawned",
+        "agent_started",
+        "agent_completed",
+        "agent_failed",
+        "agent_cancelled",
+        "agent_patch_ready",
+        "agent_patch_applied",
+    }:
+        return _reduce_agent_event(view, event)
     return view
 
 

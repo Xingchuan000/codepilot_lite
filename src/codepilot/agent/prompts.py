@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+from collections.abc import Sequence
 from typing import Any
 
 from codepilot.llm.types import ChatMessage
@@ -68,9 +69,9 @@ def _truncate_parameter_description(value: object, max_chars: int = 160) -> str:
 
 
 def render_tool_catalog(
-    specs: list[ToolSpec] | None = None,
+    specs: Sequence[ToolSpec] | None = None,
     *,
-    extra_specs: list[ToolSpec] | None = None,
+    extra_specs: Sequence[ToolSpec] | None = None,
     include_repo_parameter: bool = False,
 ) -> str:
     """把工具注册表渲染为稳定、短小的文本目录。"""
@@ -107,10 +108,64 @@ def render_tool_catalog(
     return "\n".join(lines)
 
 
-def build_system_prompt(extra_tool_specs: list[ToolSpec] | None = None) -> str:
+
+
+def _render_agent_control_guidance(specs: Sequence[ToolSpec]) -> str:
+    """Render Primary-only argument rules for runtime agent control tools.
+
+    Keep this out of child prompts: delegated agents do not expose ``spawn_agent``.
+    The goal is to make JSON types and bounded values explicit before the model
+    attempts a tool call, while Pydantic remains the hard enforcement layer.
+    """
+
+    names = {spec.name for spec in specs}
+    if "spawn_agent" not in names:
+        return ""
+
+    lines = [
+        "## Agent control tool argument rules",
+        "Agent-control parameter descriptions are strict JSON contracts. Use the exact JSON types and enum values shown; do not invent semantic placeholders.",
+        "Prefer omitting an optional field when its default is acceptable instead of guessing a value.",
+        "spawn_agent.write_scope must be a JSON array of repository-relative path strings. Use [] for Explore, Scout, or any read-only delegation; never use an empty string or null.",
+        "spawn_agent.context_mode is optional and defaults to \"summary_recent\". If supplied, it must be exactly one of: \"none\", \"recent\", \"summary\", \"summary_recent\", \"full\". Never use labels such as \"fork mode\".",
+        "spawn_agent.recent_turns is optional, must be an integer from 0 through 10, and only matters for context modes that include recent turns.",
+        "wait_agent.timeout_seconds is optional. If supplied, it must be greater than 0 and at most 30. If the child is still running after a bounded wait, call wait_agent again later; never request a timeout above 30.",
+        "Examples:",
+        '{"type":"tool_call","tool_name":"spawn_agent","arguments":{"agent_type":"explore","task":"Inspect the failing pricing test and report evidence.","write_scope":[]}}',
+        '{"type":"tool_call","tool_name":"wait_agent","arguments":{"agent_id":"sess-...","timeout_seconds":30}}',
+    ]
+    return "\n".join(lines)
+
+
+def build_system_prompt(
+    extra_tool_specs: Sequence[ToolSpec] | None = None,
+    *,
+    tool_specs: Sequence[ToolSpec] | None = None,
+    agent_instructions: str | None = None,
+) -> str:
     """构建给模型的 system prompt。"""
 
-    return f"{SYSTEM_PROMPT_HEADER}\n{render_tool_catalog(extra_specs=extra_tool_specs)}"
+    catalog = render_tool_catalog(
+        specs=tool_specs,
+        extra_specs=extra_tool_specs,
+        include_repo_parameter=False,
+    )
+    if tool_specs is None and not agent_instructions:
+        return f"{SYSTEM_PROMPT_HEADER}\n{catalog}"
+
+    sections = [SYSTEM_PROMPT_HEADER]
+    if agent_instructions:
+        sections.append("## Current agent role\n" + agent_instructions.strip())
+
+    effective_specs = list(tool_specs) if tool_specs is not None else list(list_tool_specs())
+    if extra_tool_specs:
+        effective_specs.extend(extra_tool_specs)
+    agent_control_guidance = _render_agent_control_guidance(effective_specs)
+    if agent_control_guidance:
+        sections.append(agent_control_guidance)
+
+    sections.append(catalog)
+    return "\n\n".join(section for section in sections if section)
 
 
 def build_user_prompt(task: str, repo: str | Path) -> str:
@@ -127,12 +182,21 @@ def build_initial_messages(
     task: str,
     repo: str | Path,
     *,
-    extra_tool_specs: list[ToolSpec] | None = None,
+    extra_tool_specs: Sequence[ToolSpec] | None = None,
+    tool_specs: Sequence[ToolSpec] | None = None,
+    agent_instructions: str | None = None,
 ) -> list[ChatMessage]:
     """构建 loop 首轮消息。"""
 
     return [
-        ChatMessage(role="system", content=build_system_prompt(extra_tool_specs=extra_tool_specs)),
+        ChatMessage(
+            role="system",
+            content=build_system_prompt(
+                extra_tool_specs=extra_tool_specs,
+                tool_specs=tool_specs,
+                agent_instructions=agent_instructions,
+            ),
+        ),
         ChatMessage(role="user", content=build_user_prompt(task, repo)),
     ]
 

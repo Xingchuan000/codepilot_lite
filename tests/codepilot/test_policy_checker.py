@@ -101,3 +101,39 @@ def test_policy_checker_allows_unknown_tools_to_reach_registry() -> None:
     assert decision.allowed is True
     assert decision.matched_rule == "tool.unknown.allow_to_registry"
     assert decision.metadata["known_tool"] is False
+
+
+def test_policy_checker_enforces_general_write_scope_at_edit_boundary(tmp_path: Path) -> None:
+    context = PolicyContext(
+        repo=tmp_path,
+        mode="build",
+        approved=True,
+        metadata={"write_scope": ["src/**"]},
+    )
+
+    assert not _decision(
+        "replace_range",
+        {"repo": tmp_path, "path": "src/main.py", "start_line": 1, "end_line": 1, "replacement": "ok\n"},
+        context=context,
+    ).denied
+    denied = _decision(
+        "replace_range",
+        {"repo": tmp_path, "path": "README.md", "start_line": 1, "end_line": 1, "replacement": "no\n"},
+        context=context,
+    )
+    assert denied.denied
+    assert denied.matched_rule == "agent.profile.write_scope.deny"
+
+
+def test_policy_checker_denies_structured_writes_without_a_scope(tmp_path: Path) -> None:
+    decision = _decision(
+        "apply_patch",
+        {
+            "repo": tmp_path,
+            "patch": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
+        },
+        context=PolicyContext(repo=tmp_path, mode="build", approved=True, metadata={"write_scope": []}),
+    )
+
+    assert decision.denied
+    assert decision.matched_rule == "agent.profile.write_scope.deny"

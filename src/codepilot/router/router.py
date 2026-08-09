@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
@@ -16,9 +16,11 @@ from codepilot.router.actions import ToolAction, ToolRouteResult
 from codepilot.router.errors import ToolExecutionUncertainError, ToolPreExecutionError
 from codepilot.session.permission import PermissionRequestContext, PermissionScopeBuilder
 from codepilot.tools.base import ToolResult, ToolSpec
-from codepilot.tools.registry import call_external_tool_traced, call_tool_traced, find_tool_spec
+from codepilot.tools.registry import call_external_tool_traced, call_tool_traced, find_tool_spec, list_tool_specs
 from codepilot.trace.logger import TraceLogger
 from codepilot.trace.protocol import TraceRecorder
+from codepilot.trace.events import TraceEvent
+from codepilot.router.runtime_tools import RuntimeToolRegistry
 
 
 class ToolLifecycleObserver(Protocol):
@@ -74,20 +76,29 @@ class ToolRouter:
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
         external_tool_registry: Any | None = None,
+        runtime_tool_registry: RuntimeToolRegistry | None = None,
         permission_broker: PermissionBroker | None = None,
         lifecycle_observer: ToolLifecycleObserver | None = None,
         permission_scope_builder: PermissionScopeBuilder | None = None,
         permission_request_context: PermissionRequestContext | None = None,
+        allowed_tool_names: Iterable[str] | None = None,
     ) -> None:
         self.trace_logger = trace_logger
         self.output_preview_chars = output_preview_chars
         self.policy_checker = policy_checker
         self.policy_context = policy_context or PolicyContext()
         self.external_tool_registry = external_tool_registry
+        self.runtime_tool_registry = runtime_tool_registry
         self.permission_broker = permission_broker
         self.lifecycle_observer = lifecycle_observer or _NoopToolLifecycleObserver()
         self.permission_scope_builder = permission_scope_builder or PermissionScopeBuilder()
         self.permission_request_context = permission_request_context
+        self.allowed_tool_names = frozenset(allowed_tool_names) if allowed_tool_names is not None else None
+        self.write_scope: tuple[str, ...] | None = None
+        if self.allowed_tool_names is not None:
+            metadata = dict(self.policy_context.metadata)
+            metadata["allowed_tools"] = sorted(self.allowed_tool_names)
+            self.policy_context = self.policy_context.model_copy(update={"metadata": metadata})
 
     @classmethod
     def from_runs_dir(
@@ -98,11 +109,13 @@ class ToolRouter:
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
         external_tool_registry: Any | None = None,
+        runtime_tool_registry: RuntimeToolRegistry | None = None,
         trace_logger: TraceRecorder | None = None,
         permission_broker: PermissionBroker | None = None,
         lifecycle_observer: ToolLifecycleObserver | None = None,
         permission_scope_builder: PermissionScopeBuilder | None = None,
         permission_request_context: PermissionRequestContext | None = None,
+        allowed_tool_names: Iterable[str] | None = None,
     ) -> "ToolRouter":
         logger = trace_logger or TraceLogger(runs_dir=runs_dir, run_id=run_id)
         return cls(
@@ -111,10 +124,73 @@ class ToolRouter:
             policy_checker=policy_checker,
             policy_context=policy_context,
             external_tool_registry=external_tool_registry,
+            runtime_tool_registry=runtime_tool_registry,
             permission_broker=permission_broker,
             lifecycle_observer=lifecycle_observer,
             permission_scope_builder=permission_scope_builder,
             permission_request_context=permission_request_context,
+            allowed_tool_names=allowed_tool_names,
+        )
+
+    def configure_allowed_tools(
+        self,
+        names: Iterable[str],
+        *,
+        write_scope: Iterable[str] | None = None,
+    ) -> None:
+        """Bind this router to the code-level tool and write-scope boundary."""
+
+        allowed = frozenset(names)
+        self.allowed_tool_names = allowed
+        metadata = dict(self.policy_context.metadata)
+        metadata["allowed_tools"] = sorted(allowed)
+        if write_scope is not None:
+            self.write_scope = tuple(write_scope)
+            metadata["write_scope"] = list(self.write_scope)
+        self.policy_context = self.policy_context.model_copy(update={"metadata": metadata})
+
+    def _profile_scope_decision(self, action: ToolAction, spec: ToolSpec | None) -> PolicyDecision | None:
+        if self.policy_checker is not None or self.write_scope is None or action.tool_name not in {"apply_patch", "replace_range"}:
+            return None
+        return PolicyChecker.default().check(action, context=self.policy_context, spec=spec)
+
+    def _route_policy_denial(
+        self,
+        parsed: ToolAction,
+        tool_call_id: str | None,
+        route_metadata: dict[str, Any],
+        decision: PolicyDecision,
+        *,
+        record_trace: bool = True,
+    ) -> ToolRouteResult:
+        policy_metadata = self._policy_metadata(decision)
+        policy_metadata.update(decision.metadata)
+        if record_trace:
+            self.trace_logger.record_policy_decision(
+                tool_name=parsed.tool_name,
+                decision=decision.decision,
+                reason=decision.reason,
+                rule=decision.matched_rule,
+                mode=self.policy_context.mode,
+                metadata=policy_metadata,
+            )
+        result = ToolResult(
+            success=False,
+            output="",
+            error=decision.reason,
+            metadata={**policy_metadata, "policy_violation": True, "executed": False},
+        )
+        route_metadata.update(result.metadata)
+        if tool_call_id is not None:
+            self.lifecycle_observer.on_policy_denied(tool_call_id, result)
+        return ToolRouteResult(
+            action_id=parsed.action_id,
+            tool_name=parsed.tool_name,
+            success=False,
+            result=result,
+            trace_path=str(self.trace_logger.trace_path) if self.trace_logger.trace_path is not None else None,
+            error=result.error,
+            metadata=route_metadata,
         )
 
     def _base_route_metadata(self, parsed: ToolAction) -> dict[str, Any]:
@@ -140,18 +216,119 @@ class ToolRouter:
             return response.decision
         return "deny"
 
+    def _resolve_tool_spec(self, tool_name: str) -> ToolSpec | None:
+        if self.runtime_tool_registry is not None:
+            spec = self.runtime_tool_registry.find_spec(tool_name)
+            if spec is not None:
+                return spec
+        if self.external_tool_registry is not None:
+            find_spec = getattr(self.external_tool_registry, "find_spec", None)
+            if callable(find_spec):
+                spec = find_spec(tool_name)
+                if spec is not None:
+                    return spec
+        return find_tool_spec(tool_name)
+
+    def list_visible_tool_specs(self) -> tuple[ToolSpec, ...]:
+        specs: dict[str, ToolSpec] = {spec.name: spec for spec in list_tool_specs()}
+        if self.external_tool_registry is not None:
+            list_specs = getattr(self.external_tool_registry, "list_exposed_specs", None)
+            if not callable(list_specs):
+                list_specs = getattr(self.external_tool_registry, "list_specs", None)
+            if callable(list_specs):
+                for spec in list_specs():
+                    specs[spec.name] = spec
+        if self.runtime_tool_registry is not None:
+            for spec in self.runtime_tool_registry.list_specs():
+                specs[spec.name] = spec
+        return tuple(specs.values())
+
+    def _call_runtime_tool_traced(self, name: str, arguments: dict[str, Any], spec: ToolSpec) -> ToolResult:
+        assert self.runtime_tool_registry is not None
+        result = self.runtime_tool_registry.call(name, arguments)
+        output = result.output or ""
+        suffix = "... truncated"
+        preview_truncated = len(output) > self.output_preview_chars
+        output_preview = (
+            output
+            if not preview_truncated
+            else f"{output[: max(0, self.output_preview_chars - len(suffix))]}{suffix}"
+        )
+        metadata = {
+            **spec.metadata,
+            **result.metadata,
+            "runtime_tool": True,
+            "output_chars": len(output),
+            "output_preview_truncated": preview_truncated,
+        }
+        self.trace_logger.record(
+            TraceEvent(
+                run_id=self.trace_logger.run_id,
+                step=self.trace_logger.next_step,
+                event_type="tool_call",
+                tool_name=name,
+                risk=spec.risk.value,
+                side_effect=spec.side_effect.value,
+                default_permission=spec.default_permission.value,
+                input=dict(arguments),
+                success=result.success,
+                output_summary=result.output_summary,
+                output_preview=output_preview,
+                error=result.error,
+                metadata=metadata,
+            )
+        )
+        return result.model_copy(update={"metadata": metadata})
+
     def route(self, action: ToolAction | Mapping[str, Any]) -> ToolRouteResult:
         """执行单个 tool action。"""
 
         parsed = ToolAction.model_validate(action)
-        spec = find_tool_spec(parsed.tool_name)
+        spec = self._resolve_tool_spec(parsed.tool_name)
         tool_call_id = self.lifecycle_observer.on_tool_call_created(parsed, spec)
         route_metadata = self._base_route_metadata(parsed)
         route_metadata["tool_call_id"] = tool_call_id
         policy_metadata: dict[str, Any] | None = None
 
+        scope_decision = self._profile_scope_decision(parsed, spec)
+        if scope_decision is not None and scope_decision.denied:
+            return self._route_policy_denial(parsed, tool_call_id, route_metadata, scope_decision)
+
+        if self.allowed_tool_names is not None and self.policy_checker is None and parsed.tool_name not in self.allowed_tool_names:
+            reason = f"Tool '{parsed.tool_name}' is not allowed for the current agent profile."
+            metadata = {
+                "policy_decision": "deny",
+                "policy_reason": reason,
+                "policy_rule": "agent.profile.tool.deny",
+                "requires_approval": False,
+                "approved": False,
+                "policy_violation": True,
+                "executed": False,
+            }
+            self.trace_logger.record_policy_decision(
+                tool_name=parsed.tool_name,
+                decision="deny",
+                reason=reason,
+                rule="agent.profile.tool.deny",
+                mode=self.policy_context.mode,
+                metadata=metadata,
+            )
+            result = ToolResult(success=False, error=reason, metadata=metadata)
+            route_metadata.update(metadata)
+            if tool_call_id is not None:
+                self.lifecycle_observer.on_policy_denied(tool_call_id, result)
+            return ToolRouteResult(
+                action_id=parsed.action_id,
+                tool_name=parsed.tool_name,
+                success=False,
+                result=result,
+                trace_path=str(self.trace_logger.trace_path) if self.trace_logger.trace_path is not None else None,
+                error=reason,
+                metadata=route_metadata,
+            )
+
         if self.policy_checker is not None:
-            decision = self.policy_checker.check(parsed, context=self.policy_context)
+            decision = self.policy_checker.check(parsed, context=self.policy_context, spec=spec)
             policy_metadata = self._policy_metadata(decision)
             policy_metadata.update(decision.metadata)
 
@@ -167,28 +344,7 @@ class ToolRouter:
             route_metadata.update(policy_metadata)
 
             if decision.denied:
-                result = ToolResult(
-                    success=False,
-                    output="",
-                    error=decision.reason,
-                    metadata={
-                        **policy_metadata,
-                        "policy_violation": True,
-                        "executed": False,
-                    },
-                )
-                route_metadata.update(result.metadata)
-                if tool_call_id is not None:
-                    self.lifecycle_observer.on_policy_denied(tool_call_id, result)
-                return ToolRouteResult(
-                    action_id=parsed.action_id,
-                    tool_name=parsed.tool_name,
-                    success=False,
-                    result=result,
-                    trace_path=str(self.trace_logger.trace_path) if self.trace_logger.trace_path is not None else None,
-                    error=result.error,
-                    metadata=route_metadata,
-                )
+                return self._route_policy_denial(parsed, tool_call_id, route_metadata, decision, record_trace=False)
 
             if decision.asks and not self.policy_context.approved:
                 if self.permission_broker is not None and self.policy_context.interactive:
@@ -297,7 +453,9 @@ class ToolRouter:
         if tool_call_id is not None:
             self.lifecycle_observer.on_execution_started(tool_call_id, recovery_token)
         try:
-            if self.external_tool_registry is not None and self.external_tool_registry.has_tool(parsed.tool_name):
+            if self.runtime_tool_registry is not None and self.runtime_tool_registry.has_tool(parsed.tool_name):
+                result = self._call_runtime_tool_traced(parsed.tool_name, parsed.arguments, spec)
+            elif self.external_tool_registry is not None and self.external_tool_registry.has_tool(parsed.tool_name):
                 result = call_external_tool_traced(
                     parsed.tool_name,
                     external_registry=self.external_tool_registry,

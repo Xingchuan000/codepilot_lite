@@ -69,6 +69,13 @@ TUIEventType = Literal[
     "command_output",
     "user_message",
     "error",
+    "agent_spawned",
+    "agent_started",
+    "agent_completed",
+    "agent_failed",
+    "agent_cancelled",
+    "agent_patch_ready",
+    "agent_patch_applied",
 ]
 
 

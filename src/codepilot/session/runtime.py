@@ -53,7 +53,18 @@ class TurnExecutionResult:
 class SessionRuntime:
     """把 Session 持久化生命周期接到现有单线程 AgentLoop。"""
 
-    def __init__(self, database: SessionDatabase, llm: CodePilotLLMClient, router_factory: Callable[[Any], ToolRouter], max_steps: int = 12, trace_hook: Callable[[Any], None] | None = None, capabilities: ModelCapabilities | None = None) -> None:
+    def __init__(
+        self,
+        database: SessionDatabase,
+        llm: CodePilotLLMClient,
+        router_factory: Callable[[Any], ToolRouter],
+        max_steps: int = 12,
+        trace_hook: Callable[[Any], None] | None = None,
+        capabilities: ModelCapabilities | None = None,
+        agent_profile: Any | None = None,
+        write_scope: tuple[str, ...] = (),
+        runtime_tool_registry_factory: Callable[[Any], Any] | None = None,
+    ) -> None:
         self.database = database
         self.store = SessionStore(database)
         self.service = SessionService(database)
@@ -65,6 +76,50 @@ class SessionRuntime:
         self.max_steps = max_steps
         self.trace_hook = trace_hook
         self.capabilities = capabilities
+        self.agent_profile = agent_profile
+        self.write_scope = tuple(write_scope)
+        self.runtime_tool_registry_factory = runtime_tool_registry_factory
+
+    def configure_agent_profile(self, profile: Any, *, write_scope: tuple[str, ...] = ()) -> None:
+        """Set the immutable child boundary before the next Turn is submitted."""
+
+        self.agent_profile = profile
+        self.write_scope = tuple(write_scope)
+
+    def _configure_agent_boundary(self, router: ToolRouter) -> tuple[tuple[Any, ...], str | None]:
+        """Bind Profile visibility and write scope to both prompt and execution."""
+
+        if self.agent_profile is None:
+            visible = router.list_visible_tool_specs()
+            router.configure_allowed_tools(spec.name for spec in visible)
+            return visible, None
+
+        # Import lazily: multi_agent.supervisor depends on SessionRuntime's storage types.
+        from codepilot.multi_agent.profiles import filter_builtin_specs, filter_scout_mcp_specs
+        from codepilot.tools.base import ToolSideEffect
+        from codepilot.tools.registry import list_tool_specs
+
+        profile = self.agent_profile
+        visible = list(filter_builtin_specs(profile, list_tool_specs()))
+        external = router.external_tool_registry
+        if profile.allows_mcp and external is not None:
+            list_specs = getattr(external, "list_exposed_specs", None)
+            if not callable(list_specs):
+                list_specs = getattr(external, "list_specs", None)
+            if callable(list_specs):
+                mcp_specs = tuple(list_specs())
+                if profile.name == "scout":
+                    mcp_specs = filter_scout_mcp_specs(mcp_specs)
+                visible.extend(mcp_specs)
+
+        if profile.name == "general" and not self.write_scope:
+            visible = [spec for spec in visible if spec.side_effect != ToolSideEffect.LOCAL_WRITE]
+
+        router.configure_allowed_tools(
+            (spec.name for spec in visible),
+            write_scope=self.write_scope if profile.name == "general" else None,
+        )
+        return tuple(visible), profile.instructions
 
     def submit_user_message(
         self,
@@ -124,6 +179,22 @@ class SessionRuntime:
         try:
             trace = SessionTraceRecorder(self.database, session.session_id, turn_id, attempt.attempt_id, record_hook=self.trace_hook)
             router = self.router_factory(trace)
+            if hasattr(router, "policy_context"):
+                router.policy_context = router.policy_context.model_copy(update={"repo": opened.project_path})
+            if self.runtime_tool_registry_factory is not None:
+                if router.runtime_tool_registry is not None:
+                    raise ValueError("runtime tool registry is already configured")
+                from codepilot.multi_agent.runtime_tools import AgentControlContext
+
+                router.runtime_tool_registry = self.runtime_tool_registry_factory(
+                    AgentControlContext(
+                        parent_session_id=session.session_id,
+                        parent_turn_id=turn_id,
+                        parent_attempt_id=attempt.attempt_id,
+                        parent_repo=opened.project_path,
+                    )
+                )
+            visible_tool_specs, agent_instructions = self._configure_agent_boundary(router)
             if hasattr(router, "permission_request_context"):
                 router.permission_request_context = PermissionRequestContext(session.session_id, turn_id, attempt.attempt_id, None)
             # Trace 只记录事件；业务表由稳定 ID 的 Lifecycle Observer 单独维护。
@@ -137,6 +208,7 @@ class SessionRuntime:
                 router=router,
                 trace_logger=trace,
                 max_steps=self.max_steps,
+                visible_tool_specs=visible_tool_specs,
                 cancellation_token=_LeaseAwareCancellationToken(cancellation_token, lease_lost),
                 event_sink=trace,
                 context_window=TurnContextWindow(self.database, profile),
@@ -171,7 +243,15 @@ class SessionRuntime:
                 )
             try:
                 self.compaction_service.ensure_context_budget(session.session_id, turn_id, profile)
-                context = self.assembler.build_with_manifest(session.session_id, turn_id, turn.provider_snapshot, turn.model_snapshot, profile=profile)
+                context = self.assembler.build_with_manifest(
+                    session.session_id,
+                    turn_id,
+                    turn.provider_snapshot,
+                    turn.model_snapshot,
+                    profile=profile,
+                    tool_specs=visible_tool_specs,
+                    agent_instructions=agent_instructions,
+                )
             except Exception:
                 self.store.interrupt_turn_attempt(turn_id, attempt_id, "context compaction failed", worker_id=worker_id)
                 self.store.update_turn_status(turn_id, "recovery_required")
@@ -208,11 +288,16 @@ class SessionRuntime:
         heartbeat.join()
         if result.status in {"success", "message_complete"}:
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="completed", turn_status="completed", worker_id=worker_id)
-            self._extract_memory_candidates_best_effort(
-                session_id=session.session_id,
-                turn_id=turn_id,
-                attempt_id=attempt_id,
+            memory_write = session.metadata.get(
+                "memory_write",
+                getattr(self.agent_profile, "memory_write", True),
             )
+            if memory_write is not False:
+                self._extract_memory_candidates_best_effort(
+                    session_id=session.session_id,
+                    turn_id=turn_id,
+                    attempt_id=attempt_id,
+                )
         elif result.status == "cancelled":
             self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="cancelled", turn_status="cancelled", worker_id=worker_id)
         else:

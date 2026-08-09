@@ -135,6 +135,9 @@ class SessionStore:
     def get_session(self, session_id: str) -> SessionRecord:
         return self.sessions.get_session(session_id)
 
+    def list_child_sessions(self, parent_session_id: str) -> list[SessionRecord]:
+        return self.sessions.list_children(parent_session_id)
+
     def list_sessions(self, include_archived: bool = False) -> list[SessionSummary]:
         return self.sessions.list_sessions(include_archived)
 

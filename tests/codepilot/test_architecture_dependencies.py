@@ -34,6 +34,15 @@ def test_agent_does_not_depend_on_tui_agent() -> None:
     assert not any(module.startswith("codepilot.tui_agent") for module in modules)
 
 
+def test_multi_agent_core_does_not_depend_on_tui_agent() -> None:
+    multi_agent_dir = ROOT / "src/codepilot/multi_agent"
+    modules = set()
+    for path in multi_agent_dir.glob("*.py"):
+        modules.update(_imported_modules(path))
+
+    assert not any(module.startswith("codepilot.tui_agent") for module in modules)
+
+
 def test_post_pr_models_stays_independent() -> None:
     modules = _imported_modules(ROOT / "src/codepilot/post_pr/models.py")
 

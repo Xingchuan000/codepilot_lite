@@ -15,6 +15,7 @@ from codepilot.common.patches import extract_paths_from_patch
 from codepilot.tools.registry import find_tool_spec
 
 COMMAND_TOOLS = {"run_shell", "run_tests"}
+STRUCTURED_WRITE_TOOLS = {"apply_patch", "replace_range"}
 PROTECTED_COMMAND_TOKENS = [".env", ".github/workflows", ".codepilot", "secrets/", ".ssh"]
 
 
@@ -36,13 +37,40 @@ class PolicyChecker:
     def _find_tool_spec(self, name: str) -> ToolSpec | None:
         return self.extra_tool_specs.get(name) or find_tool_spec(name)
 
-    def check(self, action: ToolAction, context: PolicyContext | None = None) -> PolicyDecision:
+    def check(
+        self,
+        action: ToolAction,
+        context: PolicyContext | None = None,
+        *,
+        spec: ToolSpec | None = None,
+    ) -> PolicyDecision:
         """判断一次结构化工具动作是否可以放行。"""
 
         context = context or PolicyContext()
         tool_name = action.tool_name
         arguments = dict(action.arguments or {})
-        spec = self._find_tool_spec(tool_name)
+        allowed_tools = context.metadata.get("allowed_tools")
+        if allowed_tools is not None:
+            if not isinstance(allowed_tools, (list, tuple, set)) or not all(isinstance(item, str) for item in allowed_tools):
+                return self._decision(
+                    "deny",
+                    "Invalid allowed_tools policy metadata.",
+                    tool_name=tool_name,
+                    matched_rule="agent.profile.allowed_tools.invalid",
+                    context=context,
+                    metadata={"known_tool": False},
+                )
+            if tool_name not in allowed_tools:
+                return self._decision(
+                    "deny",
+                    f"Tool '{tool_name}' is not allowed for the current agent profile.",
+                    tool_name=tool_name,
+                    matched_rule="agent.profile.tool.deny",
+                    context=context,
+                    metadata={"known_tool": self._find_tool_spec(tool_name) is not None},
+                )
+
+        spec = spec or self._find_tool_spec(tool_name)
 
         if spec is None:
             return self._decision(
@@ -298,6 +326,17 @@ class PolicyChecker:
                 return pattern
         return None
 
+    def _match_write_scope(self, path: str, patterns: list[str]) -> str | None:
+        for pattern in patterns:
+            normalized_pattern = pattern.strip().replace("\\", "/").removeprefix("./")
+            if (
+                fnmatch.fnmatch(path, normalized_pattern)
+                or path == normalized_pattern.rstrip("/")
+                or path.startswith(normalized_pattern.rstrip("/") + "/")
+            ):
+                return pattern
+        return None
+
     def _check_paths(
         self,
         *,
@@ -352,6 +391,32 @@ class PolicyChecker:
                     context=context,
                     metadata=path_metadata,
                 )
+
+            if tool_name in STRUCTURED_WRITE_TOOLS and "write_scope" in context.metadata:
+                raw_scope = context.metadata["write_scope"]
+                if not isinstance(raw_scope, (list, tuple, set)) or not all(isinstance(item, str) for item in raw_scope):
+                    path_metadata["write_scope"] = raw_scope
+                    return self._decision(
+                        "deny",
+                        "Invalid write_scope policy metadata.",
+                        tool_name=tool_name,
+                        matched_rule="agent.profile.write_scope.invalid",
+                        context=context,
+                        metadata=path_metadata,
+                    )
+                scope = list(raw_scope)
+                scope_match = self._match_write_scope(normalized, scope)
+                if scope_match is None:
+                    path_metadata["write_scope"] = scope
+                    return self._decision(
+                        "deny",
+                        f"Path '{normalized}' is outside the current agent write_scope.",
+                        tool_name=tool_name,
+                        matched_rule="agent.profile.write_scope.deny",
+                        context=context,
+                        metadata=path_metadata,
+                    )
+                path_metadata["write_scope_rule"] = scope_match
         return None
 
     def _normalize_command(self, command: str) -> str:

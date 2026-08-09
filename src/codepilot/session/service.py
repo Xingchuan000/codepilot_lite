@@ -39,17 +39,54 @@ class SessionService:
             current_branch=context.branch,
         )
 
+    def create_child_session(
+        self,
+        *,
+        parent_session_id: str,
+        forked_from_turn_id: str,
+        provider: str,
+        model: str,
+        permission_mode: str,
+        metadata: dict[str, object],
+    ) -> SessionRecord:
+        parent = self.store.get_session(parent_session_id)
+        if parent.status != "active":
+            raise ValueError("archived session is read-only")
+        fork_turn = self.store.get_turn(forked_from_turn_id)
+        if fork_turn.session_id != parent_session_id:
+            raise ValueError("fork turn does not belong to parent session")
+        source_project_path = self._source_project_path(parent)
+        context = read_git_context(source_project_path)
+        return self.store.create_session(
+            project_path=source_project_path,
+            provider=provider,
+            current_model=model,
+            permission_mode=permission_mode,
+            initial_branch=context.branch,
+            current_branch=context.branch,
+            parent_session_id=parent_session_id,
+            forked_from_turn_id=forked_from_turn_id,
+            metadata=dict(metadata),
+        )
+
     def list_all_sessions(self, include_archived: bool = False) -> list[SessionSummary]:
         return self.store.list_sessions(include_archived=include_archived)
 
     def open_session(self, session_id: str) -> OpenedSession:
         session = self.store.get_session(session_id)
-        with self.database.transaction() as connection:
-            project_path = Path(
-                connection.execute("SELECT path FROM projects WHERE project_id = ?", (session.project_id,)).fetchone()[0]
-            )
+        project_path = self._source_project_path(session)
+        workspace_value = session.metadata.get("workspace_path")
+        if isinstance(workspace_value, str) and workspace_value.strip():
+            project_path = Path(workspace_value).expanduser().resolve()
         exists = project_path.exists()
         return OpenedSession(session=session, project_path=project_path, project_exists=exists, read_only=not exists)
+
+    def _source_project_path(self, session: SessionRecord) -> Path:
+        with self.database.transaction() as connection:
+            row = connection.execute("SELECT path FROM projects WHERE project_id = ?", (session.project_id,)).fetchone()
+        if row is None:
+            raise LookupError(session.project_id)
+        return Path(row[0])
 
     def rename_session(self, session_id: str, title: str) -> SessionRecord:
         return self.store.update_session(session_id, title=title)

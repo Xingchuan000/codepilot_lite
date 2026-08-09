@@ -3,11 +3,12 @@
 from typing import TYPE_CHECKING
 
 from codepilot.router.actions import ToolAction, ToolRouteResult
+from codepilot.router.runtime_tools import RuntimeToolRegistry
 
 if TYPE_CHECKING:
     from codepilot.router.router import ToolRouter as ToolRouter
 
-__all__ = ["ToolAction", "ToolRouteResult", "ToolRouter"]
+__all__ = ["RuntimeToolRegistry", "ToolAction", "ToolRouteResult", "ToolRouter"]
 
 
 def __getattr__(name: str):

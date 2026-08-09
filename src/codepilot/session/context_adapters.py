@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from codepilot.session.context_budget import ContextBudgetAllocator, ContextItem
 from codepilot.session.model_capabilities import ModelContextProfile
 from codepilot.session.models import ContextSummaryRecord, MessagePartRecord, MessageRecord
 from codepilot.session.store import SessionStore
+from codepilot.tools.base import ToolSpec
 
 
 @dataclass(frozen=True)
@@ -26,6 +28,7 @@ class SessionHistory:
     memory_items: tuple[ContextItem, ...] = ()
     turn_checkpoint_items: tuple[ContextItem, ...] = ()
     turn_checkpoint_covered_ids: tuple[str, ...] = ()
+    inherited_items: tuple[ContextItem, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -44,7 +47,14 @@ class TextActionContextAdapter:
         self.store = store
         self.artifacts = artifacts or ArtifactStore(store.database)
 
-    def build_context_plan(self, history: SessionHistory, profile: ModelContextProfile) -> ContextPlan:
+    def build_context_plan(
+        self,
+        history: SessionHistory,
+        profile: ModelContextProfile,
+        *,
+        tool_specs: tuple[ToolSpec, ...] | None = None,
+        agent_instructions: str | None = None,
+    ) -> ContextPlan:
         """先生成 ContextPlan，再由统一预算器选择整组消息。
 
         规划阶段按业务优先级先锁定当前 Turn，并从新到旧尝试加入可选历史，保证预算
@@ -52,7 +62,12 @@ class TextActionContextAdapter:
         工具调用组都不会在这里拆成独立字符串。
         """
 
-        system_messages = [ChatMessage("system", build_system_prompt())]
+        system_messages = [
+            ChatMessage(
+                "system",
+                build_system_prompt(tool_specs=tool_specs, agent_instructions=agent_instructions),
+            )
+        ]
         system_messages.extend(history.branch_events)
         system_items = tuple(
             ContextItem(
@@ -70,6 +85,7 @@ class TextActionContextAdapter:
         covered_message_ids.update(history.turn_checkpoint_covered_ids)
         summary_items: list[ContextItem] = [
             *(item for item in history.instruction_items if not item.mandatory),
+            *history.inherited_items,
             *history.memory_items,
         ]
         for index, summary in enumerate(history.summaries):
@@ -154,11 +170,35 @@ class TextActionContextAdapter:
         history_items = [item for _, item in sorted(history_items, key=lambda value: value[0], reverse=True)]
         return ContextPlan(system_items=system_items, summary_items=tuple(summary_items), history_items=tuple(item for item in history_items), current_turn_items=tuple(current_turn_items))
 
-    def build_messages(self, history: SessionHistory, profile: ModelContextProfile) -> list[ChatMessage | RichChatMessage]:
-        return self.build_prepared_context(history, profile).messages
+    def build_messages(
+        self,
+        history: SessionHistory,
+        profile: ModelContextProfile,
+        *,
+        tool_specs: tuple[ToolSpec, ...] | None = None,
+        agent_instructions: str | None = None,
+    ) -> list[ChatMessage | RichChatMessage]:
+        return self.build_prepared_context(
+            history,
+            profile,
+            tool_specs=tool_specs,
+            agent_instructions=agent_instructions,
+        ).messages
 
-    def build_prepared_context(self, history: SessionHistory, profile: ModelContextProfile) -> PreparedContext:
-        plan = self.build_context_plan(history, profile)
+    def build_prepared_context(
+        self,
+        history: SessionHistory,
+        profile: ModelContextProfile,
+        *,
+        tool_specs: tuple[ToolSpec, ...] | None = None,
+        agent_instructions: str | None = None,
+    ) -> PreparedContext:
+        plan = self.build_context_plan(
+            history,
+            profile,
+            tool_specs=tool_specs,
+            agent_instructions=agent_instructions,
+        )
         budget = ContextBudgetAllocator(profile.max_input_tokens, protocol_overhead_tokens=profile.protocol_overhead_tokens)
         selected: list[ContextItem] = []
         for item in plan.system_items:
@@ -193,6 +233,17 @@ class TextActionContextAdapter:
             sum(estimate_tokens(message) for message in messages) + profile.protocol_overhead_tokens,
             {"max_input_tokens": profile.max_input_tokens, "protocol_overhead_tokens": profile.protocol_overhead_tokens},
         )
+
+    def render_message_for_context(
+        self,
+        message: MessageRecord,
+        parts: tuple[MessagePartRecord, ...],
+        profile: ModelContextProfile,
+    ) -> ChatMessage | None:
+        content = _message_content(self.artifacts, message, parts, profile)
+        if not content:
+            return None
+        return ChatMessage(_context_role(message.role), content)
 
 
 def _context_role(role: str) -> str:

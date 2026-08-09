@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -16,6 +17,13 @@ class SessionDatabase:
 
     def __init__(self, path: Path) -> None:
         self.path = path
+        # Multi-agent workers share one SessionDatabase instance but use separate
+        # SQLite connections. SQLite serializes writers, while a DEFERRED
+        # transaction that reads before writing can still fail immediately on a
+        # read-to-write upgrade race. Keep transaction scopes short and serialize
+        # them in-process so child/primary persistence cannot produce flaky BUSY
+        # failures. RLock preserves safety if a caller re-enters database helpers.
+        self._transaction_lock = threading.RLock()
 
     def connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,17 +90,18 @@ class SessionDatabase:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        connection = self.connect()
-        try:
-            connection.execute("BEGIN")
-            yield connection
-        except Exception:
-            connection.rollback()
-            raise
-        else:
-            connection.commit()
-        finally:
-            connection.close()
+        with self._transaction_lock:
+            connection = self.connect()
+            try:
+                connection.execute("BEGIN")
+                yield connection
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+            finally:
+                connection.close()
 
 
 def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:

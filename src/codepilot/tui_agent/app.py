@@ -11,6 +11,7 @@ from typing import Any
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.widgets import Footer, Header, Input
 
 from codepilot.permissions import PermissionResponse
@@ -505,9 +506,15 @@ def create_tui_agent_app(
                 panel.scroll_end(animate=False)
 
         def _refresh(self) -> None:
-            self._append_new_transcript_items()
-            self._refresh_top_status()
-            self._refresh_side_status()
+            # The event timer also runs while a ModalScreen (for example the
+            # Session Picker) is active, whose DOM does not contain the main
+            # transcript/status widgets.
+            try:
+                self._append_new_transcript_items()
+                self._refresh_top_status()
+                self._refresh_side_status()
+            except NoMatches:
+                return
 
         def _transcript_items_for_target(self, target: str | None) -> tuple:
             items = self._reducer.view.transcript
@@ -541,7 +548,26 @@ def create_tui_agent_app(
 
         def _drain_events(self) -> None:
             events = self._event_stream.drain()
+            active_session_id = self.session.session_id if self.session is not None else None
+
+            def belongs_to_active_tree(event: TUIEvent) -> bool:
+                if event.session_id is None or event.session_id == active_session_id:
+                    return True
+                if active_session_id is None:
+                    return False
+                try:
+                    session = self._session_controller.store.get_session(event.session_id)
+                except LookupError:
+                    return False
+                return session.parent_session_id == active_session_id
+
             for event in events:
+                # Child traces are persisted in their own Session. Only lifecycle
+                # events and permission prompts are allowed into the Primary UI.
+                if event.session_id not in {None, active_session_id} and not event.type.startswith("agent_") and event.type not in {"permission_requested", "permission_resolved"}:
+                    continue
+                if event.type.startswith("agent_") and event.session_id != active_session_id:
+                    continue
                 self._reducer.reduce(event)
                 if event.type == "run_finished":
                     self._recovery_scan_pending = True
@@ -559,7 +585,9 @@ def create_tui_agent_app(
                 request_id = str(request_id)
                 if request_id in self._shown_permission_request_ids:
                     continue
-                if request_id not in pending_permission_ids:
+                if not belongs_to_active_tree(event):
+                    continue
+                if event.session_id in {None, active_session_id} and request_id not in pending_permission_ids:
                     continue
                 self._shown_permission_request_ids.add(request_id)
                 self.push_screen(

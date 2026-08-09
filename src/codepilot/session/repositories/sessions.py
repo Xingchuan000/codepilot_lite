@@ -75,6 +75,14 @@ class SessionRepository:
             raise LookupError(session_id)
         return session_from_row(row)
 
+    def list_children(self, parent_session_id: str) -> list[SessionRecord]:
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC, session_id ASC",
+                (parent_session_id,),
+            ).fetchall()
+        return [session_from_row(row) for row in rows]
+
     def list_sessions(self, include_archived: bool = False) -> list[SessionSummary]:
         query = (
             "SELECT s.*, p.path AS project_path, "
