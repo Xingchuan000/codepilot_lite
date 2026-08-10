@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from codepilot.session.context_budget import estimate_tokens
-from codepilot.session.model_capabilities import ModelContextProfile
+from codepilot.session.model_context import ModelContextProfile
 
 TRUNCATION_MARKER = "[PROJECT FILE TRUNCATED TO FIT CONTEXT BUDGET]"
 

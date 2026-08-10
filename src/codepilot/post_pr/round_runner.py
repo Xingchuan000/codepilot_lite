@@ -15,7 +15,6 @@ from codepilot.pr_feedback.models import PRRef
 from codepilot.pr_feedback.workflow import run_pr_feedback_loop
 from codepilot.repo.git_utils import sha256_file
 
-
 SNAPSHOT_ALLOWED_NAMES = [
     "ci_status.json",
     "review_feedback.json",
@@ -116,6 +115,7 @@ def run_feedback_round(
     )
     manifest = load_ci_feedback_manifest(manifest_path)
     fingerprints = extract_feedback_fingerprints(manifest)
+    freshness = result.feedback_freshness
     round_ref = PostPRRoundRef(
         round_id=Path(round_dir).name,
         round_index=int(Path(round_dir).name.split("-", maxsplit=1)[1]),
@@ -126,8 +126,8 @@ def run_feedback_round(
         feedback_fingerprints=fingerprints,
         status=result.status,
         terminal_reason="none",
-        head_sha_before=getattr(result.feedback_freshness, "observed_head_sha", None),
-        head_sha_after=getattr(result.feedback_freshness, "current_head_sha", None),
+        head_sha_before=freshness.observed_head_sha if freshness is not None else None,
+        head_sha_after=freshness.current_head_sha if freshness is not None else None,
         agent_ran=result.agent_ran,
         patch_generated=result.patch_generated,
         commit_created=result.commit_created,

@@ -7,7 +7,6 @@ from pathlib import Path
 
 from codepilot.pr_assist.models import ManualCommandPlan, PRAssistSafetyGate
 
-
 FORBIDDEN_COMMAND_SNIPPETS = [
     "git push",
     "gh pr create",
@@ -44,7 +43,7 @@ def artifact_arg(path: str | Path, *, run_dir: str | Path, redact_absolute_paths
         if redact_absolute_paths:
             return quote(Path("runs") / run_dir_path.name / display)
         return quote(run_dir_path / display)
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return quote(path_obj.name)
 
 

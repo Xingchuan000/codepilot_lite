@@ -2,7 +2,8 @@ import json
 from pathlib import Path
 
 from codepilot.policy import PolicyChecker, PolicyContext
-from codepilot.router import ToolAction, ToolRouter
+from codepilot.router import ToolRouter
+from codepilot.tools.actions import ToolAction
 
 
 def _router(tmp_path: Path, context: PolicyContext | None = None) -> ToolRouter:

@@ -8,18 +8,18 @@ from codepilot.multi_agent.models import AgentHandle
 from codepilot.multi_agent.supervisor import AgentSupervisor, _RunningChild
 from codepilot.session.database import SessionDatabase
 from codepilot.session.service import SessionService
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 def _waiting_child(tmp_path: Path):
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
     service = SessionService(database)
-    store = SessionStore(database)
+    store = SessionRepositories(database)
     repo = tmp_path / "repo"
     repo.mkdir()
     parent = service.create_session(repo, "fake", "fake", "manual")
-    parent_turn = store.create_turn(
+    parent_turn = store.turns.create_turn(
         session_id=parent.session_id,
         title="primary",
         provider_snapshot="fake",
@@ -35,7 +35,7 @@ def _waiting_child(tmp_path: Path):
         permission_mode="manual",
         metadata={"agent_type": "general", "agent_status": "running", "write_scope": ["README.md"]},
     )
-    store.create_turn(
+    store.turns.create_turn(
         session_id=child.session_id,
         title="child",
         provider_snapshot="fake",
@@ -105,3 +105,4 @@ def test_wait_timeout_pauses_while_child_waits_for_human_permission(tmp_path: Pa
 
     assert elapsed >= 0.10
     assert snapshot["status"] == "completed"
+

@@ -5,7 +5,8 @@ from pathlib import Path
 from codepilot.mcp.fake_client import FakeMCPClient
 from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
-from codepilot.router import ToolAction, ToolRouter
+from codepilot.router import ToolRouter
+from codepilot.tools.actions import ToolAction
 
 
 def test_router_executes_mcp_tools_and_respects_policy(tmp_path) -> None:

@@ -239,20 +239,22 @@ codepilot tool run_shell '{"repo":".","command":"python --version"}'
 ```python
 from pathlib import Path
 
-from codepilot.session import SessionDatabase, SessionStore, resolve_session_paths
+from codepilot.session.database import SessionDatabase
+from codepilot.session.paths import resolve_session_paths
+from codepilot.session.repositories import SessionRepositories
 
 paths = resolve_session_paths(Path("/tmp/codepilot-data"))
 database = SessionDatabase(paths.database_path)
 database.initialize()
 
-store = SessionStore(database, paths)
-session = store.create_session(
+repositories = SessionRepositories(database)
+session = repositories.sessions.create_session(
     project_path=Path("/tmp/repo"),
     provider="openai",
     current_model="gpt-4.1",
     permission_mode="manual",
 )
-turn = store.create_turn(
+turn = repositories.turns.create_turn(
     session_id=session.session_id,
     title="Turn 1",
     provider_snapshot="openai",
@@ -282,22 +284,21 @@ turn = store.create_turn(
 
 本轮只实现计划中的 Phase 0–4，Session 的 SQLite 数据库仍是唯一事实来源：
 
-- 初始化旧版 v1–v4 数据库时，先按版本完成迁移和外键校验，最后才创建最新索引；未知版本会明确拒绝，不会覆盖版本号。
+- 初始化时只接受当前 schema version；版本不匹配或结构不完整会明确拒绝，不执行历史数据转换。
 - 工具已经进入真实执行阶段但结果未知时，当前 Attempt 会立即停止并进入 `recovery_required`，不会继续调用模型或自动重试。
-- Native 上下文按 Assistant `tool_calls` 与 `role=tool` 原样回放；Provider tool-call ID 保存在结构化 MessagePart 中，内部 ToolCall ID 单独保存在 SQLite 业务记录中。缺少 Provider ID 的旧 Session 会明确拒绝重放。
+- Native 上下文按 Assistant `tool_calls` 与 `role=tool` 原样回放；Provider tool-call ID 保存在结构化 MessagePart 中，内部 ToolCall ID 单独保存在 SQLite 业务记录中。缺少 Provider ID 的记录会明确拒绝重放。
 - 参数错误、Evidence Gate 拒绝和工具准备失败都作为对应 Native tool result 持久化，进程重启后可以恢复同一消息历史。
 - Compact 使用累计覆盖集合，旧摘要标记为 `superseded`，有效摘要只注入一次；当前 Turn、最近完整 Turn、未解决 ToolCall、关键决策以及最近文件/测试/Diff 事实会被保留。
 - 上下文预算按一次模型调用全局递减，而不是每条消息重新获得完整窗口；默认未知模型按 16K 输入 Token 处理，已知模型按能力表选择窗口，超长内容会带有 `context truncated` 标记。
 - Recovery Worker 异常会统一发布 `error` 和 `run_finished`，恢复状态会重新扫描；无效 slash command 会显示为 TUI 错误，不会逃出事件处理器。
 - Session 切换会从 SQLite Hydration 创建全新的 View，恢复 `waiting_permission`、`recovery_required`、`interrupted` 等状态，不复用上一 Session 的证据、测试和完成字段。
 - 新建 Session 保存实际 Provider/Model；`/model <model-name>` 只允许同 Provider 切换，并仅影响后续 Turn。ArtifactStore 提供 `cleanup_orphans()` 清理超过安全期限且无数据库记录的孤儿文件。
-- TUI 的 SessionController 只编排 `codepilot.session.SessionService/SessionStore`，不再新增第二套 Session 事实模型；手动验收流程见 `docs/manual_session_runtime_acceptance.md`。
+- TUI 的 SessionController 只编排 `SessionService` 与 `SessionRepositories`，不再新增第二套 Session 事实模型；手动验收流程见 `docs/manual_session_runtime_acceptance.md`。
 
 开发者可以运行 Phase 0–4 定向回归测试：
 
 ```bash
 PYTHONPATH=src pytest -q \
-  tests/codepilot/test_session_schema_migrations.py \
   tests/codepilot/test_session_context_exact_replay.py \
   tests/codepilot/test_session_context_budget.py \
   tests/codepilot/test_session_compaction_cumulative.py
@@ -319,10 +320,10 @@ Session 的历史内容、权限请求和工具结果都以 SQLite 为唯一事�
 
 * `resolve_session_paths(...)` 默认会指向用户级 `codepilot` 数据目录，也可以在测试里显式传入 `tmp_path`。
 * `SessionDatabase.initialize()` 会创建 SQLite schema，重复调用是安全的。
-* `SessionStore` 负责创建和读取 `projects`、`sessions`、`turns`、`messages`、`tool_calls`、`session_events` 等核心记录。
+* `SessionRepositories` 按实体暴露 `projects`、`sessions`、`turns`、`messages`、`tool_executions`、`events` 等核心 Repository；跨表原子操作由对应 Service 负责。
 * 这一阶段不会创建旧的 `session.json`、`messages.jsonl` 或 `runs.jsonl`。
 
-当前这版 Session 的推荐入口是先创建数据库和 Store，再按需接入 `SessionService`、`SessionRuntime` 和 `SessionPermissionBroker`。`codepilot.session` 包已经改成轻量导出，导入它不会再强制加载 runtime，适合在 CLI、TUI 和测试里直接使用。
+当前这版 Session 的推荐入口是先创建数据库和 `SessionRepositories`，再按需接入 `SessionService`、`SessionRuntime` 和 `SessionPermissionBroker`。`codepilot.session` 包保持轻量，具体能力从对应子模块导入。
 
 ### Session 生命周期与多轮执行（Step3–Step5）
 

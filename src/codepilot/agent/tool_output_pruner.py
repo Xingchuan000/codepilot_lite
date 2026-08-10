@@ -74,9 +74,10 @@ class ToolOutputPruner:
         )
         try:
             content, facts = function(route_result, budget)
-        except Exception:
-            strategy = "safe_fallback"
+        except (KeyError, TypeError, ValueError) as exc:
+            strategy = "parse_fallback"
             content, facts = _fallback(route_result, budget)
+            facts["prune_fallback_reason"] = type(exc).__name__
         content_kind = "search_result" if route_result.tool_name == "search_code" else "code" if route_result.tool_name in {"read_file", "git_diff"} else "external" if _is_mcp(route_result) else "log" if route_result.tool_name in {"run_shell", "run_tests"} else "generic"
         redacted = redact_tool_output(content, tool_name=route_result.tool_name, content_kind=content_kind)
         content = _shrink_to_estimated_token_budget(redacted.value, token_budget, preserve_lines=content_kind == "code")

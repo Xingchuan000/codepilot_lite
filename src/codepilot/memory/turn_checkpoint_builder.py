@@ -7,7 +7,7 @@ from codepilot.memory.models import TurnCheckpointContent, TurnMemoryCheckpoint
 from codepilot.memory.test_scope import TestScope, exact_command_scope, parse_test_scope
 from codepilot.session.database import SessionDatabase
 from codepilot.session.models import ToolCallRecord, ToolResultRecord
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tools.test_tools import looks_like_pytest_command
 
 READ_TOOLS = {"read_file"}
@@ -35,7 +35,7 @@ LARGE_ARGUMENT_KEYS = {"patch", "replacement", "content", "body", "payload", "in
 
 class TurnCheckpointBuilder:
     def __init__(self, database: SessionDatabase) -> None:
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
 
     def build(
         self,
@@ -50,9 +50,9 @@ class TurnCheckpointBuilder:
         previous: TurnMemoryCheckpoint | None,
     ) -> TurnCheckpointContent:
         prior = TurnCheckpointContent.from_dict(previous.content) if previous is not None else TurnCheckpointContent()
-        calls = [call for call in self.store.list_tool_calls(session_id) if call.turn_id == turn_id]
-        results = {call.tool_call_id: self.store.get_tool_result_by_call(call.tool_call_id) for call in calls}
-        messages = tuple((message, tuple(parts)) for message, parts in self.store.list_messages_with_parts(session_id, turn_id))
+        calls = [call for call in self.store.tool_executions.list_tool_calls(session_id) if call.turn_id == turn_id]
+        results = {call.tool_call_id: self.store.tool_executions.get_tool_result_by_call(call.tool_call_id) for call in calls}
+        messages = tuple((message, tuple(parts)) for message, parts in self.store.messages.list_messages_with_parts(session_id, turn_id))
         files_read = list(prior.files_read)
         files_modified = list(prior.files_modified)
         commands = list(prior.commands_run)
@@ -98,7 +98,7 @@ class TurnCheckpointBuilder:
                 "arguments": _summarize_pending_arguments(call.tool_name, call.arguments),
                 "status": call.status,
             }
-            for call in self.store.list_unresolved_tool_calls(turn_id)[-8:]
+            for call in self.store.tool_executions.list_unresolved_tool_calls(turn_id)[-8:]
         )
         active_errors = _active_tool_errors(calls, results, evidence)
         safe_evidence = _bounded_evidence(evidence)

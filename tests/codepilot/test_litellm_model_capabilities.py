@@ -28,7 +28,6 @@ def test_missing_litellm_metadata_returns_none(monkeypatch) -> None:
 
 
 def test_explicit_model_capability_config_overrides_litellm_metadata(monkeypatch) -> None:
-    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
     monkeypatch.setattr(
         "codepilot.llm.model_capabilities.litellm.get_model_info",
         lambda model: {"max_input_tokens": 16_384, "max_output_tokens": 4_096},

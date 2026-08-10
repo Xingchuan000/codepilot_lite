@@ -5,8 +5,8 @@ from codepilot.memory.turn_window import TurnContextWindow
 from codepilot.session.context_audit import ContextAuditRepository
 from codepilot.session.context_budget import ContextItem, estimate_tokens
 from codepilot.session.database import SCHEMA_VERSION, SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
-from codepilot.session.store import SessionStore
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.session.repositories import SessionRepositories
 
 
 def _native_exchange(tool_name: str, provider_tool_call_id: str, arguments: dict, content: str) -> tuple[RichChatMessage, RichChatMessage]:
@@ -40,21 +40,21 @@ def _native_exchange(tool_name: str, provider_tool_call_id: str, arguments: dict
     )
 
 
-def _store_native_exchange(store: SessionStore, session_id: str, turn_id: str, exchange: tuple[RichChatMessage, RichChatMessage]) -> None:
+def _store_native_exchange(store: SessionRepositories, session_id: str, turn_id: str, exchange: tuple[RichChatMessage, RichChatMessage]) -> None:
     assistant, tool = exchange
-    assistant_record = store.create_message(session_id=session_id, turn_id=turn_id, role="assistant", status="completed", content="")
-    store.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
-    tool_record = store.create_message(session_id=session_id, turn_id=turn_id, role="tool", status="completed", content=tool.parts[0].content["content"])
-    store.append_message_part(tool_record.message_id, type="tool_result", content=tool.parts[0].content)
+    assistant_record = store.messages.create_message(session_id=session_id, turn_id=turn_id, role="assistant", status="completed", content="")
+    store.messages.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
+    tool_record = store.messages.create_message(session_id=session_id, turn_id=turn_id, role="tool", status="completed", content=tool.parts[0].content["content"])
+    store.messages.append_message_part(tool_record.message_id, type="tool_result", content=tool.parts[0].content)
 
 
 def test_turn_compaction_records_small_redacted_audit_snapshot(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
-    turn = store.create_turn(session_id=session.session_id, title="audit", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="inspect")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
+    turn = store.turns.create_turn(session_id=session.session_id, title="audit", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
+    store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="inspect")
     dynamic = []
     for index in range(4):
         exchange = _native_exchange("read_file", f"provider-{index}", {"path": f"{index}.py"}, f"token=secret-value-{index}\n" + "x" * 1200)
@@ -77,11 +77,11 @@ def test_turn_compaction_records_small_redacted_audit_snapshot(tmp_path: Path) -
 def test_turn_snapshot_preserves_selected_memory_instruction_and_summary_sources(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
-    turn = store.create_turn(session_id=session.session_id, title="sources", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
-    user = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="inspect")
-    summary = store.create_context_summary(session_id=session.session_id, turn_id=turn.turn_id, content="summary")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
+    turn = store.turns.create_turn(session_id=session.session_id, title="sources", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
+    user = store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="inspect")
+    summary = store.context_summaries.create_context_summary(session_id=session.session_id, turn_id=turn.turn_id, content="summary")
     base_messages = [
         ChatMessage("system", "system"),
         ChatMessage("system", "instructions"),
@@ -119,3 +119,4 @@ def test_turn_snapshot_preserves_selected_memory_instruction_and_summary_sources
 
 def _item(key: str, message: ChatMessage, source_kind: str, source_id: str | None = None) -> ContextItem:
     return ContextItem(key, (message,), estimate_tokens(message), True, 500, source_kind=source_kind, source_ids=(source_id,) if source_id else ())
+

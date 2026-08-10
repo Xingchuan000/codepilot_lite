@@ -3,7 +3,7 @@ from __future__ import annotations
 """第十四步 PR feedback / PR review loop 主 workflow。"""
 
 import json
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic, sleep
@@ -26,6 +26,7 @@ from codepilot.pr_feedback.report import write_ci_feedback_report
 from codepilot.pr_feedback.reviews import collect_pr_reviews
 from codepilot.pr_feedback.task_builder import build_followup_task, write_followup_task
 from codepilot.pr_feedback.update_plan import render_pr_update_plan, write_pr_update_plan
+from codepilot.report.generator import generate_report
 from codepilot.repo.git_utils import sha256_file
 from codepilot.repo.models import RepoSafetyConfig
 from codepilot.repo.safety import check_repo_safety
@@ -358,34 +359,79 @@ def _write_terminal_artifacts(
     return replace(result, ci_feedback_manifest_path=manifest_written)
 
 
-def run_pr_feedback_loop(
+
+@dataclass
+class PRFeedbackWorkflowContext:
+    run_dir: Path
+    artifact_paths: dict[str, Path]
+    manifest_path: Path
+    auto_pr_manifest: dict[str, Any]
+    source_artifact_manifest: dict[str, Any]
+    pr: Any
+    run_id: str
+    dry_run: bool
+    execute: bool
+    wait_ci: bool
+    include_logs: bool
+    include_success_logs: bool
+    allow_run_agent: bool
+    allow_push_update: bool
+    allow_comment: bool
+    max_feedback_items: int
+    max_log_bytes: int
+    poll_interval_seconds: int
+    timeout_seconds: int
+    feedback_action_template: bool
+    comment_marker: str | None
+    client: PRFeedbackGitHubClientProtocol
+    current_head_sha: str | None
+    observed_at: str | None
+    freshness: FeedbackFreshness
+    remote_head_checked: bool
+    github_api_called: bool
+    warnings: list[str] = field(default_factory=list)
+    attempt_artifacts: dict[str, Path] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class FeedbackCollectionPhase:
+    checks: list[Any]
+    log_summaries: list[Any]
+    review_comments: list[Any]
+    feedback_items: list[Any]
+    status: PRFeedbackStatus
+    blockers: list[str]
+    warnings: list[str]
+    degraded_sources: list[str]
+    github_api_called: bool
+
+
+def _prepare_feedback_phase(
     *,
     run_dir: str | Path,
-    auto_pr_manifest_path: str | Path | None = None,
-    dry_run: bool = True,
-    execute: bool = False,
-    wait_ci: bool = False,
-    include_logs: bool = True,
-    include_success_logs: bool = False,
-    allow_run_agent: bool = False,
-    allow_push_update: bool = False,
-    allow_comment: bool = False,
-    max_feedback_items: int = 20,
-    max_log_bytes: int = 200_000,
-    max_followup_rounds: int = 1,
-    poll_interval_seconds: int = 30,
-    timeout_seconds: int = 900,
-    token_env: str = "GITHUB_TOKEN",
-    repo_slug: str | None = None,
-    pull_number: int | None = None,
-    head_branch: str | None = None,
-    feedback_action_template: bool = True,
-    comment_marker: str | None = None,
-    overwrite: bool = False,
-    github_client: PRFeedbackGitHubClientProtocol | None = None,
-) -> PRFeedbackResult:
-    """执行第十四步 PR feedback / PR review loop。"""
-
+    auto_pr_manifest_path: str | Path | None,
+    dry_run: bool,
+    execute: bool,
+    wait_ci: bool,
+    include_logs: bool,
+    include_success_logs: bool,
+    allow_run_agent: bool,
+    allow_push_update: bool,
+    allow_comment: bool,
+    max_feedback_items: int,
+    max_log_bytes: int,
+    max_followup_rounds: int,
+    poll_interval_seconds: int,
+    timeout_seconds: int,
+    token_env: str,
+    repo_slug: str | None,
+    pull_number: int | None,
+    head_branch: str | None,
+    feedback_action_template: bool,
+    comment_marker: str | None,
+    overwrite: bool,
+    github_client: PRFeedbackGitHubClientProtocol | None,
+) -> PRFeedbackWorkflowContext | PRFeedbackResult:
     if max_followup_rounds != 1:
         raise PRFeedbackSafetyError("max_followup_rounds v1 only supports 1")
     run_dir_path = Path(run_dir).expanduser().resolve()
@@ -399,7 +445,6 @@ def run_pr_feedback_loop(
     )
     artifact_paths = resolve_feedback_artifact_paths(run_dir_path)
     manifest_path = Path(auto_pr_manifest_path).expanduser().resolve() if auto_pr_manifest_path else run_dir_path / "auto_pr_manifest.json"
-
     try:
         auto_pr_manifest = load_auto_pr_manifest(manifest_path)
         validation_errors = validate_auto_pr_manifest_for_feedback(auto_pr_manifest, run_dir_path)
@@ -449,14 +494,14 @@ def run_pr_feedback_loop(
             blockers=["missing required GitHub credential"] if execute else [],
             feedback_sources_degraded=["github"],
         )
-    if github_client is None:
-        github_client = RestPRFeedbackGitHubClient(token_env=token_env)
-
+    client = github_client or RestPRFeedbackGitHubClient(token_env=token_env)
     try:
-        current_head_sha, observed_at = resolve_current_pr_head(github_client, pr)
+        current_head_sha, observed_at = resolve_current_pr_head(client, pr)
         remote_head_checked = True
         github_api_called = True
+        head_warning = None
     except PRFeedbackGitHubError as exc:
+        warning = redact_feedback_text(str(exc))
         if execute:
             return _write_terminal_artifacts(
                 run_id=run_id,
@@ -473,8 +518,8 @@ def run_pr_feedback_loop(
                 allow_run_agent=allow_run_agent,
                 allow_push_update=allow_push_update,
                 allow_comment=allow_comment,
-                warnings=[redact_feedback_text(str(exc))],
-                blockers=[redact_feedback_text(str(exc))],
+                warnings=[warning],
+                blockers=[warning],
                 feedback_sources_degraded=["head"],
                 github_api_called=True,
             )
@@ -482,7 +527,7 @@ def run_pr_feedback_loop(
         observed_at = None
         remote_head_checked = False
         github_api_called = True
-        head_warning = redact_feedback_text(str(exc))
+        head_warning = warning
     except PRFeedbackSafetyError as exc:
         return _write_terminal_artifacts(
             run_id=run_id,
@@ -506,9 +551,11 @@ def run_pr_feedback_loop(
             remote_head_checked=True,
             execute_blocked_by_stale_head=True,
         )
-    else:
-        head_warning = None
-    freshness = build_feedback_freshness(observed_head_sha=pr.head_sha, current_head_sha=current_head_sha, observed_at=observed_at)
+    freshness = build_feedback_freshness(
+        observed_head_sha=pr.head_sha,
+        current_head_sha=current_head_sha,
+        observed_at=observed_at,
+    )
     if execute:
         try:
             assert_fresh_head_for_execute(freshness)
@@ -535,53 +582,90 @@ def run_pr_feedback_loop(
                 remote_head_checked=True,
                 execute_blocked_by_stale_head=True,
             )
-
-    checks, log_summaries, review_comments, github_api_called, warnings, feedback_sources_degraded = _collect_feedback(
-        client=github_client,
+    warnings = [head_warning] if head_warning is not None else []
+    return PRFeedbackWorkflowContext(
+        run_dir=run_dir_path,
+        artifact_paths=artifact_paths,
+        manifest_path=manifest_path,
+        auto_pr_manifest=auto_pr_manifest,
+        source_artifact_manifest=source_artifact_manifest,
         pr=pr,
+        run_id=run_id,
+        dry_run=dry_run,
+        execute=execute,
+        wait_ci=wait_ci,
         include_logs=include_logs,
         include_success_logs=include_success_logs,
+        allow_run_agent=allow_run_agent,
+        allow_push_update=allow_push_update,
+        allow_comment=allow_comment,
+        max_feedback_items=max_feedback_items,
         max_log_bytes=max_log_bytes,
-        output_dir=artifact_paths["ci_logs_dir"],
+        poll_interval_seconds=poll_interval_seconds,
+        timeout_seconds=timeout_seconds,
+        feedback_action_template=feedback_action_template,
+        comment_marker=comment_marker,
+        client=client,
+        current_head_sha=current_head_sha,
+        observed_at=observed_at,
+        freshness=freshness,
+        remote_head_checked=remote_head_checked,
+        github_api_called=github_api_called,
+        warnings=warnings,
     )
-    if head_warning is not None:
-        warnings.append(head_warning)
-    if wait_ci and has_pending_checks(checks):
-        deadline = monotonic() + timeout_seconds
+
+
+def _collect_feedback_phase(ctx: PRFeedbackWorkflowContext) -> FeedbackCollectionPhase:
+    checks, log_summaries, review_comments, github_api_called, warnings, degraded_sources = _collect_feedback(
+        client=ctx.client,
+        pr=ctx.pr,
+        include_logs=ctx.include_logs,
+        include_success_logs=ctx.include_success_logs,
+        max_log_bytes=ctx.max_log_bytes,
+        output_dir=ctx.artifact_paths["ci_logs_dir"],
+    )
+    warnings = [*ctx.warnings, *warnings]
+    if ctx.wait_ci and has_pending_checks(checks):
+        deadline = monotonic() + ctx.timeout_seconds
         while has_pending_checks(checks) and monotonic() < deadline:
-            sleep(poll_interval_seconds)
+            sleep(ctx.poll_interval_seconds)
             checks, log_summaries, review_comments, github_api_called, more_warnings, more_degraded_sources = _collect_feedback(
-                client=github_client,
-                pr=pr,
-                include_logs=include_logs,
-                include_success_logs=include_success_logs,
-                max_log_bytes=max_log_bytes,
-                output_dir=artifact_paths["ci_logs_dir"],
+                client=ctx.client,
+                pr=ctx.pr,
+                include_logs=ctx.include_logs,
+                include_success_logs=ctx.include_success_logs,
+                max_log_bytes=ctx.max_log_bytes,
+                output_dir=ctx.artifact_paths["ci_logs_dir"],
             )
             warnings.extend(more_warnings)
-            feedback_sources_degraded.extend(more_degraded_sources)
+            degraded_sources.extend(more_degraded_sources)
         if has_pending_checks(checks):
             warnings.append("CI checks did not finish before timeout")
-
-    if head_warning is not None:
-        feedback_sources_degraded.append("head")
-    feedback_items = normalize_feedback(checks=checks, log_summaries=log_summaries, review_comments=review_comments, max_items=max_feedback_items, observed_at=observed_at, head_sha=pr.head_sha)
-    has_only_low_confidence_feedback = bool(feedback_items) and all(item.confidence == "low" for item in feedback_items)
-    status: PRFeedbackStatus
+    if ctx.current_head_sha is None and "head" not in degraded_sources:
+        degraded_sources.append("head")
+    feedback_items = normalize_feedback(
+        checks=checks,
+        log_summaries=log_summaries,
+        review_comments=review_comments,
+        max_items=ctx.max_feedback_items,
+        observed_at=ctx.observed_at,
+        head_sha=ctx.pr.head_sha,
+    )
+    only_low_confidence = bool(feedback_items) and all(item.confidence == "low" for item in feedback_items)
     blockers: list[str] = []
-    if execute and has_pending_checks(checks) and not wait_ci:
-        status = "blocked"
+    if ctx.execute and has_pending_checks(checks) and not ctx.wait_ci:
+        status: PRFeedbackStatus = "blocked"
         blockers.append("pending checks require --wait-ci")
-    elif execute and freshness.is_stale:
+    elif ctx.execute and ctx.freshness.is_stale:
         status = "blocked"
-        blockers.append(freshness.stale_reason or "PR head is stale")
-    elif execute and feedback_items and not allow_run_agent:
+        blockers.append(ctx.freshness.stale_reason or "PR head is stale")
+    elif ctx.execute and feedback_items and not ctx.allow_run_agent:
         status = "blocked"
         blockers.append("--allow-run-agent is required in execute mode when feedback exists")
-    elif execute and has_only_low_confidence_feedback:
+    elif ctx.execute and only_low_confidence:
         status = "blocked"
         blockers.append("unreliable feedback correlation requires fresh CI data")
-    elif feedback_sources_degraded:
+    elif degraded_sources:
         status = "partial_feedback" if feedback_items else "api_degraded"
     elif not feedback_items:
         status = "no_feedback"
@@ -589,43 +673,59 @@ def run_pr_feedback_loop(
         status = "feedback_found"
     if status == "blocked":
         warnings.extend(blockers)
-
-    result = PRFeedbackResult(
-        run_id=run_id,
-        run_dir=run_dir_path,
-        status=status,
-        dry_run=dry_run,
-        execute=execute,
-        allow_run_agent_input=allow_run_agent,
-        allow_push_update_input=allow_push_update,
-        allow_comment_input=allow_comment,
-        feedback_sources_degraded=feedback_sources_degraded,
-        pr=pr,
-        feedback_freshness=freshness,
+    return FeedbackCollectionPhase(
         checks=checks,
         log_summaries=log_summaries,
         review_comments=review_comments,
         feedback_items=feedback_items,
-        github_api_called=github_api_called,
-        remote_head_checked=remote_head_checked,
-        warnings=warnings,
+        status=status,
         blockers=blockers,
-        api_degraded=bool(feedback_sources_degraded) or status in {"partial_feedback", "api_degraded", "feedback_unavailable"},
+        warnings=warnings,
+        degraded_sources=degraded_sources,
+        github_api_called=github_api_called or ctx.github_api_called,
     )
-    followup_task_text = build_followup_task(pr=pr, feedback_items=feedback_items, source_run_id=run_id)
-    followup_task_path = write_followup_task(followup_task_text, artifact_paths["followup_task"], overwrite=True)
+
+
+def _persist_feedback_phase(ctx: PRFeedbackWorkflowContext, collection: FeedbackCollectionPhase) -> PRFeedbackResult:
+    result = PRFeedbackResult(
+        run_id=ctx.run_id,
+        run_dir=ctx.run_dir,
+        status=collection.status,
+        dry_run=ctx.dry_run,
+        execute=ctx.execute,
+        allow_run_agent_input=ctx.allow_run_agent,
+        allow_push_update_input=ctx.allow_push_update,
+        allow_comment_input=ctx.allow_comment,
+        feedback_sources_degraded=collection.degraded_sources,
+        pr=ctx.pr,
+        feedback_freshness=ctx.freshness,
+        checks=collection.checks,
+        log_summaries=collection.log_summaries,
+        review_comments=collection.review_comments,
+        feedback_items=collection.feedback_items,
+        github_api_called=collection.github_api_called,
+        remote_head_checked=ctx.remote_head_checked,
+        warnings=collection.warnings,
+        blockers=collection.blockers,
+        api_degraded=bool(collection.degraded_sources) or collection.status in {"partial_feedback", "api_degraded", "feedback_unavailable"},
+    )
+    followup_task_path = write_followup_task(
+        build_followup_task(pr=ctx.pr, feedback_items=collection.feedback_items, source_run_id=ctx.run_id),
+        ctx.artifact_paths["followup_task"],
+        overwrite=True,
+    )
     result = replace(result, followup_task_path=followup_task_path)
     ci_status_path, review_feedback_path, report_path, update_plan_path, workflow_path = _write_base_artifacts(
         result=result,
-        artifact_paths=artifact_paths,
-        source_auto_pr_manifest_path=manifest_path,
-        feedback_action_template=feedback_action_template,
+        artifact_paths=ctx.artifact_paths,
+        source_auto_pr_manifest_path=ctx.manifest_path,
+        feedback_action_template=ctx.feedback_action_template,
         overwrite=True,
-        dry_run=dry_run,
-        execute=execute,
-        allow_run_agent=allow_run_agent,
-        allow_push_update=allow_push_update,
-        allow_comment=allow_comment,
+        dry_run=ctx.dry_run,
+        execute=ctx.execute,
+        allow_run_agent=ctx.allow_run_agent,
+        allow_push_update=ctx.allow_push_update,
+        allow_comment=ctx.allow_comment,
     )
     result = replace(
         result,
@@ -635,54 +735,48 @@ def run_pr_feedback_loop(
         pr_update_plan_path=update_plan_path,
         feedback_workflow_path=workflow_path,
     )
-    if not execute or status in {"no_feedback", "blocked"}:
-        manifest_written = _write_manifest(
-            output_path=artifact_paths["ci_feedback_manifest"],
-            result=result,
-            source_auto_pr_manifest_path=manifest_path,
-            artifacts={
-                "ci_status": ci_status_path,
-                "review_feedback": review_feedback_path,
-                "ci_feedback_report": report_path,
-                "followup_task": followup_task_path,
-                "pr_update_plan": update_plan_path,
-                "feedback_workflow": workflow_path,
-            },
-            overwrite=True,
-        )
-        return replace(result, ci_feedback_manifest_path=manifest_written)
+    return result
 
+
+def _execute_feedback_phase(ctx: PRFeedbackWorkflowContext, result: PRFeedbackResult) -> PRFeedbackResult:
     preliminary_manifest_path = _write_manifest(
-        output_path=artifact_paths["ci_feedback_manifest"],
+        output_path=ctx.artifact_paths["ci_feedback_manifest"],
         result=result,
-        source_auto_pr_manifest_path=manifest_path,
+        source_auto_pr_manifest_path=ctx.manifest_path,
         artifacts={
-            "ci_status": ci_status_path,
-            "review_feedback": review_feedback_path,
-            "ci_feedback_report": report_path,
-            "followup_task": followup_task_path,
-            "pr_update_plan": update_plan_path,
-            "feedback_workflow": workflow_path,
+            "ci_status": result.ci_status_path,
+            "review_feedback": result.review_feedback_path,
+            "ci_feedback_report": result.ci_feedback_report_path,
+            "followup_task": result.followup_task_path,
+            "pr_update_plan": result.pr_update_plan_path,
+            "feedback_workflow": result.feedback_workflow_path,
         },
         overwrite=True,
     )
     attempt = create_followup_attempt(
-        run_dir_path,
+        ctx.run_dir,
         source_feedback_manifest_path=preliminary_manifest_path,
-        followup_task_path=followup_task_path,
+        followup_task_path=result.followup_task_path,
         overwrite_attempt=False,
     )
     copy_followup_task_to_attempt(attempt)
-    attempt_repo_path = _prepare_followup_repo(source_artifact_manifest=source_artifact_manifest, run_id=run_id, attempt_id=attempt.attempt_id)
+    attempt_repo_path = _prepare_followup_repo(
+        source_artifact_manifest=ctx.source_artifact_manifest,
+        run_id=ctx.run_id,
+        attempt_id=attempt.attempt_id,
+    )
     repo_safety = check_repo_safety(attempt_repo_path, config=RepoSafetyConfig(dirty_policy="warn", worktree_mode="off"))
     if repo_safety.decision == "deny":
         raise PRFeedbackSafetyError(repo_safety.reason or "follow-up repo safety denied")
-    warnings.extend(repo_safety.warnings)
-    followup_result = run_agent_task(task=followup_task_text, repo=attempt_repo_path, runs_dir=attempt.attempt_dir.parent, run_id=attempt.attempt_id)
+    warnings = [*result.warnings, *repo_safety.warnings]
+    followup_result = run_agent_task(
+        task=result.followup_task_path.read_text(encoding="utf-8"),
+        repo=attempt_repo_path,
+        runs_dir=attempt.attempt_dir.parent,
+        run_id=attempt.attempt_id,
+    )
     trace_path = Path(followup_result.trace_path or attempt.attempt_dir / "trace.jsonl")
     attempt_report_path = trace_path.with_name("report.md")
-    from codepilot.report.generator import generate_report
-
     generate_report(trace_path, attempt_report_path, overwrite=True)
     patch_path, patch_metadata = export_patch_with_metadata(attempt_repo_path, attempt.attempt_dir / "changes.patch")
     new_commit_sha = None
@@ -694,25 +788,24 @@ def run_pr_feedback_loop(
             attempt_repo_path,
             attempt_manifest_path=attempt.attempt_dir / "followup_attempt_manifest.json",
             patch_metadata=patch_metadata,
-            issue_title=str((auto_pr_manifest.get("pr_request") or {}).get("title") or pr.url),
+            issue_title=str((ctx.auto_pr_manifest.get("pr_request") or {}).get("title") or ctx.pr.url),
             tests_summary=followup_result.outcome.last_test_status,
-            run_id=run_id,
+            run_id=ctx.run_id,
         )
         commit_created = True
-        if allow_push_update:
-            expected_current_head_sha = freshness.current_head_sha or pr.head_sha
+        if ctx.allow_push_update:
+            expected_current_head_sha = ctx.freshness.current_head_sha or ctx.pr.head_sha
             if not expected_current_head_sha:
                 push_update_blocked_reason = "cannot push update without verified current PR head sha"
                 warnings.append(push_update_blocked_reason)
-                blockers.append(push_update_blocked_reason)
             else:
                 push_result = push_pr_branch_update_if_allowed(
                     repo_path=attempt_repo_path,
-                    pr=pr,
+                    pr=ctx.pr,
                     new_commit_sha=new_commit_sha,
                     expected_current_head_sha=expected_current_head_sha,
-                    execute=execute,
-                    allow_push_update=allow_push_update,
+                    execute=ctx.execute,
+                    allow_push_update=ctx.allow_push_update,
                 )
                 push_update_executed = bool(push_result.get("pushed"))
     final_attempt = replace(
@@ -735,7 +828,16 @@ def run_pr_feedback_loop(
         },
         overwrite=True,
     )
-    final_status: PRFeedbackStatus = "blocked" if push_update_blocked_reason else "branch_updated" if push_update_executed else "commit_created" if commit_created else "agent_ran"
+    ctx.attempt_artifacts.update({"attempt_report": attempt_report_path, "attempt_patch": patch_path})
+    final_status: PRFeedbackStatus = (
+        "blocked"
+        if push_update_blocked_reason
+        else "branch_updated"
+        if push_update_executed
+        else "commit_created"
+        if commit_created
+        else "agent_ran"
+    )
     final_result = replace(
         result,
         status=final_status,
@@ -746,30 +848,94 @@ def run_pr_feedback_loop(
         new_commit_sha=new_commit_sha,
         push_update_executed=push_update_executed,
         github_api_called=True,
+        warnings=warnings,
+        blockers=[*result.blockers, *([push_update_blocked_reason] if push_update_blocked_reason else [])],
     )
     comment_posted = False
-    if allow_comment and final_status != "blocked":
+    if ctx.allow_comment and final_status != "blocked":
         try:
-            github_client.post_pr_comment(pr, _comment_body(final_result, marker=comment_marker))
+            ctx.client.post_pr_comment(ctx.pr, _comment_body(final_result, marker=ctx.comment_marker))
             comment_posted = True
         except PRFeedbackGitHubError as exc:
             warnings.append(redact_feedback_text(str(exc)))
-    final_result = replace(final_result, comment_posted=comment_posted, warnings=warnings)
+    return replace(final_result, comment_posted=comment_posted, warnings=warnings)
+
+
+def _finalize_feedback_phase(ctx: PRFeedbackWorkflowContext, result: PRFeedbackResult) -> PRFeedbackResult:
     manifest_written = _write_manifest(
-        output_path=artifact_paths["ci_feedback_manifest"],
-        result=final_result,
-        source_auto_pr_manifest_path=manifest_path,
+        output_path=ctx.artifact_paths["ci_feedback_manifest"],
+        result=result,
+        source_auto_pr_manifest_path=ctx.manifest_path,
         artifacts={
-            "ci_status": ci_status_path,
-            "review_feedback": review_feedback_path,
-            "ci_feedback_report": report_path,
-            "followup_task": followup_task_path,
-            "pr_update_plan": update_plan_path,
-            "feedback_workflow": workflow_path,
-            "attempt_report": attempt_report_path,
-            "attempt_patch": patch_path,
+            "ci_status": result.ci_status_path,
+            "review_feedback": result.review_feedback_path,
+            "ci_feedback_report": result.ci_feedback_report_path,
+            "followup_task": result.followup_task_path,
+            "pr_update_plan": result.pr_update_plan_path,
+            "feedback_workflow": result.feedback_workflow_path,
+            **ctx.attempt_artifacts,
         },
-        latest_attempt_id=attempt.attempt_id,
+        latest_attempt_id=result.followup_attempt.attempt_id if isinstance(result.followup_attempt, FollowupAttemptRef) else None,
         overwrite=True,
     )
-    return replace(final_result, ci_feedback_manifest_path=manifest_written)
+    return replace(result, ci_feedback_manifest_path=manifest_written)
+
+
+def run_pr_feedback_loop(
+    *,
+    run_dir: str | Path,
+    auto_pr_manifest_path: str | Path | None = None,
+    dry_run: bool = True,
+    execute: bool = False,
+    wait_ci: bool = False,
+    include_logs: bool = True,
+    include_success_logs: bool = False,
+    allow_run_agent: bool = False,
+    allow_push_update: bool = False,
+    allow_comment: bool = False,
+    max_feedback_items: int = 20,
+    max_log_bytes: int = 200_000,
+    max_followup_rounds: int = 1,
+    poll_interval_seconds: int = 30,
+    timeout_seconds: int = 900,
+    token_env: str = "GITHUB_TOKEN",
+    repo_slug: str | None = None,
+    pull_number: int | None = None,
+    head_branch: str | None = None,
+    feedback_action_template: bool = True,
+    comment_marker: str | None = None,
+    overwrite: bool = False,
+    github_client: PRFeedbackGitHubClientProtocol | None = None,
+) -> PRFeedbackResult:
+    ctx = _prepare_feedback_phase(
+        run_dir=run_dir,
+        auto_pr_manifest_path=auto_pr_manifest_path,
+        dry_run=dry_run,
+        execute=execute,
+        wait_ci=wait_ci,
+        include_logs=include_logs,
+        include_success_logs=include_success_logs,
+        allow_run_agent=allow_run_agent,
+        allow_push_update=allow_push_update,
+        allow_comment=allow_comment,
+        max_feedback_items=max_feedback_items,
+        max_log_bytes=max_log_bytes,
+        max_followup_rounds=max_followup_rounds,
+        poll_interval_seconds=poll_interval_seconds,
+        timeout_seconds=timeout_seconds,
+        token_env=token_env,
+        repo_slug=repo_slug,
+        pull_number=pull_number,
+        head_branch=head_branch,
+        feedback_action_template=feedback_action_template,
+        comment_marker=comment_marker,
+        overwrite=overwrite,
+        github_client=github_client,
+    )
+    if isinstance(ctx, PRFeedbackResult):
+        return ctx
+    collection = _collect_feedback_phase(ctx)
+    result = _persist_feedback_phase(ctx, collection)
+    if not execute or result.status in {"no_feedback", "blocked"}:
+        return _finalize_feedback_phase(ctx, result)
+    return _finalize_feedback_phase(ctx, _execute_feedback_phase(ctx, result))

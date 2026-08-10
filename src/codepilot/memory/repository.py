@@ -14,6 +14,7 @@ from codepilot.memory.models import (
     ProjectMemoryRecord,
     TurnMemoryCheckpoint,
 )
+from codepilot.memory.query import normalize_memory_query
 from codepilot.memory.policy import validate_memory_content
 from codepilot.session.database import SessionDatabase
 from codepilot.session.ids import now_iso
@@ -174,8 +175,6 @@ class MemoryRepository:
         return self.get(memory_id)
 
     def search(self, project_id: str, query: MemoryQuery) -> list[MemorySearchResult]:
-        from codepilot.memory.retrieval import normalize_memory_query
-
         normalized = normalize_memory_query(query)
         clauses = ["project_id = ?", "status = 'active'"]
         parameters: list[Any] = [project_id]

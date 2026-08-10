@@ -2,7 +2,7 @@ import pytest
 
 from codepilot.llm.tool_schema import to_provider_tool_name
 from codepilot.llm.types import ChatMessage, ChatMessagePart, RichChatMessage
-from codepilot.session.provider_messages import to_provider_messages
+from codepilot.llm.provider_messages import to_provider_messages
 
 
 def test_provider_serializer_replays_native_assistant_tool_call_and_tool_result() -> None:

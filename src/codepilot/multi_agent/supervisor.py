@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from codepilot.common.patches import extract_paths_from_patch
 from codepilot.multi_agent.models import AgentHandle, AgentStatus, SpawnContract
@@ -14,16 +14,27 @@ from codepilot.multi_agent.profiles import get_agent_profile
 from codepilot.multi_agent.workspace import AgentWorkspace, create_agent_worktree, persist_agent_patch
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.repo.worktree import remove_issue_worktree
-from codepilot.router.actions import ToolAction
+from codepilot.tools.actions import ToolAction
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
 from codepilot.session.models import BranchConfirmationRequired, SessionRecord
 from codepilot.session.service import SessionService
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tools.base import ToolResult
 from codepilot.tools.edit_tools import apply_patch as apply_patch_tool
 
-ChildRuntimeFactory = Callable[[str], Any]
+if TYPE_CHECKING:
+    from codepilot.agent.loop import AgentRunResult
+    from codepilot.session.models import TurnSubmission
+    from codepilot.session.runtime import TurnExecutionResult
+
+class ChildRuntime(Protocol):
+    def submit_user_message(self, session_id: str, text: str, *, confirmed_branch: str | None | object = None) -> TurnSubmission | BranchConfirmationRequired: ...
+
+    def run_turn(self, turn_id: str, attempt_id: str, cancellation_token: Any | None = None) -> TurnExecutionResult: ...
+
+
+ChildRuntimeFactory = Callable[[str], ChildRuntime]
 AgentEventSink = Callable[[dict[str, object]], None]
 
 
@@ -94,7 +105,7 @@ class AgentSupervisor:
         config: AgentSupervisorConfig | None = None,
     ) -> None:
         self.database = database
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
         self.service = SessionService(database)
         self.artifacts = ArtifactStore(database)
         self.child_runtime_factory = child_runtime_factory
@@ -106,7 +117,7 @@ class AgentSupervisor:
     def spawn(self, *, context: Any, contract: SpawnContract) -> dict[str, object]:
         with self._lock:
             parent = self._assert_primary_parent(context.parent_session_id)
-            parent_turn = self.store.get_turn(context.parent_turn_id)
+            parent_turn = self.store.turns.get_turn(context.parent_turn_id)
             if parent_turn.session_id != parent.session_id:
                 raise ValueError("parent turn does not belong to parent session")
             parent_depth = int(parent.metadata.get("agent_depth", 0))
@@ -212,12 +223,6 @@ class AgentSupervisor:
         handle = running.handle
         try:
             runtime = self.child_runtime_factory(child_session_id)
-            configure_profile = getattr(runtime, "configure_agent_profile", None)
-            if callable(configure_profile):
-                configure_profile(
-                    get_agent_profile(handle.agent_type),
-                    write_scope=handle.write_scope,
-                )
             if cancel_event.is_set():
                 self._set_terminal(child_session_id, handle, "cancelled", "cancelled before start")
                 return
@@ -245,18 +250,19 @@ class AgentSupervisor:
             status: AgentStatus = "cancelled" if cancel_event.is_set() or execution.result.status == "cancelled" else (
                 "completed" if execution.result.status in {"success", "message_complete"} else "failed"
             )
-            handle.error = execution.result.error
-            outcome = getattr(execution.result, "outcome", None)
-            evidence = getattr(outcome, "evidence", None)
+            result: AgentRunResult = execution.result
+            handle.error = result.error
+            outcome = result.outcome
+            evidence = outcome.evidence
             status_metadata: dict[str, object] = {
-                "result": execution.result.summary,
-                "result_status": execution.result.status,
-                "completion_kind": getattr(outcome, "completion_kind", None),
-                "delivery_kind": getattr(outcome, "delivery_kind", None),
-                "tests": getattr(outcome, "tests", None),
-                "test_status": getattr(outcome, "last_test_status", None),
-                "diff_checked": bool(getattr(evidence, "diff_checked", False)),
-                "missing_evidence": list(getattr(evidence, "missing", ()) or ()),
+                "result": result.summary,
+                "result_status": result.status,
+                "completion_kind": outcome.completion_kind,
+                "delivery_kind": outcome.delivery_kind,
+                "tests": outcome.tests,
+                "test_status": outcome.last_test_status,
+                "diff_checked": evidence.diff_checked,
+                "missing_evidence": list(evidence.missing),
             }
             changed_files: list[str] = []
             # A writable General owns an isolated worktree. Audit its final diff
@@ -349,10 +355,10 @@ class AgentSupervisor:
         )
 
     def _set_status(self, session_id: str, status: AgentStatus, **extra: object) -> None:
-        session = self.store.get_session(session_id)
+        session = self.store.sessions.get_session(session_id)
         metadata = dict(session.metadata)
         metadata.update({"agent_status": status, **extra})
-        self.store.update_session(session_id, metadata=metadata)
+        self.store.sessions.update_session(session_id, metadata=metadata)
 
     def _active_children(self, parent_session_id: str) -> list[SessionRecord]:
         # A child without a local worker handle is a recovery candidate, not an
@@ -360,7 +366,7 @@ class AgentSupervisor:
         # forever on a stale SQLite ``running`` turn.
         return [
             child
-            for child in self.store.list_child_sessions(parent_session_id)
+            for child in self.store.sessions.list_children(parent_session_id)
             if child.session_id in self._running
         ]
 
@@ -373,13 +379,13 @@ class AgentSupervisor:
 
     def _assert_owned_child(self, parent_session_id: str, child_session_id: str) -> SessionRecord:
         self._assert_primary_parent(parent_session_id)
-        child = self.store.get_session(child_session_id)
+        child = self.store.sessions.get_session(child_session_id)
         if child.parent_session_id != parent_session_id:
             raise PermissionError("child agent does not belong to parent session")
         return child
 
     def _assert_primary_parent(self, parent_session_id: str) -> SessionRecord:
-        parent = self.store.get_session(parent_session_id)
+        parent = self.store.sessions.get_session(parent_session_id)
         if parent.parent_session_id is not None or parent.metadata.get("agent_type") is not None:
             raise PermissionError("only the Primary session may control child agents")
         return parent
@@ -411,11 +417,11 @@ class AgentSupervisor:
 
     def list_agents(self, parent_session_id: str) -> list[dict[str, object]]:
         self._assert_primary_parent(parent_session_id)
-        return [self.snapshot(child.session_id) for child in self.store.list_child_sessions(parent_session_id)]
+        return [self.snapshot(child.session_id) for child in self.store.sessions.list_children(parent_session_id)]
 
     def snapshot(self, child_session_id: str) -> dict[str, object]:
-        session = self.store.get_session(child_session_id)
-        turns = self.store.list_turns(child_session_id)
+        session = self.store.sessions.get_session(child_session_id)
+        turns = self.store.turns.list_turns(child_session_id)
         latest = turns[-1] if turns else None
         recorded_status = session.metadata.get("agent_status")
         if recorded_status in {"failed", "cancelled", "completed"}:
@@ -435,11 +441,11 @@ class AgentSupervisor:
         else:
             status = "failed"
         if status == "recovery_required" and recorded_status != status:
-            self.store.update_session(
+            self.store.sessions.update_session(
                 child_session_id,
                 metadata={**session.metadata, "agent_status": status},
             )
-            session = self.store.get_session(child_session_id)
+            session = self.store.sessions.get_session(child_session_id)
         artifact_id = session.metadata.get("patch_artifact_id")
         # ``execution.result.summary`` is the authoritative semantic result of a
         # child run. For structured ``codepilot_finish`` it contains the verified
@@ -480,11 +486,10 @@ class AgentSupervisor:
 
         Assistant message rows are created with ``content=""`` and the actual model
         output is persisted in ``message_parts`` (especially for streaming responses).
-        Reading only ``MessageRecord.content`` therefore turns a successful child run
-        into ``result=""``. Reconstruct text from replayable text parts first and
-        fall back to the legacy row content only when needed.
+        Reconstruct text from replayable text parts so the child result uses the
+        canonical message representation.
         """
-        for message, parts in reversed(self.store.list_messages_with_parts(child_session_id)):
+        for message, parts in reversed(self.store.messages.list_messages_with_parts(child_session_id)):
             if message.role != "assistant" or message.status != "completed":
                 continue
 
@@ -510,15 +515,6 @@ class AgentSupervisor:
             if rendered:
                 return rendered
 
-            if isinstance(message.content, str):
-                legacy = message.content.strip()
-            elif message.content is None:
-                legacy = ""
-            else:
-                legacy = str(message.content).strip()
-            if legacy:
-                return legacy
-
         return None
 
     def inspect_agent_patch(self, parent_session_id: str, child_session_id: str) -> dict[str, object]:
@@ -529,10 +525,10 @@ class AgentSupervisor:
             raise ValueError("child agent has no patch artifact")
         patch = self.artifacts.read_text(artifact_id)
         preview = patch[:12_000]
-        self.store.update_session(
+        self.store.sessions.update_session(
             child_session_id,
             metadata={
-                **self.store.get_session(child_session_id).metadata,
+                **self.store.sessions.get_session(child_session_id).metadata,
                 "patch_inspected_artifact_id": artifact_id,
             },
         )
@@ -581,8 +577,8 @@ class AgentSupervisor:
             return ToolResult(success=False, error=policy.reason, metadata=policy.metadata)
         result = apply_patch_tool(repo=parent_repo, patch=patch)
         if result.success:
-            session = self.store.get_session(child_session_id)
-            self.store.update_session(
+            session = self.store.sessions.get_session(child_session_id)
+            self.store.sessions.update_session(
                 child_session_id,
                 metadata={**session.metadata, "patch_applied_artifact_id": artifact_id},
             )
@@ -605,7 +601,7 @@ class AgentSupervisor:
         else:
             snapshot = self.snapshot(child_session_id)
             if snapshot["status"] in {"queued", "running", "waiting_permission", "recovery_required"}:
-                child = self.store.get_session(child_session_id)
+                child = self.store.sessions.get_session(child_session_id)
                 self._set_status(child_session_id, "cancelled", error="cancelled by Primary")
                 self._emit(
                     "agent_cancelled",
@@ -616,7 +612,7 @@ class AgentSupervisor:
                     parent_turn_id=child.forked_from_turn_id,
                 )
         if discard_workspace:
-            session = self.store.get_session(child_session_id)
+            session = self.store.sessions.get_session(child_session_id)
             workspace = session.metadata.get("workspace_path")
             original_repo = session.metadata.get("source_project_path")
             branch = session.metadata.get("workspace_branch")
@@ -628,7 +624,7 @@ class AgentSupervisor:
         """Cancel only children controlled by the Primary session."""
 
         self._assert_primary_parent(parent_session_id)
-        return [self.close(parent_session_id, child.session_id) for child in self.store.list_child_sessions(parent_session_id) if self.snapshot(child.session_id)["status"] in {"queued", "running", "recovery_required"}]
+        return [self.close(parent_session_id, child.session_id) for child in self.store.sessions.list_children(parent_session_id) if self.snapshot(child.session_id)["status"] in {"queued", "running", "recovery_required"}]
 
     def _emit(self, event_type: str, **payload: object) -> None:
         event = {"type": event_type, **payload}
@@ -638,8 +634,8 @@ class AgentSupervisor:
             if not isinstance(parent_turn_id, str):
                 child_session_id = payload.get("child_session_id")
                 if isinstance(child_session_id, str):
-                    parent_turn_id = self.store.get_session(child_session_id).forked_from_turn_id
-            self.store.append_event(
+                    parent_turn_id = self.store.sessions.get_session(child_session_id).forked_from_turn_id
+            self.store.events.append_event(
                 session_id=parent_session_id,
                 event_type=event_type,
                 payload=event,

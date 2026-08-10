@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, Protocol
+
+from codepilot.trace.events import TraceEvent
 
 
 class TraceRecorder(Protocol):
     """AgentLoop/ToolRouter 共同使用的结构化 Trace 最小协议。"""
 
     run_id: str
-    trace_path: Any
+    trace_path: Path | None
+
+    @property
+    def next_step(self) -> int: ...
+
+    def record(self, event: TraceEvent) -> TraceEvent: ...
 
     def record_run_start(self, task: str | None = None, metadata: dict | None = None) -> Any: ...
     def record_run_end(self, success: bool, summary: str, metadata: dict | None = None) -> Any: ...

@@ -6,19 +6,19 @@ from pathlib import Path
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
 from codepilot.session.paths import resolve_session_paths
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
-def _artifact_store(tmp_path: Path) -> tuple[ArtifactStore, SessionStore]:
+def _artifact_store(tmp_path: Path) -> tuple[ArtifactStore, SessionRepositories]:
     paths = resolve_session_paths(tmp_path)
     database = SessionDatabase(paths.database_path)
     database.initialize()
-    return ArtifactStore(database, paths), SessionStore(database, paths)
+    return ArtifactStore(database, paths), SessionRepositories(database)
 
 
 def test_small_text_stays_inline_and_can_be_read(tmp_path: Path) -> None:
     artifacts, store = _artifact_store(tmp_path)
-    session = store.create_session(
+    session = store.sessions.create_session(
         project_path=tmp_path / "repo",
         provider="openai",
         current_model="gpt-4.1",
@@ -34,7 +34,7 @@ def test_small_text_stays_inline_and_can_be_read(tmp_path: Path) -> None:
 
 def test_small_bytes_stay_inline_and_can_be_read(tmp_path: Path) -> None:
     artifacts, store = _artifact_store(tmp_path)
-    session = store.create_session(
+    session = store.sessions.create_session(
         project_path=tmp_path / "repo",
         provider="openai",
         current_model="gpt-4.1",
@@ -49,7 +49,7 @@ def test_small_bytes_stay_inline_and_can_be_read(tmp_path: Path) -> None:
 
 def test_large_text_writes_file_and_preserves_hash(tmp_path: Path) -> None:
     artifacts, store = _artifact_store(tmp_path)
-    session = store.create_session(
+    session = store.sessions.create_session(
         project_path=tmp_path / "repo",
         provider="openai",
         current_model="gpt-4.1",
@@ -67,13 +67,13 @@ def test_large_text_writes_file_and_preserves_hash(tmp_path: Path) -> None:
 
 def test_session_directories_are_isolated_and_archive_keeps_artifacts(tmp_path: Path) -> None:
     artifacts, store = _artifact_store(tmp_path)
-    first = store.create_session(
+    first = store.sessions.create_session(
         project_path=tmp_path / "repo-a",
         provider="openai",
         current_model="gpt-4.1",
         permission_mode="manual",
     )
-    second = store.create_session(
+    second = store.sessions.create_session(
         project_path=tmp_path / "repo-b",
         provider="openai",
         current_model="gpt-4.1",
@@ -84,5 +84,6 @@ def test_session_directories_are_isolated_and_archive_keeps_artifacts(tmp_path: 
 
     assert Path(first_artifact.storage_path).parent.parent.name == first.session_id
     assert Path(second_artifact.storage_path).parent.parent.name == second.session_id
-    store.archive_session(first.session_id)
+    store.sessions.archive_session(first.session_id)
     assert Path(first_artifact.storage_path).exists()
+

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.permissions import PermissionResponse
-from codepilot.router import ToolAction
+from codepilot.tools.actions import ToolAction
 from codepilot.router.router import ToolRouter
 from codepilot.trace.logger import TraceLogger
 from codepilot.tui_agent.permission_broker import BlockingTUIBroker

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -68,8 +69,11 @@ class SessionRepository:
             )
         return self.get_session(session_id)
 
-    def get_session(self, session_id: str) -> SessionRecord:
-        with self.database.transaction() as connection:
+    def get_session(self, session_id: str, *, connection: sqlite3.Connection | None = None) -> SessionRecord:
+        if connection is None:
+            with self.database.transaction() as transaction:
+                row = transaction.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
+        else:
             row = connection.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
         if row is None:
             raise LookupError(session_id)
@@ -98,9 +102,9 @@ class SessionRepository:
             rows = connection.execute(query, params).fetchall()
         return [session_summary_from_row(row) for row in rows]
 
-    def update_session(self, session_id: str, **changes: Any) -> SessionRecord:
+    def update_session(self, session_id: str, *, connection: sqlite3.Connection | None = None, **changes: Any) -> SessionRecord:
         if not changes:
-            return self.get_session(session_id)
+            return self.get_session(session_id, connection=connection)
         allowed = {
             "title",
             "provider",
@@ -130,9 +134,12 @@ class SessionRepository:
             columns.append(f"{column} = ?")
             values.append(value)
         values.append(session_id)
-        with self.database.transaction() as connection:
+        if connection is None:
+            with self.database.transaction() as transaction:
+                transaction.execute(f"UPDATE sessions SET {', '.join(columns)} WHERE session_id = ?", values)
+        else:
             connection.execute(f"UPDATE sessions SET {', '.join(columns)} WHERE session_id = ?", values)
-        return self.get_session(session_id)
+        return self.get_session(session_id, connection=connection)
 
     def archive_session(self, session_id: str) -> SessionRecord:
         return self.update_session(session_id, status="archived")

@@ -897,6 +897,106 @@ def _finalize_post_pr_artifacts(
     )
 
 
+def _execute_post_pr_rounds(
+    runtime: PostPRRuntime,
+    *,
+    max_rounds: int,
+    execute: bool,
+    dry_run: bool,
+    resume: bool,
+    stop_on_repeated_feedback: bool,
+    github_client: PRFeedbackGitHubClientProtocol | None,
+) -> bool:
+    """运行 feedback 收集、审批和副作用阶段；返回是否写入 action workflow。"""
+
+    if _is_hard_terminal_state(runtime.state):
+        _restore_existing_artifact_paths(runtime)
+        return False
+    pending_round = _find_pending_approval_round(runtime.state) if resume else None
+    if pending_round is not None and not (execute and not dry_run):
+        _restore_existing_artifact_paths(runtime)
+        return True
+
+    next_round_index = pending_round.round_index if pending_round is not None else len(runtime.state.rounds) + 1
+    for round_index in range(next_round_index, max_rounds + 1):
+        collected = _collect_round(
+            runtime,
+            round_index=round_index,
+            pending_round=pending_round,
+            github_client=github_client,
+        )
+        collect_terminal = _collect_terminal_reason(
+            collected,
+            stop_on_repeated_feedback=stop_on_repeated_feedback,
+        )
+        if collect_terminal is not None:
+            status, reason, new_blockers = collect_terminal
+            runtime.state = mark_terminal(
+                runtime.state,
+                status=status,
+                terminal_reason=reason,
+                blockers=list(runtime.state.blockers) + new_blockers,
+            )
+            break
+
+        approval = _prepare_approval(runtime, collected)
+        if approval is None or approval.decision is None or approval.decision.status != "approved":
+            break
+        executed = _execute_round(runtime, collected=collected, approval=approval, github_client=github_client)
+        if executed is None:
+            runtime.state = mark_terminal(
+                runtime.state,
+                status="awaiting_approval",
+                terminal_reason="awaiting_approval",
+                blockers=list(runtime.state.blockers),
+            )
+            break
+        if runtime.state.status == "blocked":
+            break
+        if executed.round_ref.push_update_executed:
+            if round_index >= max_rounds:
+                runtime.state = mark_terminal(
+                    runtime.state,
+                    status="max_rounds_reached",
+                    terminal_reason="max_rounds_reached",
+                    blockers=list(runtime.state.blockers),
+                )
+                break
+            pending_round = None
+            continue
+        if executed.round_ref.commit_created:
+            runtime.state = mark_terminal(
+                runtime.state,
+                status="patch_ready",
+                terminal_reason="awaiting_approval",
+                blockers=list(runtime.state.blockers),
+            )
+            break
+        if executed.round_ref.agent_ran:
+            runtime.state = mark_terminal(
+                runtime.state,
+                status="agent_ran",
+                terminal_reason="awaiting_approval",
+                blockers=list(runtime.state.blockers),
+            )
+            break
+        runtime.state = mark_terminal(
+            runtime.state,
+            status="awaiting_approval",
+            terminal_reason="awaiting_approval",
+            blockers=list(runtime.state.blockers),
+        )
+        break
+    if runtime.state.terminal_reason == "none":
+        runtime.state = mark_terminal(
+            runtime.state,
+            status="awaiting_approval",
+            terminal_reason="awaiting_approval",
+            blockers=list(runtime.state.blockers),
+        )
+    return True
+
+
 def run_post_pr_automation(
     *,
     run_dir: str | Path,
@@ -1019,10 +1119,20 @@ def run_post_pr_automation(
             _restore_existing_artifact_paths(runtime)
             return _finalize_post_pr_artifacts(runtime, post_pr_action_template=post_pr_action_template, write_workflow=False)
 
-        pending_round = _find_pending_approval_round(runtime.state) if resume else None
-        if pending_round is not None and not (execute and not dry_run):
-            _restore_existing_artifact_paths(runtime)
-            return _finalize_post_pr_artifacts(runtime, post_pr_action_template=post_pr_action_template)
+        write_workflow = _execute_post_pr_rounds(
+            runtime,
+            max_rounds=max_rounds,
+            execute=execute,
+            dry_run=dry_run,
+            resume=resume,
+            stop_on_repeated_feedback=stop_on_repeated_feedback,
+            github_client=github_client,
+        )
+        return _finalize_post_pr_artifacts(
+            runtime,
+            post_pr_action_template=post_pr_action_template,
+            write_workflow=write_workflow,
+        )
 
         next_round_index = pending_round.round_index if pending_round is not None else len(runtime.state.rounds) + 1
         for round_index in range(next_round_index, max_rounds + 1):

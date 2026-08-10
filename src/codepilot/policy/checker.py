@@ -3,15 +3,16 @@ from __future__ import annotations
 import fnmatch
 import re
 from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
 from typing import Any, cast
 
+from codepilot.common.patches import extract_paths_from_patch
 from codepilot.policy.config import PolicyConfig
 from codepilot.policy.defaults import default_policy_config
 from codepilot.policy.models import PolicyContext, PolicyDecision, PolicyDecisionValue
-from codepilot.router.actions import ToolAction
+from codepilot.tools.actions import ToolAction
 from codepilot.tools.base import DefaultPermission, ToolSideEffect, ToolSpec
-from codepilot.common.patches import extract_paths_from_patch
 from codepilot.tools.registry import find_tool_spec
 
 COMMAND_TOOLS = {"run_shell", "run_tests"}
@@ -31,7 +32,7 @@ class PolicyChecker:
         self.extra_tool_specs = dict(extra_tool_specs or {})
 
     @classmethod
-    def default(cls, extra_tool_specs: Mapping[str, ToolSpec] | None = None) -> "PolicyChecker":
+    def default(cls, extra_tool_specs: Mapping[str, ToolSpec] | None = None) -> PolicyChecker:
         return cls(default_policy_config(), extra_tool_specs=extra_tool_specs)
 
     def _find_tool_spec(self, name: str) -> ToolSpec | None:
@@ -200,8 +201,8 @@ class PolicyChecker:
         )
 
     @staticmethod
-    def _enum_value(value: Any) -> str:
-        return str(getattr(value, "value", value))
+    def _enum_value(value: Enum | str) -> str:
+        return str(value.value if isinstance(value, Enum) else value)
 
     def _base_metadata(self, spec: ToolSpec, context: PolicyContext) -> dict[str, Any]:
         metadata = {

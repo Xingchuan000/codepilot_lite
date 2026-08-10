@@ -1,3 +1,6 @@
+import pytest
+
+import codepilot.agent.tool_output_pruner as tool_output_pruner
 from codepilot.agent.tool_output_pruner import ToolOutputPruner
 from codepilot.router.actions import ToolRouteResult
 from codepilot.session.context_budget import estimate_tokens
@@ -44,6 +47,16 @@ def test_error_only_result_reports_real_truncation() -> None:
     assert pruned.length_truncated is True
     assert estimate_tokens(pruned.content) <= 256
     assert route.result.error == error
+
+
+def test_pruner_does_not_hide_programmer_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(_route: ToolRouteResult, _budget: int) -> tuple[str, dict[str, object]]:
+        raise RuntimeError("broken pruner")
+
+    monkeypatch.setattr(tool_output_pruner, "_tests", broken)
+
+    with pytest.raises(RuntimeError, match="broken pruner"):
+        ToolOutputPruner().prune(_route("run_tests", ToolResult(success=True)), token_budget=256)
 
 
 def test_small_observation_reports_semantic_transformation() -> None:

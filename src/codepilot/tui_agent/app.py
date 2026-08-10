@@ -375,7 +375,7 @@ def create_tui_agent_app(
                 )
                 return
             if plan.resumable_attempt_ids:
-                attempt = self._recovery_service.store.get_attempt(plan.resumable_attempt_ids[0])
+                attempt = self._recovery_service.store.attempts.get_attempt(plan.resumable_attempt_ids[0])
                 self.runner.resume_turn(attempt.turn_id, attempt.attempt_id)
                 self._reducer.view = replace(self._reducer.view, status="running")
                 return
@@ -568,7 +568,7 @@ def create_tui_agent_app(
                 if active_session_id is None:
                     return False
                 try:
-                    session = self._session_controller.store.get_session(event.session_id)
+                    session = self._session_controller.store.sessions.get_session(event.session_id)
                 except LookupError:
                     return False
                 return session.parent_session_id == active_session_id
@@ -759,3 +759,4 @@ def _format_candidates(candidates) -> str:
         f"{candidate.candidate_id} [{candidate.kind}] {candidate.canonical_key}: {candidate.content.get('text', candidate.content)}"
         for candidate in candidates
     )
+

@@ -165,7 +165,7 @@ class RecoveryModal(ModalScreen[str]):
     def __init__(self, tool_call_id: str, *, recovery_service: RecoveryService) -> None:
         super().__init__()
         self.tool_call_id = tool_call_id
-        self.call = recovery_service.store.get_tool_call(tool_call_id)
+        self.call = recovery_service.store.tool_executions.get_tool_call(tool_call_id)
         self.result = recovery_service.reconcile_tool_call(tool_call_id)
 
     def compose(self) -> ComposeResult:
@@ -179,3 +179,4 @@ class RecoveryModal(ModalScreen[str]):
 
     def action_abort(self) -> None:
         self.dismiss("abort")
+

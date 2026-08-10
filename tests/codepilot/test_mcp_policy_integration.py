@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
-from codepilot.router.actions import ToolAction
+from codepilot.tools.actions import ToolAction
 
 
 def test_policy_checker_accepts_mcp_extra_specs() -> None:

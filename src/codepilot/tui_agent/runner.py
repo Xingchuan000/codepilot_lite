@@ -6,11 +6,13 @@ from pathlib import Path
 from typing import Literal
 
 from codepilot.agent.runner import build_codepilot_llm, resolve_codepilot_model_identity
+from codepilot.agent.boundary import RuntimeToolContext
+from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.multi_agent.profiles import get_agent_profile
+from codepilot.multi_agent.boundary import MultiAgentBoundaryResolver
 from codepilot.multi_agent.runtime_tools import build_agent_control_registry
 from codepilot.multi_agent.supervisor import AgentSupervisor
 from codepilot.permissions import PermissionResponse
-from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError
@@ -20,7 +22,7 @@ from codepilot.session.runtime import SessionRuntime
 from codepilot.trace.events import TraceEvent
 from codepilot.tui_agent.event_stream import MemoryEventStream, trace_event_to_tui_event
 from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent
-from codepilot.tui_agent.permission_broker import AutoApproveLocalWriteBroker, PermissionBroker, NonInteractiveBroker
+from codepilot.tui_agent.permission_broker import AutoApproveLocalWriteBroker, NonInteractiveBroker, PermissionBroker
 from codepilot.tui_agent.session_controller import SessionController, now_iso
 
 
@@ -139,7 +141,7 @@ class TUIAgentRunner:
         return self._build_runtime_for_session(self.active_session_id, supervisor=self.agent_supervisor)
 
     def _build_runtime_for_session(self, session_id: str, *, supervisor: AgentSupervisor | None) -> SessionRuntime:
-        session = self.session_controller.store.get_session(session_id)
+        session = self.session_controller.store.sessions.get_session(session_id)
         opened = self.session_controller.service.open_session(session_id)
         raw_agent_type = session.metadata.get("agent_type")
         profile = get_agent_profile(raw_agent_type) if isinstance(raw_agent_type, str) else None
@@ -174,7 +176,7 @@ class TUIAgentRunner:
 
         runtime_tool_registry_factory = None
         if profile is None and supervisor is not None:
-            def runtime_tool_registry_factory(context):
+            def runtime_tool_registry_factory(context: RuntimeToolContext):
                 return build_agent_control_registry(supervisor, context)
 
         built_llm = build_codepilot_llm(
@@ -193,9 +195,8 @@ class TUIAgentRunner:
             router_factory,
             max_steps=self.config.max_steps,
             trace_hook=lambda event: self._publish_trace_event_for_session(session_id, event),
-            capabilities=getattr(built_llm, "capabilities", None),
-            agent_profile=profile,
-            write_scope=write_scope,
+            capabilities=built_llm.capabilities,
+            boundary_resolver=MultiAgentBoundaryResolver(profile, write_scope) if profile is not None else None,
             runtime_tool_registry_factory=runtime_tool_registry_factory,
         )
 
@@ -229,14 +230,14 @@ class TUIAgentRunner:
         return broker
 
     def _broker_for_request(self, request_id: str) -> SessionPermissionBroker:
-        record = self.session_controller.store.get_permission_request(request_id)
+        record = self.session_controller.store.permissions.get_permission_request(request_id)
         if record.session_id is None:
             return self._session_broker()
         if self.active_session_id is not None and record.session_id != self.active_session_id:
-            child = self.session_controller.store.get_session(record.session_id)
+            child = self.session_controller.store.sessions.get_session(record.session_id)
             if child.parent_session_id != self.active_session_id:
                 raise PermissionError("permission request does not belong to the active session tree")
-        session = self.session_controller.store.get_session(record.session_id)
+        session = self.session_controller.store.sessions.get_session(record.session_id)
         return self._get_session_broker(record.session_id, mode=session.permission_mode)
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
@@ -440,3 +441,4 @@ class TUIAgentRunner:
     def is_running(self) -> bool:
         with self._lock:
             return bool(self._thread and self._thread.is_alive())
+

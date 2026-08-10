@@ -8,15 +8,17 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Protocol
 from uuid import uuid4
 
 from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop, TurnExecutionContext
+from codepilot.agent.boundary import AgentBoundaryResolver, RuntimeToolContext, RuntimeToolRegistryFactory
+from codepilot.agent.tool_observation_budget import ToolObservationBudgetPolicy
+from codepilot.common.best_effort import run_best_effort
 from codepilot.llm.types import CodePilotLLMClient
 from codepilot.memory.candidates import MemoryCandidateExtractor
 from codepilot.memory.summarizer import LLMSummaryGenerator
 from codepilot.memory.turn_window import TurnContextWindow
-from codepilot.agent.tool_observation_budget import ToolObservationBudgetPolicy
 from codepilot.router import ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError
 from codepilot.session.compaction import CompactionService
@@ -24,13 +26,17 @@ from codepilot.session.context import ContextAssembler
 from codepilot.session.context_recovery import SessionContextRecoveryCoordinator
 from codepilot.session.database import SessionDatabase
 from codepilot.session.git_context import read_git_context
-from codepilot.session.model_capabilities import ModelCapabilities, resolve_model_context_profile
+from codepilot.llm.capabilities import ModelCapabilities
+from codepilot.session.model_context import resolve_model_context_profile
 from codepilot.session.models import BranchConfirmationRequired, TurnRecord, TurnSubmission
 from codepilot.session.permission import PermissionRequestContext
 from codepilot.session.service import SessionService
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.session.tool_lifecycle import SQLiteToolLifecycleObserver
 from codepilot.session.trace_recorder import SessionTraceRecorder
+from codepilot.tools.base import ToolSpec
+from codepilot.trace.events import TraceEvent
+from codepilot.trace.protocol import TraceRecorder
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +45,10 @@ _LEASE_RETRY_INTERVAL_SECONDS = 1
 _LEASE_MAX_BUSY_RETRIES = 5
 _UNCONFIRMED_BRANCH = object()
 BLOCKING_TURN_STATUSES = {"queued", "running", "waiting_permission", "recovery_required"}
+
+
+class CancellationToken(Protocol):
+    def is_cancelled(self) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -57,16 +67,15 @@ class SessionRuntime:
         self,
         database: SessionDatabase,
         llm: CodePilotLLMClient,
-        router_factory: Callable[[Any], ToolRouter],
+        router_factory: Callable[[TraceRecorder], ToolRouter],
         max_steps: int = 12,
-        trace_hook: Callable[[Any], None] | None = None,
+        trace_hook: Callable[[TraceEvent], None] | None = None,
         capabilities: ModelCapabilities | None = None,
-        agent_profile: Any | None = None,
-        write_scope: tuple[str, ...] = (),
-        runtime_tool_registry_factory: Callable[[Any], Any] | None = None,
+        boundary_resolver: AgentBoundaryResolver | None = None,
+        runtime_tool_registry_factory: RuntimeToolRegistryFactory | None = None,
     ) -> None:
         self.database = database
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
         self.service = SessionService(database)
         self.assembler = ContextAssembler(database, self.store)
         self.compaction_service = CompactionService(database, summarizer=LLMSummaryGenerator(llm))
@@ -76,50 +85,18 @@ class SessionRuntime:
         self.max_steps = max_steps
         self.trace_hook = trace_hook
         self.capabilities = capabilities
-        self.agent_profile = agent_profile
-        self.write_scope = tuple(write_scope)
+        self.boundary_resolver = boundary_resolver
         self.runtime_tool_registry_factory = runtime_tool_registry_factory
 
-    def configure_agent_profile(self, profile: Any, *, write_scope: tuple[str, ...] = ()) -> None:
-        """Set the immutable child boundary before the next Turn is submitted."""
-
-        self.agent_profile = profile
-        self.write_scope = tuple(write_scope)
-
-    def _configure_agent_boundary(self, router: ToolRouter) -> tuple[tuple[Any, ...], str | None]:
-        """Bind Profile visibility and write scope to both prompt and execution."""
-
-        if self.agent_profile is None:
-            visible = router.list_visible_tool_specs()
+    def _configure_agent_boundary(self, router: ToolRouter) -> tuple[tuple[ToolSpec, ...], str | None]:
+        boundary = self.boundary_resolver.resolve(router) if self.boundary_resolver is not None else None
+        visible = router.list_visible_tool_specs()
+        if boundary is not None:
+            visible = tuple(spec for spec in visible if spec.name in boundary.allowed_tool_names)
+            router.configure_allowed_tools(boundary.allowed_tool_names, write_scope=boundary.write_scope or None)
+        else:
             router.configure_allowed_tools(spec.name for spec in visible)
-            return visible, None
-
-        # Import lazily: multi_agent.supervisor depends on SessionRuntime's storage types.
-        from codepilot.multi_agent.profiles import filter_builtin_specs, filter_scout_mcp_specs
-        from codepilot.tools.base import ToolSideEffect
-        from codepilot.tools.registry import list_tool_specs
-
-        profile = self.agent_profile
-        visible = list(filter_builtin_specs(profile, list_tool_specs()))
-        external = router.external_tool_registry
-        if profile.allows_mcp and external is not None:
-            list_specs = getattr(external, "list_exposed_specs", None)
-            if not callable(list_specs):
-                list_specs = getattr(external, "list_specs", None)
-            if callable(list_specs):
-                mcp_specs = tuple(list_specs())
-                if profile.name == "scout":
-                    mcp_specs = filter_scout_mcp_specs(mcp_specs)
-                visible.extend(mcp_specs)
-
-        if profile.name == "general" and not self.write_scope:
-            visible = [spec for spec in visible if spec.side_effect != ToolSideEffect.LOCAL_WRITE]
-
-        router.configure_allowed_tools(
-            (spec.name for spec in visible),
-            write_scope=self.write_scope if profile.name == "general" else None,
-        )
-        return tuple(visible), profile.instructions
+        return visible, boundary.instructions if boundary is not None else None
 
     def submit_user_message(
         self,
@@ -139,13 +116,13 @@ class SessionRuntime:
             raise ValueError("archived session is read-only")
         if not opened.project_exists:
             raise FileNotFoundError(opened.project_path)
-        if any(turn.status in BLOCKING_TURN_STATUSES for turn in self.store.list_turns(session_id)):
+        if any(turn.status in BLOCKING_TURN_STATUSES for turn in self.store.turns.list_turns(session_id)):
             raise RuntimeError("session already has a running turn")
         branch = self.service.validate_branch_before_turn(session_id)
         branch_confirmation_provided = confirmed_branch is not _UNCONFIRMED_BRANCH
         if branch.changed and not branch_confirmation_provided:
             return BranchConfirmationRequired(session_id, branch.expected_branch, branch.actual_branch)
-        return self.store.create_turn_submission(
+        return self.store.turn_submission.create_turn_submission(
             session_id=session_id,
             text=text,
             actual_branch_reader=lambda: read_git_context(opened.project_path).branch,
@@ -153,17 +130,17 @@ class SessionRuntime:
             branch_confirmation_provided=branch_confirmation_provided,
         )
 
-    def run_turn(self, turn_id: str, attempt_id: str, cancellation_token: Any | None = None) -> TurnExecutionResult:
+    def run_turn(self, turn_id: str, attempt_id: str, cancellation_token: CancellationToken | None = None) -> TurnExecutionResult:
         """从持久化 Turn 组装上下文并执行；终态始终写回 SQLite。"""
 
-        turn = self.store.get_turn(turn_id)
-        session = self.store.get_session(turn.session_id)
+        turn = self.store.turns.get_turn(turn_id)
+        session = self.store.sessions.get_session(turn.session_id)
         opened = self.service.open_session(session.session_id)
-        attempt = self.store.get_attempt(attempt_id)
+        attempt = self.store.attempts.get_attempt(attempt_id)
         if attempt.turn_id != turn_id:
             raise ValueError("attempt does not belong to turn")
         worker_id = f"{socket.gethostname()}:{os.getpid()}:{uuid4().hex}"
-        self.store.start_turn_attempt(
+        self.store.attempts.start_turn_attempt(
             turn_id,
             attempt_id,
             worker_id=worker_id,
@@ -179,15 +156,12 @@ class SessionRuntime:
         try:
             trace = SessionTraceRecorder(self.database, session.session_id, turn_id, attempt.attempt_id, record_hook=self.trace_hook)
             router = self.router_factory(trace)
-            if hasattr(router, "policy_context"):
-                router.policy_context = router.policy_context.model_copy(update={"repo": opened.project_path})
+            router.policy_context = router.policy_context.model_copy(update={"repo": opened.project_path})
             if self.runtime_tool_registry_factory is not None:
                 if router.runtime_tool_registry is not None:
                     raise ValueError("runtime tool registry is already configured")
-                from codepilot.multi_agent.runtime_tools import AgentControlContext
-
                 router.runtime_tool_registry = self.runtime_tool_registry_factory(
-                    AgentControlContext(
+                    RuntimeToolContext(
                         parent_session_id=session.session_id,
                         parent_turn_id=turn_id,
                         parent_attempt_id=attempt.attempt_id,
@@ -195,11 +169,10 @@ class SessionRuntime:
                     )
                 )
             visible_tool_specs, agent_instructions = self._configure_agent_boundary(router)
-            if hasattr(router, "permission_request_context"):
-                router.permission_request_context = PermissionRequestContext(session.session_id, turn_id, attempt.attempt_id, None)
+            router.permission_request_context = PermissionRequestContext(session.session_id, turn_id, attempt.attempt_id, None)
             # Trace 只记录事件；业务表由稳定 ID 的 Lifecycle Observer 单独维护。
             router.lifecycle_observer = SQLiteToolLifecycleObserver(self.database, session.session_id, turn_id, attempt_id, trace)
-            user_message = self.store.get_user_message_for_turn(turn_id)
+            user_message = self.store.messages.get_user_message_for_turn(turn_id)
             if user_message is None:
                 raise LookupError(turn_id)
             profile = resolve_model_context_profile(turn.provider_snapshot, turn.model_snapshot, self.capabilities)
@@ -221,7 +194,7 @@ class SessionRuntime:
                     profile,
                 ),
             )
-            self.store.update_turn_metadata(
+            self.store.turns.update_turn_metadata(
                 turn_id,
                 {
                     "max_input_tokens": profile.max_input_tokens,
@@ -232,9 +205,9 @@ class SessionRuntime:
             )
             if profile.capability_source == "conservative_unknown_model" and not any(
                 event.event_type == "model_capability_fallback" and event.turn_id == turn_id
-                for event in self.store.list_events(session.session_id)
+                for event in self.store.events.list_events(session.session_id)
             ):
-                self.store.append_event(
+                self.store.events.append_event(
                     session_id=session.session_id,
                     event_type="model_capability_fallback",
                     payload={"provider": profile.provider, "model": profile.model, "max_input_tokens": profile.max_input_tokens},
@@ -253,8 +226,8 @@ class SessionRuntime:
                     agent_instructions=agent_instructions,
                 )
             except Exception:
-                self.store.interrupt_turn_attempt(turn_id, attempt_id, "context compaction failed", worker_id=worker_id)
-                self.store.update_turn_status(turn_id, "recovery_required")
+                self.store.attempts.interrupt_turn_attempt(turn_id, attempt_id, "context compaction failed", worker_id=worker_id)
+                self.store.turns.update_turn_status(turn_id, "recovery_required")
                 raise
             result = loop.run_turn(
                 TurnExecutionContext(
@@ -270,7 +243,7 @@ class SessionRuntime:
         except ToolExecutionUncertainError as exc:
             heartbeat_stop.set()
             heartbeat.join()
-            self.store.require_tool_recovery(
+            self.store.tool_executions.require_tool_recovery(
                 turn_id,
                 attempt_id,
                 exc.tool_call_id,
@@ -281,17 +254,14 @@ class SessionRuntime:
         except Exception as exc:
             heartbeat_stop.set()
             heartbeat.join()
-            if self.store.get_turn(turn_id).status == "running":
-                self.store.interrupt_turn_attempt(turn_id, attempt_id, str(exc), worker_id=worker_id)
+            if self.store.turns.get_turn(turn_id).status == "running":
+                self.store.attempts.interrupt_turn_attempt(turn_id, attempt_id, str(exc), worker_id=worker_id)
             raise
         heartbeat_stop.set()
         heartbeat.join()
         if result.status in {"success", "message_complete"}:
-            self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="completed", turn_status="completed", worker_id=worker_id)
-            memory_write = session.metadata.get(
-                "memory_write",
-                getattr(self.agent_profile, "memory_write", True),
-            )
+            self.store.attempts.finish_turn_attempt(turn_id, attempt_id, attempt_status="completed", turn_status="completed", worker_id=worker_id)
+            memory_write = session.metadata.get("memory_write", True)
             if memory_write is not False:
                 self._extract_memory_candidates_best_effort(
                     session_id=session.session_id,
@@ -299,10 +269,10 @@ class SessionRuntime:
                     attempt_id=attempt_id,
                 )
         elif result.status == "cancelled":
-            self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="cancelled", turn_status="cancelled", worker_id=worker_id)
+            self.store.attempts.finish_turn_attempt(turn_id, attempt_id, attempt_status="cancelled", turn_status="cancelled", worker_id=worker_id)
         else:
-            self.store.finish_turn_attempt(turn_id, attempt_id, attempt_status="failed", turn_status="failed", worker_id=worker_id)
-        return TurnExecutionResult(self.store.get_turn(turn_id), attempt_id, result)
+            self.store.attempts.finish_turn_attempt(turn_id, attempt_id, attempt_status="failed", turn_status="failed", worker_id=worker_id)
+        return TurnExecutionResult(self.store.turns.get_turn(turn_id), attempt_id, result)
 
     def _extract_memory_candidates_best_effort(
         self,
@@ -311,19 +281,22 @@ class SessionRuntime:
         turn_id: str,
         attempt_id: str,
     ) -> None:
-        try:
-            candidates = self.memory_candidates.extract(session_id, turn_id)
-        except Exception as exc:
-            logger.exception(
-                "Memory candidate extraction failed",
-                extra={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id},
-            )
+        extraction_errors: list[Exception] = []
+        candidates = run_best_effort(
+            lambda: self.memory_candidates.extract(session_id, turn_id),
+            operation_name="memory candidate extraction",
+            context={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id},
+            expected_errors=(sqlite3.Error,),
+            on_error=extraction_errors.append,
+        )
+        if candidates is None:
+            error = extraction_errors[0]
             self._append_memory_event_best_effort(
                 session_id=session_id,
                 turn_id=turn_id,
                 attempt_id=attempt_id,
                 event_type="memory_candidate_extraction_failed",
-                payload={"error": str(exc)},
+                payload={"error": str(error)},
             )
             return
         self._append_memory_event_best_effort(
@@ -346,20 +319,19 @@ class SessionRuntime:
         event_type: str,
         payload: dict[str, Any],
     ) -> None:
-        try:
-            self.store.append_event(
+        run_best_effort(
+            lambda: self.store.events.append_event(
                 session_id=session_id,
                 turn_id=turn_id,
                 attempt_id=attempt_id,
                 event_type=event_type,
                 payload=payload,
                 metadata={"source": "session_runtime"},
-            )
-        except Exception:
-            logger.exception(
-                "Memory candidate event persistence failed",
-                extra={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id, "event_type": event_type},
-            )
+            ),
+            operation_name="memory candidate event persistence",
+            context={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id, "event_type": event_type},
+            expected_errors=(sqlite3.Error,),
+        )
 
 
 def _lease_expiry() -> str:
@@ -367,7 +339,7 @@ def _lease_expiry() -> str:
 
 
 class _LeaseAwareCancellationToken:
-    def __init__(self, external: Any | None, lease_lost: threading.Event) -> None:
+    def __init__(self, external: CancellationToken | None, lease_lost: threading.Event) -> None:
         self.external = external
         self.lease_lost = lease_lost
 
@@ -376,7 +348,7 @@ class _LeaseAwareCancellationToken:
 
 
 def _renew_lease_until_stopped(
-    store: SessionStore,
+    store: SessionRepositories,
     attempt_id: str,
     worker_id: str,
     stop: threading.Event,
@@ -387,7 +359,7 @@ def _renew_lease_until_stopped(
             if stop.is_set():
                 return
             try:
-                store.renew_attempt_lease(attempt_id, worker_id, _lease_expiry())
+                store.attempts.renew_attempt_lease(attempt_id, worker_id, _lease_expiry())
                 break
             except RuntimeError:
                 lease_lost.set()

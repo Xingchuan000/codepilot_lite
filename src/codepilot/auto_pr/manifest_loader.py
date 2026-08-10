@@ -14,7 +14,17 @@ from codepilot.pr_assist.manifest_loader import (
 )
 from codepilot.repo.git_utils import sha256_file
 from codepilot.security.secrets import scan_token_like_strings
-from codepilot.workflow_manifest import load_source_artifact_manifest
+from codepilot.repo.artifact_manifest import ArtifactManifestError, load_verified_manifest
+
+
+def load_source_artifact_manifest(run_dir: str | Path, pr_assist_manifest: dict[str, Any]) -> dict[str, Any]:
+    raw_path = pr_assist_manifest.get("source_artifact_manifest") or "artifact_manifest.json"
+    if not isinstance(raw_path, str):
+        raise AutoPRManifestInvalidError("source_artifact_manifest must be a string path")
+    try:
+        return load_verified_manifest(run_dir, raw_path, pr_assist_manifest.get("source_artifact_manifest_sha256", ""))
+    except ArtifactManifestError as exc:
+        raise AutoPRManifestInvalidError(str(exc)) from exc
 
 
 def load_pr_assist_manifest(path: str | Path) -> dict[str, Any]:

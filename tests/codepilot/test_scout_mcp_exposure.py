@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from codepilot.multi_agent.profiles import filter_scout_mcp_specs
 from codepilot.policy import PolicyChecker, PolicyContext
-from codepilot.router.actions import ToolAction
+from codepilot.tools.actions import ToolAction
 from codepilot.tools.base import DefaultPermission, ToolRisk, ToolSideEffect, ToolSpec
 
 

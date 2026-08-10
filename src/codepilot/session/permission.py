@@ -9,7 +9,7 @@ from typing import Any
 
 from codepilot.permissions import PermissionBroker, PermissionRequest, PermissionResponse, permission_now_iso
 from codepilot.session.database import SessionDatabase
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tools.base import ToolSpec
 
 
@@ -51,7 +51,7 @@ class SessionPermissionBroker:
     """在 BlockingTUIBroker 外包一层 SQLite Grant/Response 持久化。"""
 
     def __init__(self, database: SessionDatabase, session_id: str, inner: PermissionBroker, scope_builder: PermissionScopeBuilder | None = None) -> None:
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
         self.session_id = session_id
         self.inner = inner
         self.scope_builder = scope_builder or PermissionScopeBuilder()
@@ -61,7 +61,7 @@ class SessionPermissionBroker:
 
     def request(self, request: PermissionRequest) -> PermissionRequest:
         self._requests[request.request_id] = request
-        self.store.persist_permission_request_and_pending_call(request)
+        self.store.permissions.persist_permission_request_and_pending_call(request)
         if request.scope_key and self._has_grant(request.scope_key):
             # 已持久化 Grant 的命中是一个完整审批结果，不进入 UI 队列。缓存合成响应后，
             # Router 的同步 wait() 能取得明确批准，而不是把 inner 的 None 误判为拒绝。
@@ -72,7 +72,7 @@ class SessionPermissionBroker:
                 responded_at=permission_now_iso(),
             )
             self._resolved[request.request_id] = response
-            self.store.persist_permission_resolution(
+            self.store.permissions.persist_permission_resolution(
                 request.request_id,
                 "approve_session",
                 response.reason,
@@ -100,7 +100,7 @@ class SessionPermissionBroker:
             if notify_inner:
                 self.inner.resolve(response)
             return
-        self.store.persist_permission_resolution(
+        self.store.permissions.persist_permission_resolution(
             response.request_id,
             response.decision,
             response.reason,
@@ -112,7 +112,7 @@ class SessionPermissionBroker:
             self.inner.resolve(response)
 
     def restore_pending_request(self, request_id: str) -> PermissionRequest:
-        record = self.store.get_permission_request(request_id)
+        record = self.store.permissions.get_permission_request(request_id)
         request = PermissionRequest(
             request_id=record.request_id,
             run_id=record.metadata.get("run_id", request_id),
@@ -140,8 +140,7 @@ class SessionPermissionBroker:
         self.inner.cancel_all(reason)
 
     def _has_grant(self, scope_key: str) -> bool:
-        with self.store.database.transaction() as connection:
-            return connection.execute("SELECT 1 FROM permission_grants WHERE session_id = ? AND scope_key = ? AND revoked_at IS NULL LIMIT 1", (self.session_id, scope_key)).fetchone() is not None
+        return self.store.permissions.get_permission_grant(self.session_id, scope_key) is not None
 
 
 def _normalize_command(command: str) -> str:

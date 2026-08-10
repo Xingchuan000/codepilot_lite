@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from codepilot.mcp.models import MCPCallResult, MCPServerConfig, MCPToolInfo
-from codepilot.mcp.trace import build_mcp_config_hash, redact_mcp_mapping, redact_mcp_text, truncate_mcp_text
+from codepilot.mcp.trace import build_mcp_config_hash, truncate_mcp_text
+from codepilot.security.redaction import redact_mapping, redact_text
 from codepilot.tools.base import ToolResult
 
 
@@ -31,12 +32,12 @@ def mcp_result_to_tool_result(
     codepilot_tool_name: str,
     max_output_chars: int,
 ) -> ToolResult:
-    output, output_truncated = truncate_mcp_text(redact_mcp_text(result.content, max_chars=10**9), max_output_chars)
+    output, output_truncated = truncate_mcp_text(redact_text(result.content, max_chars=10**9), max_output_chars)
     error = result.error
     if error is not None:
-        error, _ = truncate_mcp_text(redact_mcp_text(error, max_chars=10**9), max_output_chars)
+        error, _ = truncate_mcp_text(redact_text(error, max_chars=10**9), max_output_chars)
     structured_content_present = bool(result.structured_content)
-    redacted_structured_content = redact_mcp_mapping(result.structured_content)
+    redacted_structured_content = redact_mapping(result.structured_content)
     valid, reason = validate_structured_content(result.structured_content, tool.output_schema)
     success = result.success and valid
     config_hash = build_mcp_config_hash(server)
@@ -55,7 +56,7 @@ def mcp_result_to_tool_result(
     }
     if isinstance(redacted_structured_content, dict):
         metadata["structured_content"] = redacted_structured_content
-    metadata["mcp_result_metadata"] = redact_mcp_mapping(result.metadata)
+    metadata["mcp_result_metadata"] = redact_mapping(result.metadata)
     if not valid:
         metadata["warning"] = "output_schema_validation_failed"
         return ToolResult(

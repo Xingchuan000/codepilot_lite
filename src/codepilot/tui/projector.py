@@ -7,8 +7,8 @@ from typing import Any
 from codepilot.report.extractor import build_run_report
 from codepilot.report.models import RunReport
 from codepilot.tui import DASHBOARD_SCHEMA_VERSION
-from codepilot.tui.indexer import build_run_entry, load_report_json, load_trace_events
 from codepilot.tui.artifacts import read_manifest_artifacts
+from codepilot.tui.indexer import build_run_entry, load_report_json, load_trace_events
 from codepilot.tui.models import RunDashboardModel, TimelineRow
 from codepilot.tui.redaction import redact_value, truncate_text
 
@@ -108,7 +108,7 @@ def event_to_timeline_row(event: dict[str, Any], *, max_text_chars: int = 500) -
         elif event.get("success") is False:
             status = "failed"
     executed = metadata.get("executed") if isinstance(metadata.get("executed"), bool) else None
-    policy_decision = event.get("policy_decision") or metadata.get("policy_decision")
+    policy_decision = event.get("policy_decision")
     if event_type == "tool_call":
         executed = True
     elif policy_decision == "deny":
@@ -120,7 +120,7 @@ def event_to_timeline_row(event: dict[str, Any], *, max_text_chars: int = 500) -
         summary = truncate_text(str(redact_value(summary, max_string_chars=max_text_chars)), max_chars=max_text_chars)
     else:
         summary = None
-    risk = event.get("risk") or metadata.get("risk")
+    risk = event.get("risk")
     return TimelineRow(
         step=event.get("step") if isinstance(event.get("step"), int) else None,
         event_type=event_type,
@@ -142,7 +142,7 @@ def build_policy_summary(events: list[dict[str, Any]]) -> dict[str, int]:
         if event.get("event_type") != "policy_decision":
             continue
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
-        decision = event.get("policy_decision") or metadata.get("policy_decision")
+        decision = event.get("policy_decision")
         summary["total"] += 1
         if decision in {"allow", "ask", "deny"}:
             summary[str(decision)] += 1
@@ -189,7 +189,7 @@ def build_mcp_summary(events: list[dict[str, Any]]) -> dict[str, Any]:
             descriptor_hashes.add(descriptor[:12])
         if metadata.get("exposed_to_agent") is True:
             exposed_to_agent_count += 1
-        if event.get("event_type") == "policy_decision" and (event.get("policy_decision") or metadata.get("policy_decision")) == "deny":
+        if event.get("event_type") == "policy_decision" and event.get("policy_decision") == "deny":
             denied_count += 1
     return {
         "total_tool_calls": total_tool_calls,

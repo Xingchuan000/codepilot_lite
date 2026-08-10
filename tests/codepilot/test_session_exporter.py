@@ -6,17 +6,17 @@ from pathlib import Path
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
 from codepilot.session.exporter import SessionExporter
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 def test_export_writes_trace_recursive_manifest_and_preserves_activity(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
-    store.append_event(session_id=session.session_id, event_type="turn_created", payload={"turn_id": "none"})
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    store.events.append_event(session_id=session.session_id, event_type="turn_created", payload={"turn_id": "none"})
     artifact = ArtifactStore(database).put_text(session.session_id, "tool_result", "x" * 20_000)
-    before = store.get_session(session.session_id).last_activity_at
+    before = store.sessions.get_session(session.session_id).last_activity_at
 
     exported = SessionExporter(database).export(session.session_id, tmp_path / "exports")
     manifest = json.loads((exported / "manifest.json").read_text(encoding="utf-8"))
@@ -24,20 +24,20 @@ def test_export_writes_trace_recursive_manifest_and_preserves_activity(tmp_path:
 
     assert "trace.jsonl" in paths
     assert f"artifacts/{artifact.artifact_id}.txt" in paths
-    assert store.get_session(session.session_id).last_activity_at == before
+    assert store.sessions.get_session(session.session_id).last_activity_at == before
 
 
 def test_export_parent_recursively_includes_child_agent_sessions_and_traces(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    parent = store.create_session(
+    store = SessionRepositories(database)
+    parent = store.sessions.create_session(
         project_path=tmp_path,
         provider="openai",
         current_model="fake",
         permission_mode="manual",
     )
-    child = store.create_session(
+    child = store.sessions.create_session(
         project_path=tmp_path,
         provider="openai",
         current_model="fake",
@@ -45,7 +45,7 @@ def test_export_parent_recursively_includes_child_agent_sessions_and_traces(tmp_
         parent_session_id=parent.session_id,
         metadata={"agent_type": "explore"},
     )
-    grandchild = store.create_session(
+    grandchild = store.sessions.create_session(
         project_path=tmp_path,
         provider="openai",
         current_model="fake",
@@ -53,7 +53,7 @@ def test_export_parent_recursively_includes_child_agent_sessions_and_traces(tmp_
         parent_session_id=child.session_id,
         metadata={"agent_type": "general"},
     )
-    child_turn = store.create_turn(
+    child_turn = store.turns.create_turn(
         session_id=child.session_id,
         title="explore VIP discount",
         provider_snapshot="openai",
@@ -62,25 +62,25 @@ def test_export_parent_recursively_includes_child_agent_sessions_and_traces(tmp_
         branch_snapshot=None,
         status="completed",
     )
-    child_message = store.create_message(
+    child_message = store.messages.create_message(
         session_id=child.session_id,
         turn_id=child_turn.turn_id,
         role="assistant",
         status="completed",
         content="",
     )
-    store.append_message_part(
+    store.messages.append_message_part(
         child_message.message_id,
         type="text",
         content="VIP discount root cause",
     )
-    store.append_event(
+    store.events.append_event(
         session_id=child.session_id,
         event_type="child_trace_marker",
         payload={"agent_type": "explore"},
         turn_id=child_turn.turn_id,
     )
-    store.append_event(
+    store.events.append_event(
         session_id=grandchild.session_id,
         event_type="grandchild_trace_marker",
         payload={"agent_type": "general"},
@@ -174,8 +174,8 @@ def test_export_parent_recursively_includes_child_agent_sessions_and_traces(tmp_
 def test_export_leaf_session_keeps_existing_root_layout_without_child_directory(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(
         project_path=tmp_path,
         provider="openai",
         current_model="fake",
@@ -193,3 +193,4 @@ def test_export_leaf_session_keeps_existing_root_layout_without_child_directory(
     assert manifest["child_session_ids"] == []
     assert manifest["descendant_session_count"] == 0
     assert report["descendant_session_ids"] == []
+

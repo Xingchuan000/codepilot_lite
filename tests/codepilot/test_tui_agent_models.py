@@ -64,7 +64,7 @@ def test_permission_request_comes_from_codepilot_permissions() -> None:
     assert AgentRunView(permission_requests=(request,)).permission_requests[0].request_id == "perm-1"
 
 
-def test_legacy_session_models_are_removed() -> None:
+def test_retired_session_models_are_removed() -> None:
     import codepilot.tui_agent.models as models
 
     assert not hasattr(models, "TUISession")

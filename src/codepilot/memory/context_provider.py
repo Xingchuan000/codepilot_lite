@@ -10,7 +10,7 @@ from codepilot.memory.rendering import render_project_memory
 from codepilot.memory.repository import MemoryRepository
 from codepilot.session.context_budget import ContextItem, estimate_tokens
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
+from codepilot.session.model_context import ModelContextProfile
 
 
 class MemoryContextProvider:

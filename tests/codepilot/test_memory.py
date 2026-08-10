@@ -16,8 +16,8 @@ from codepilot.session.compaction import CompactionService
 from codepilot.session.context import ContextAssembler
 from codepilot.session.context_budget import estimate_tokens
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
-from codepilot.session.store import SessionStore
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.session.repositories import SessionRepositories
 
 
 def _database(tmp_path: Path) -> SessionDatabase:
@@ -28,12 +28,12 @@ def _database(tmp_path: Path) -> SessionDatabase:
 
 def test_project_memory_is_shared_by_project_isolated_and_versioned(tmp_path: Path) -> None:
     database = _database(tmp_path)
-    store = SessionStore(database)
+    store = SessionRepositories(database)
     first_project = tmp_path / "first"
     second_project = tmp_path / "second"
-    first_session = store.create_session(project_path=first_project, provider="openai", current_model="fake", permission_mode="manual")
-    another_session = store.create_session(project_path=first_project, provider="openai", current_model="fake", permission_mode="manual")
-    isolated_session = store.create_session(project_path=second_project, provider="openai", current_model="fake", permission_mode="manual")
+    first_session = store.sessions.create_session(project_path=first_project, provider="openai", current_model="fake", permission_mode="manual")
+    another_session = store.sessions.create_session(project_path=first_project, provider="openai", current_model="fake", permission_mode="manual")
+    isolated_session = store.sessions.create_session(project_path=second_project, provider="openai", current_model="fake", permission_mode="manual")
     service = MemoryService(database)
 
     old = service.add(first_session.project_id, "command", "test:unit", "pytest -q")
@@ -47,7 +47,7 @@ def test_project_memory_is_shared_by_project_isolated_and_versioned(tmp_path: Pa
 
 def test_instruction_loader_reuses_sha_and_reloads_changed_file(tmp_path: Path) -> None:
     database = _database(tmp_path)
-    project = SessionStore(database).create_project(tmp_path)
+    project = SessionRepositories(database).projects.create_project(tmp_path)
     agents = tmp_path / "AGENTS.md"
     agents.write_text("Use pytest.")
     loader = ProjectInstructionLoader(database)
@@ -65,9 +65,9 @@ def test_instruction_loader_reuses_sha_and_reloads_changed_file(tmp_path: Path) 
 def test_project_instructions_enter_context_as_bounded_system_items(tmp_path: Path) -> None:
     database = _database(tmp_path)
     (tmp_path / "AGENTS.md").write_text("Always run pytest.")
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="instructions",
         provider_snapshot="openai",
@@ -75,7 +75,7 @@ def test_project_instructions_enter_context_as_bounded_system_items(tmp_path: Pa
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="Continue")
+    store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="Continue")
 
     context = ContextAssembler(database).build(session.session_id, turn.turn_id, "openai", "fake")
 
@@ -85,10 +85,10 @@ def test_project_instructions_enter_context_as_bounded_system_items(tmp_path: Pa
 
 def test_structured_summary_is_mandatory_when_it_covers_history(tmp_path: Path) -> None:
     database = _database(tmp_path)
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
     turns = [
-        store.create_turn(
+        store.turns.create_turn(
             session_id=session.session_id,
             title=str(index),
             provider_snapshot="openai",
@@ -99,7 +99,7 @@ def test_structured_summary_is_mandatory_when_it_covers_history(tmp_path: Path) 
         for index in range(6)
     ]
     for turn in turns:
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content=f"task {turn.sequence}")
+        store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content=f"task {turn.sequence}")
 
     summary = CompactionService(database).compact(session.session_id, force=True, current_turn_id=turns[-1].turn_id).summary
     plan = ContextAssembler(database).build_plan(session.session_id, turns[-1].turn_id, "openai", "fake")
@@ -111,9 +111,9 @@ def test_structured_summary_is_mandatory_when_it_covers_history(tmp_path: Path) 
 
 def test_candidate_requires_approval_and_secret_is_rejected(tmp_path: Path) -> None:
     database = _database(tmp_path)
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="memory",
         provider_snapshot="openai",
@@ -140,9 +140,9 @@ def test_candidate_requires_approval_and_secret_is_rejected(tmp_path: Path) -> N
 
 
 def _candidate(database: SessionDatabase, tmp_path: Path, key: str = "style:pathlib"):
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="memory",
         provider_snapshot="openai",
@@ -202,8 +202,8 @@ def test_unknown_candidate_approval_does_not_create_memory(tmp_path: Path) -> No
 
 def test_memory_search_supports_cjk_paths_and_branch_isolation(tmp_path: Path) -> None:
     database = _database(tmp_path)
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
     service = MemoryService(database)
     global_memory = service.memories.add(
         session.project_id,
@@ -264,7 +264,7 @@ def test_memory_redaction_is_recursive_idempotent_and_non_mutating() -> None:
 
 def test_instruction_loader_hashes_bytes_beyond_preview_limit(tmp_path: Path) -> None:
     database = _database(tmp_path)
-    project = SessionStore(database).create_project(tmp_path)
+    project = SessionRepositories(database).projects.create_project(tmp_path)
     path = tmp_path / "AGENTS.md"
     path.write_text("unchanged-tail-a")
     loader = ProjectInstructionLoader(database, max_bytes=9)
@@ -285,8 +285,8 @@ def test_instruction_loader_hashes_bytes_beyond_preview_limit(tmp_path: Path) ->
 
 def test_large_project_instructions_share_model_budget_and_keep_sources(tmp_path: Path) -> None:
     database = _database(tmp_path)
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="test", current_model="small", permission_mode="manual")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="test", current_model="small", permission_mode="manual")
     (tmp_path / "AGENTS.md").write_text("agents-head\n" + "a" * 31_000 + "\nagents-tail")
     (tmp_path / "CLAUDE.md").write_text("claude-head\n" + "c" * 31_000 + "\nclaude-tail")
     profile = ModelContextProfile("test", "small", 8_192, False)
@@ -320,9 +320,9 @@ def test_large_instructions_build_context_for_small_model_and_readme_is_optional
     (tmp_path / "AGENTS.md").write_text("a" * 32_000)
     (tmp_path / "CLAUDE.md").write_text("c" * 32_000)
     (tmp_path / "README.md").write_text("README-OPTIONAL " * 5_000)
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="test", current_model="small", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="test", current_model="small", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="small",
         provider_snapshot="test",
@@ -330,7 +330,7 @@ def test_large_instructions_build_context_for_small_model_and_readme_is_optional
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    store.create_message(
+    store.messages.create_message(
         session_id=session.session_id,
         turn_id=turn.turn_id,
         role="user",

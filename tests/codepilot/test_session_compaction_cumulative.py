@@ -7,36 +7,36 @@ from codepilot.memory.models import SessionSummaryContent
 from codepilot.memory.summarizer import LLMSummaryGenerator
 from codepilot.session.compaction import CompactionService
 from codepilot.session.database import SessionDatabase
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 def test_second_compact_keeps_first_covered_message_ids(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=Path(tmp_path), provider="openai", current_model="fake", permission_mode="manual")
-    turns = [store.create_turn(session_id=session.session_id, title=str(index), provider_snapshot="openai", model_snapshot="fake", permission_mode_snapshot="manual", branch_snapshot=None) for index in range(10)]
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=Path(tmp_path), provider="openai", current_model="fake", permission_mode="manual")
+    turns = [store.turns.create_turn(session_id=session.session_id, title=str(index), provider_snapshot="openai", model_snapshot="fake", permission_mode_snapshot="manual", branch_snapshot=None) for index in range(10)]
     for turn in turns:
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content=f"message-{turn.sequence}")
+        store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content=f"message-{turn.sequence}")
     service = CompactionService(database, summarizer=lambda _: "Key decisions\nFiles/tests/diff\nUnfinished work")
 
     first = service.compact(session.session_id, force=True, current_turn_id=turns[-1].turn_id)
-    later_turns = [store.create_turn(session_id=session.session_id, title=str(index), provider_snapshot="openai", model_snapshot="fake", permission_mode_snapshot="manual", branch_snapshot=None) for index in range(5)]
-    extra = store.create_message(session_id=session.session_id, turn_id=later_turns[0].turn_id, role="user", status="completed", content="new-message")
+    later_turns = [store.turns.create_turn(session_id=session.session_id, title=str(index), provider_snapshot="openai", model_snapshot="fake", permission_mode_snapshot="manual", branch_snapshot=None) for index in range(5)]
+    extra = store.messages.create_message(session_id=session.session_id, turn_id=later_turns[0].turn_id, role="user", status="completed", content="new-message")
     second = service.compact(session.session_id, force=True, current_turn_id=later_turns[-1].turn_id)
 
     assert set(first.covered_message_ids) <= set(second.summary.metadata["covered_message_ids"])
     assert extra.message_id in second.summary.metadata["covered_message_ids"]
-    assert store.list_context_summaries(session.session_id)[0].status == "superseded"
+    assert store.context_summaries.list_context_summaries(session.session_id)[0].status == "superseded"
 
 
 def test_successful_cumulative_summary_replaces_resolved_work_but_keeps_facts(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
     turns = [
-        store.create_turn(
+        store.turns.create_turn(
             session_id=session.session_id,
             title=str(index),
             provider_snapshot="openai",
@@ -47,7 +47,7 @@ def test_successful_cumulative_summary_replaces_resolved_work_but_keeps_facts(tm
         for index in range(10)
     ]
     first_messages = [
-        store.create_message(
+        store.messages.create_message(
             session_id=session.session_id,
             turn_id=turn.turn_id,
             role="user",
@@ -56,8 +56,8 @@ def test_successful_cumulative_summary_replaces_resolved_work_but_keeps_facts(tm
         )
         for index, turn in enumerate(turns)
     ]
-    call = store.create_tool_call(turn_id=turns[0].turn_id, tool_name="run_shell", arguments={"command": "pytest A"})
-    store.persist_tool_result(
+    call = store.tool_executions.create_tool_call(turn_id=turns[0].turn_id, tool_name="run_shell", arguments={"command": "pytest A"})
+    store.tool_executions.persist_tool_result(
         call.tool_call_id,
         call_status="completed",
         result_status="success",
@@ -77,7 +77,7 @@ def test_successful_cumulative_summary_replaces_resolved_work_but_keeps_facts(tm
     )
     first = service.compact(session.session_id, force=True, current_turn_id=turns[-1].turn_id)
     later_turns = [
-        store.create_turn(
+        store.turns.create_turn(
             session_id=session.session_id,
             title=f"later-{index}",
             provider_snapshot="openai",
@@ -87,7 +87,7 @@ def test_successful_cumulative_summary_replaces_resolved_work_but_keeps_facts(tm
         )
         for index in range(5)
     ]
-    new_message = store.create_message(
+    new_message = store.messages.create_message(
         session_id=session.session_id,
         turn_id=later_turns[0].turn_id,
         role="user",
@@ -109,10 +109,10 @@ def test_successful_cumulative_summary_replaces_resolved_work_but_keeps_facts(tm
 def test_failed_cumulative_llm_summary_preserves_previous_work_snapshot(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
     turns = [
-        store.create_turn(
+        store.turns.create_turn(
             session_id=session.session_id,
             title=str(index),
             provider_snapshot="openai",
@@ -123,7 +123,7 @@ def test_failed_cumulative_llm_summary_preserves_previous_work_snapshot(tmp_path
         for index in range(10)
     ]
     for index, turn in enumerate(turns):
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content=str(index))
+        store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content=str(index))
     value = SessionSummaryContent(unresolved_work=("fix A",), next_actions=("test A",)).to_dict()
     service = CompactionService(
         database,
@@ -131,7 +131,7 @@ def test_failed_cumulative_llm_summary_preserves_previous_work_snapshot(tmp_path
     )
     service.compact(session.session_id, force=True, current_turn_id=turns[-1].turn_id)
     later_turns = [
-        store.create_turn(
+        store.turns.create_turn(
             session_id=session.session_id,
             title=f"later-{index}",
             provider_snapshot="openai",
@@ -141,9 +141,10 @@ def test_failed_cumulative_llm_summary_preserves_previous_work_snapshot(tmp_path
         )
         for index in range(5)
     ]
-    store.create_message(session_id=session.session_id, turn_id=later_turns[0].turn_id, role="user", status="completed", content="continue")
+    store.messages.create_message(session_id=session.session_id, turn_id=later_turns[0].turn_id, role="user", status="completed", content="continue")
 
     summary = service.compact(session.session_id, force=True, current_turn_id=later_turns[-1].turn_id).summary.content
 
     assert summary["unresolved_work"] == ["fix A"]
     assert summary["next_actions"] == ["test A"]
+

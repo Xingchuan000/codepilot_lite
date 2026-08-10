@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from codepilot.router import ToolAction, ToolRouter
+from codepilot.router import ToolRouter
+from codepilot.tools.actions import ToolAction
 
 
 def test_tool_router_routes_one_action_and_writes_trace(tmp_path: Path) -> None:

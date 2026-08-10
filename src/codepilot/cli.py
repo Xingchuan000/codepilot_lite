@@ -31,7 +31,8 @@ from codepilot.tui.models import RunDashboardModel, RunIndexEntry
 from codepilot.tui.redaction import relative_path_for_display, relative_paths_in_text
 from codepilot.tui.render import render_run_detail, render_run_index
 from codepilot.report.generator import ReportExistsError, generate_report
-from codepilot.router import ToolAction, ToolRouter
+from codepilot.router import ToolRouter
+from codepilot.tools.actions import ToolAction
 from codepilot.tools.base import ToolSideEffect
 from codepilot.tools.registry import call_external_tool_traced, call_tool, call_tool_traced, find_tool_spec, list_tool_specs
 from codepilot.trace.logger import TraceLogger

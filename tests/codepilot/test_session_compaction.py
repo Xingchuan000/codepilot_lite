@@ -11,21 +11,21 @@ from codepilot.memory.models import SessionSummaryContent
 from codepilot.memory.summarizer import LLMSummaryGenerator, SessionSummaryEvidence, merge_llm_summary
 from codepilot.session.compaction import CompactionService
 from codepilot.session.database import SessionDatabase
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 def test_force_compact_creates_summary_message_and_keeps_recent_turn(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
-    turns = [store.create_turn(session_id=session.session_id, title=f"Turn {index}", provider_snapshot="openai", model_snapshot="fake", permission_mode_snapshot="manual", branch_snapshot=None) for index in range(6)]
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turns = [store.turns.create_turn(session_id=session.session_id, title=f"Turn {index}", provider_snapshot="openai", model_snapshot="fake", permission_mode_snapshot="manual", branch_snapshot=None) for index in range(6)]
     for item in turns:
-        store.create_message(session_id=session.session_id, turn_id=item.turn_id, role="user", status="completed", content=f"Turn {item.sequence}")
+        store.messages.create_message(session_id=session.session_id, turn_id=item.turn_id, role="user", status="completed", content=f"Turn {item.sequence}")
     turn = turns[-1]
 
     result = CompactionService(database, summarizer=lambda _: "Key decisions\nFiles/tests/diff\nUnfinished work").compact(session.session_id, force=True, current_turn_id=turn.turn_id)
-    messages = store.list_messages_with_parts(session.session_id)
+    messages = store.messages.list_messages_with_parts(session.session_id)
 
     assert result.covered_message_ids
     assert messages[-1][0].metadata["summary_id"] == result.summary.summary_id
@@ -34,10 +34,10 @@ def test_force_compact_creates_summary_message_and_keeps_recent_turn(tmp_path: P
 def _history_with_tool_facts(tmp_path: Path):
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
     turns = [
-        store.create_turn(
+        store.turns.create_turn(
             session_id=session.session_id,
             title=str(index),
             provider_snapshot="openai",
@@ -48,7 +48,7 @@ def _history_with_tool_facts(tmp_path: Path):
         for index in range(6)
     ]
     messages = [
-        store.create_message(
+        store.messages.create_message(
             session_id=session.session_id,
             turn_id=turn.turn_id,
             role="user",
@@ -57,8 +57,8 @@ def _history_with_tool_facts(tmp_path: Path):
         )
         for index, turn in enumerate(turns)
     ]
-    test_call = store.create_tool_call(turn_id=turns[0].turn_id, tool_name="run_tests", arguments={"command": "pytest -q"})
-    store.persist_tool_result(
+    test_call = store.tool_executions.create_tool_call(turn_id=turns[0].turn_id, tool_name="run_tests", arguments={"command": "pytest -q"})
+    store.tool_executions.persist_tool_result(
         test_call.tool_call_id,
         call_status="completed",
         result_status="success",
@@ -66,8 +66,8 @@ def _history_with_tool_facts(tmp_path: Path):
         output_preview="10 passed",
         success=True,
     )
-    write_call = store.create_tool_call(turn_id=turns[0].turn_id, tool_name="apply_patch", arguments={"path": "src/a.py"})
-    store.persist_tool_result(
+    write_call = store.tool_executions.create_tool_call(turn_id=turns[0].turn_id, tool_name="apply_patch", arguments={"path": "src/a.py"})
+    store.tool_executions.persist_tool_result(
         write_call.tool_call_id,
         call_status="completed",
         result_status="success",
@@ -102,8 +102,8 @@ def test_invalid_llm_summary_uses_deterministic_fallback_and_keeps_messages(tmp_
     )
 
     assert result.summary.content["commands_run"] == ["pytest -q"]
-    assert any(event.event_type == "context_summary_fallback_used" for event in store.list_events(session.session_id))
-    assert {message.message_id for message, _ in store.list_messages_with_parts(session.session_id)} >= {
+    assert any(event.event_type == "context_summary_fallback_used" for event in store.events.list_events(session.session_id))
+    assert {message.message_id for message, _ in store.messages.list_messages_with_parts(session.session_id)} >= {
         message.message_id for message in messages
     }
 
@@ -128,7 +128,7 @@ def test_llm_cannot_add_unobserved_tool_facts(tmp_path: Path) -> None:
 def test_deterministic_summary_redacts_secret_without_changing_original_message(tmp_path: Path) -> None:
     database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
     secret = "top-secret-value"
-    message = store.create_message(
+    message = store.messages.create_message(
         session_id=session.session_id,
         turn_id=turns[0].turn_id,
         role="user",
@@ -144,17 +144,17 @@ def test_deterministic_summary_redacts_secret_without_changing_original_message(
 
     assert secret not in str(summary)
     assert "[REDACTED_SECRET]" in str(summary)
-    assert next(item for item, _ in store.list_messages_with_parts(session.session_id) if item.message_id == message.message_id).content == f"API_KEY={secret}"
+    assert next(item for item, _ in store.messages.list_messages_with_parts(session.session_id) if item.message_id == message.message_id).content == f"API_KEY={secret}"
 
 
 def test_summary_redacts_secrets_from_commands_tool_results_and_errors(tmp_path: Path) -> None:
     database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
-    call = store.create_tool_call(
+    call = store.tool_executions.create_tool_call(
         turn_id=turns[0].turn_id,
         tool_name="run_tests",
         arguments={"command": "TOKEN=command-secret pytest"},
     )
-    store.persist_tool_result(
+    store.tool_executions.persist_tool_result(
         call.tool_call_id,
         call_status="failed",
         result_status="failed",
@@ -163,12 +163,12 @@ def test_summary_redacts_secrets_from_commands_tool_results_and_errors(tmp_path:
         error="API_KEY=error-secret",
         success=False,
     )
-    preview_call = store.create_tool_call(
+    preview_call = store.tool_executions.create_tool_call(
         turn_id=turns[0].turn_id,
         tool_name="run_tests",
         arguments={"command": "pytest preview"},
     )
-    store.persist_tool_result(
+    store.tool_executions.persist_tool_result(
         preview_call.tool_call_id,
         call_status="failed",
         result_status="failed",
@@ -189,7 +189,7 @@ def test_summary_redacts_secrets_from_commands_tool_results_and_errors(tmp_path:
 
 def test_llm_summary_receives_only_redacted_evidence(tmp_path: Path) -> None:
     database, store, session, turns, _ = _history_with_tool_facts(tmp_path)
-    store.create_message(
+    store.messages.create_message(
         session_id=session.session_id,
         turn_id=turns[0].turn_id,
         role="user",
@@ -211,9 +211,9 @@ def test_llm_summary_receives_only_redacted_evidence(tmp_path: Path) -> None:
 
 def test_cumulative_compaction_scrubs_unsafe_previous_summary_and_audits_counts(tmp_path: Path) -> None:
     database, store, session, turns, messages = _history_with_tool_facts(tmp_path)
-    secret = "legacy-secret"
+    secret = "previous-summary-secret"
     unsafe = SessionSummaryContent(task_goal=f"API_KEY={secret}").to_dict()
-    old = store.replace_context_summary(
+    old = store.context_summaries.replace_context_summary(
         session_id=session.session_id,
         previous_summary_id=None,
         summary_content=unsafe,
@@ -234,9 +234,9 @@ def test_cumulative_compaction_scrubs_unsafe_previous_summary_and_audits_counts(
 
     assert secret not in str(result.summary.content)
     assert secret not in str(llm.calls)
-    assert store.list_context_summaries(session.session_id)[0].status == "superseded"
+    assert store.context_summaries.list_context_summaries(session.session_id)[0].status == "superseded"
     assert old.summary_id != result.summary.summary_id
-    event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_summary_redacted")
+    event = next(event for event in store.events.list_events(session.session_id) if event.event_type == "context_summary_redacted")
     assert set(event.payload) == {"redaction_count", "message_count"}
     assert secret not in str(event.payload)
 
@@ -271,7 +271,7 @@ def test_summary_fallback_event_redacts_provider_exception(tmp_path: Path) -> No
         current_turn_id=turns[-1].turn_id,
     )
 
-    event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_summary_fallback_used")
+    event = next(event for event in store.events.list_events(session.session_id) if event.event_type == "context_summary_fallback_used")
     assert event.payload == {
         "error_type": "RuntimeError",
         "error": "provider failed: API_KEY=[REDACTED_SECRET]",
@@ -293,7 +293,7 @@ def test_compaction_failed_event_redacts_summarizer_exception(tmp_path: Path) ->
             current_turn_id=turns[-1].turn_id,
         )
 
-    event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_compaction_failed")
+    event = next(event for event in store.events.list_events(session.session_id) if event.event_type == "context_compaction_failed")
     assert event.payload == {
         "error_type": "RuntimeError",
         "error": "summary failed: TOKEN=[REDACTED_SECRET]",
@@ -317,7 +317,7 @@ def test_compaction_failed_event_redacts_persistence_exception(tmp_path: Path) -
             current_turn_id=turns[-1].turn_id,
         )
 
-    event = next(event for event in store.list_events(session.session_id) if event.event_type == "context_compaction_failed")
+    event = next(event for event in store.events.list_events(session.session_id) if event.event_type == "context_compaction_failed")
     assert event.payload["error_type"] == "IntegrityError"
     assert event.payload["error"] == "API_KEY=[REDACTED_SECRET]"
     assert event.payload["message_count"] == 2

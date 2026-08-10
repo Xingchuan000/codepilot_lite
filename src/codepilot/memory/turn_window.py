@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import Iterator
+import sqlite3
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+from codepilot.common.best_effort import run_best_effort
 from codepilot.llm.types import ChatMessage, RichChatMessage
 from codepilot.memory.models import TurnCheckpointContent
 from codepilot.memory.policy import sanitize_memory_content
@@ -13,8 +14,8 @@ from codepilot.session.context_adapters import PreparedContext
 from codepilot.session.context_audit import ContextAuditRepository, ContextMessageSource
 from codepilot.session.context_budget import ContextBudgetExceeded, ContextItem, estimate_tokens
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
-from codepilot.session.store import SessionStore
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.session.repositories import SessionRepositories
 
 CHECKPOINT_PREFIX = "Current turn rolling checkpoint."
 
@@ -34,10 +35,6 @@ class ContextPreparationResult:
     omitted_context_items: tuple[ContextItem, ...] = ()
     message_sources: tuple[ContextMessageSource, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
-
-    def __iter__(self) -> Iterator[Any]:
-        yield self.messages
-        yield self.base_message_count
 
 
 @dataclass(frozen=True)
@@ -68,7 +65,7 @@ class TurnContextWindow:
     ) -> None:
         if not 0 < soft_limit <= 1:
             raise ValueError("soft_limit must be between 0 and 1")
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
         self.checkpoints = TurnCheckpointRepository(database)
         self.builder = TurnCheckpointBuilder(database)
         self.audit = ContextAuditRepository(database)
@@ -91,8 +88,10 @@ class TurnContextWindow:
             turn_id = kwargs.get("turn_id")
             messages = kwargs.get("messages", [])
             if audit and isinstance(session_id, str) and isinstance(turn_id, str):
-                try:
-                    self.audit.record(
+                failure_error_type = type(exc).__name__
+                failure_error = str(exc)
+                run_best_effort(
+                    lambda: self.audit.record(
                         session_id=session_id,
                         turn_id=turn_id,
                         attempt_id=kwargs.get("attempt_id"),
@@ -105,10 +104,12 @@ class TurnContextWindow:
                         protocol_overhead_tokens=self.profile.protocol_overhead_tokens,
                         max_input_tokens=self.profile.max_input_tokens,
                         messages=messages,
-                        metadata={"error_type": type(exc).__name__, "error": str(exc)},
-                    )
-                except Exception:
-                    pass
+                        metadata={"error_type": failure_error_type, "error": failure_error},
+                    ),
+                    operation_name="turn context failure audit",
+                    context={"session_id": session_id, "turn_id": turn_id, "attempt_id": kwargs.get("attempt_id")},
+                    expected_errors=(sqlite3.Error,),
+                )
             raise
 
     def _prepare(
@@ -249,8 +250,8 @@ class TurnContextWindow:
         summary_id = next((source_id for item in selected_items if item.source_kind == "summary" for source_id in item.source_ids), None)
         snapshot_id = None
         if audit:
-            try:
-                snapshot = self.audit.record(
+            snapshot = run_best_effort(
+                lambda: self.audit.record(
                     session_id=session_id,
                     turn_id=turn_id,
                     attempt_id=attempt_id,
@@ -270,10 +271,13 @@ class TurnContextWindow:
                     covered_message_ids=covered_ids,
                     retained_message_ids=retained_ids,
                     metadata={"recent_group_count": recent_group_count},
-                )
+                ),
+                operation_name="turn context audit",
+                context={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id},
+                expected_errors=(sqlite3.Error,),
+            )
+            if snapshot is not None:
                 snapshot_id = snapshot.snapshot_id
-            except Exception:
-                pass
         return ContextPreparationResult(
             prepared,
             len(base) + 1,
@@ -338,8 +342,15 @@ def _fit_checkpoint_content(content: TurnCheckpointContent, token_budget: int) -
         return candidate
     candidate = replace(candidate, recent_tool_facts=candidate.recent_tool_facts[-4:])
     candidate = replace(candidate, fallback_previews=candidate.fallback_previews[-3:])
-    fields = ("user_constraints", "confirmed_decisions", "files_read", "files_modified", "commands_run", "test_results")
-    candidate = replace(candidate, **{name: getattr(candidate, name)[-4:] for name in fields})
+    candidate = replace(
+        candidate,
+        user_constraints=candidate.user_constraints[-4:],
+        confirmed_decisions=candidate.confirmed_decisions[-4:],
+        files_read=candidate.files_read[-4:],
+        files_modified=candidate.files_modified[-4:],
+        commands_run=candidate.commands_run[-4:],
+        test_results=candidate.test_results[-4:],
+    )
     if estimate_tokens(render_turn_checkpoint(candidate.to_dict())) <= token_budget:
         return candidate
     candidate = replace(candidate, current_errors=candidate.current_errors[-3:])
@@ -407,32 +418,32 @@ def _bounded_previews(previews: list[str] | tuple[str, ...], max_chars: int) -> 
     return tuple(reversed(selected))
 
 
-def _covered_message_ids(store: SessionStore, session_id: str, turn_id: str, retained_count: int, previous: tuple[str, ...]) -> tuple[str, ...]:
+def _covered_message_ids(store: SessionRepositories, session_id: str, turn_id: str, retained_count: int, previous: tuple[str, ...]) -> tuple[str, ...]:
     messages = [message for message, _ in _turn_dynamic_messages(store, turn_id)]
     newly_covered = messages[:-retained_count] if retained_count else messages
     return tuple(dict.fromkeys([*previous, *(message.message_id for message in newly_covered)]))
 
 
-def _recovered_base_message_count(store: SessionStore, session_id: str, turn_id: str, messages: list[ChatMessage | RichChatMessage], covered_message_ids: tuple[str, ...]) -> int:
-    user_message = store.get_user_message_for_turn(turn_id)
-    recent_count = sum(1 for message, _ in store.list_messages_with_parts(session_id) if message.turn_id == turn_id and message.status not in {"failed", "in_progress"} and message.message_id not in covered_message_ids and message.metadata.get("summary_id") is None and (user_message is None or message.message_id != user_message.message_id))
+def _recovered_base_message_count(store: SessionRepositories, session_id: str, turn_id: str, messages: list[ChatMessage | RichChatMessage], covered_message_ids: tuple[str, ...]) -> int:
+    user_message = store.messages.get_user_message_for_turn(turn_id)
+    recent_count = sum(1 for message, _ in store.messages.list_messages_with_parts(session_id) if message.turn_id == turn_id and message.status not in {"failed", "in_progress"} and message.message_id not in covered_message_ids and message.metadata.get("summary_id") is None and (user_message is None or message.message_id != user_message.message_id))
     return max(0, len(messages) - recent_count)
 
 
-def _retained_message_ids(store: SessionStore, turn_id: str, covered_message_ids: tuple[str, ...]) -> tuple[str, ...]:
+def _retained_message_ids(store: SessionRepositories, turn_id: str, covered_message_ids: tuple[str, ...]) -> tuple[str, ...]:
     covered = set(covered_message_ids)
     return tuple(message.message_id for message, _ in _turn_dynamic_messages(store, turn_id) if message.message_id not in covered)
 
 
-def _dynamic_message_ids(store: SessionStore, turn_id: str) -> tuple[str, ...]:
+def _dynamic_message_ids(store: SessionRepositories, turn_id: str) -> tuple[str, ...]:
     return tuple(message.message_id for message, _ in _turn_dynamic_messages(store, turn_id))
 
 
-def _turn_dynamic_messages(store: SessionStore, turn_id: str) -> tuple[tuple[Any, tuple[Any, ...]], ...]:
-    user = store.get_user_message_for_turn(turn_id)
+def _turn_dynamic_messages(store: SessionRepositories, turn_id: str) -> tuple[tuple[Any, tuple[Any, ...]], ...]:
+    user = store.messages.get_user_message_for_turn(turn_id)
     return tuple(
         (message, parts)
-        for message, parts in store.list_messages_with_parts(store.get_turn(turn_id).session_id, turn_id)
+        for message, parts in store.messages.list_messages_with_parts(store.turns.get_turn(turn_id).session_id, turn_id)
         if message.status in {"completed", "interrupted"}
         and message.metadata.get("summary_id") is None
         and (user is None or message.message_id != user.message_id)
@@ -440,7 +451,7 @@ def _turn_dynamic_messages(store: SessionStore, turn_id: str) -> tuple[tuple[Any
 
 
 def _assert_coverage_invariant(
-    store: SessionStore,
+    store: SessionRepositories,
     turn_id: str,
     covered_message_ids: tuple[str, ...],
     retained_message_ids: tuple[str, ...],
@@ -452,16 +463,16 @@ def _assert_coverage_invariant(
         raise RuntimeError("turn_context_coverage_invariant_failed")
 
 
-def _context_source_ids(store: SessionStore, turn_id: str, message_ids: tuple[str, ...]) -> set[str]:
+def _context_source_ids(store: SessionRepositories, turn_id: str, message_ids: tuple[str, ...]) -> set[str]:
     selected = set(message_ids)
     source_ids = set(selected)
-    for message, parts in store.list_messages_with_parts(store.get_turn(turn_id).session_id, turn_id):
+    for message, parts in store.messages.list_messages_with_parts(store.turns.get_turn(turn_id).session_id, turn_id):
         if message.message_id not in selected:
             continue
         if message.metadata.get("tool_call_id") is not None:
             source_ids.add(str(message.metadata["tool_call_id"]))
         source_ids.update(str(part.metadata["tool_call_id"]) for part in parts if part.metadata.get("tool_call_id") is not None)
-    source_ids.update(call.tool_call_id for call in store.list_tool_calls(store.get_turn(turn_id).session_id) if call.turn_id == turn_id and call.message_id in selected)
+    source_ids.update(call.tool_call_id for call in store.tool_executions.list_tool_calls(store.turns.get_turn(turn_id).session_id) if call.turn_id == turn_id and call.message_id in selected)
     return source_ids
 
 

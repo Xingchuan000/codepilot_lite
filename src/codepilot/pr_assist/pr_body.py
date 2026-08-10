@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from codepilot.github.issue_models import IssueTask
-from codepilot.pr_assist.models import PRBodyData, PRAssistSafetyGate
+from codepilot.pr_assist.models import PRAssistSafetyGate, PRBodyData
 from codepilot.report.models import RunReport
 
 
@@ -32,7 +32,7 @@ def display_artifact_path(path: str | Path | None, run_dir: str | Path) -> str |
     run_dir_path = Path(run_dir).expanduser().resolve()
     try:
         return str(path_obj.expanduser().resolve().relative_to(run_dir_path))
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return path_obj.name
 
 

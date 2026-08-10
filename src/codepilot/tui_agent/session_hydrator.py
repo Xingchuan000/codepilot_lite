@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass
 
 from codepilot.permissions import PermissionRequest
-from codepilot.session.store import SessionStore
+from codepilot.session.context_adapters import validate_current_session_protocol
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tui_agent.models import TimelineItem, TranscriptItem
 
 
@@ -29,7 +30,7 @@ class HydratedSessionView:
     task: str = ""
 
 
-def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessionView:
+def hydrate_session_view(store: SessionRepositories, session_id: str) -> HydratedSessionView:
     """从 SQLite 重新构建 Session 画面。
 
     这里刻意只保留用户能理解的高层事实，Trace 噪声继续留在 timeline，不塞进主 transcript。
@@ -45,7 +46,7 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
     test_status: str | None = None
     warnings: list[str] = []
 
-    for event in store.list_events(session_id):
+    for event in store.events.list_events(session_id):
         timeline.append(TimelineItem(step=event.sequence, title=event.event_type, category="session_event", status=None))
         if event.event_type == "branch_changed":
             body = _dump_json(event.payload)
@@ -62,7 +63,7 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
             status = event.payload.get("status")
             if isinstance(status, str):
                 test_status = status
-    for request in store.list_permission_requests(session_id):
+    for request in store.permissions.list_permission_requests(session_id):
         if request.status != "pending":
             continue
         permission_requests.append(_permission_request_from_record(request))
@@ -78,7 +79,9 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
             )
         )
 
-    for message, parts in store.list_messages_with_parts(session_id):
+    messages = store.messages.list_messages_with_parts(session_id)
+    validate_current_session_protocol((message, tuple(parts)) for message, parts in messages)
+    for message, parts in messages:
         body = _message_body(message.role, message.content, parts)
         if message.role == "user":
             last_user_text = body
@@ -114,10 +117,10 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
             elif part.type == "tool_result":
                 continue
 
-    tool_calls = {call.tool_call_id: call for call in store.list_tool_calls(session_id)}
+    tool_calls = {call.tool_call_id: call for call in store.tool_executions.list_tool_calls(session_id)}
     rendered_tool_call_ids = {
         str(part.metadata["tool_call_id"])
-        for _, parts in store.list_messages_with_parts(session_id)
+        for _, parts in store.messages.list_messages_with_parts(session_id)
         for part in parts
         if part.type == "tool_call" and part.metadata.get("tool_call_id")
     }
@@ -137,7 +140,7 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
                 metadata={"tool_call_id": call.tool_call_id},
             )
         )
-    for result in store.list_tool_results(session_id):
+    for result in store.tool_executions.list_tool_results(session_id):
         call = tool_calls.get(result.tool_call_id)
         body = result.output_preview or _part_body(result.content)
         transcript.append(
@@ -156,10 +159,10 @@ def hydrate_session_view(store: SessionStore, session_id: str) -> HydratedSessio
 
     transcript.sort(key=lambda item: (item.timestamp, _transcript_type_order(item.kind), item.id))
 
-    session = store.get_session(session_id)
-    turns = store.list_turns(session_id)
+    session = store.sessions.get_session(session_id)
+    turns = store.turns.list_turns(session_id)
     latest_turn = turns[-1] if turns else None
-    attempts = store.list_attempts(latest_turn.turn_id) if latest_turn is not None else []
+    attempts = store.attempts.list_attempts(latest_turn.turn_id) if latest_turn is not None else []
     latest_attempt = attempts[-1] if attempts else None
     return HydratedSessionView(
         transcript=tuple(transcript),
@@ -208,15 +211,13 @@ def _dump_json(value: object) -> str:
 
 
 def _message_body(role: str, content: object, parts) -> str:
-    if parts:
-        values = [
-            _part_body(part.content)
-            for part in parts
-            if part.replayable and part.type != "tool_call"
-        ]
-        if values:
-            return "\n".join(values)
-    return _dump_json(content)
+    if role in {"user", "system"}:
+        return _dump_json(content)
+    return "\n".join(
+        _part_body(part.content)
+        for part in parts
+        if part.replayable and part.type != "tool_call"
+    )
 
 
 def _part_body(content: object) -> str:

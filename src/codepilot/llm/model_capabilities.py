@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import litellm
 
-from codepilot.session.model_capabilities import ModelCapabilities
+from codepilot.llm.capabilities import ModelCapabilities
+
+logger = logging.getLogger(__name__)
 
 
 def resolve_litellm_model_capabilities(
@@ -14,7 +17,13 @@ def resolve_litellm_model_capabilities(
 ) -> ModelCapabilities | None:
     try:
         info: dict[str, Any] = litellm.get_model_info(model=model)
-    except Exception:
+    except Exception as exc:
+        if "isn't mapped yet" not in str(exc):
+            raise
+        logger.warning(
+            "LiteLLM has no model capability metadata",
+            extra={"provider": provider, "model": model, "error_type": type(exc).__name__},
+        )
         return None
 
     max_input = info.get("max_input_tokens")

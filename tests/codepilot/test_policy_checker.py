@@ -4,7 +4,7 @@ import pytest
 
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.policy.models import PolicyDecision
-from codepilot.router.actions import ToolAction
+from codepilot.tools.actions import ToolAction
 
 
 def _decision(tool_name: str, arguments: dict[str, object], context: PolicyContext | None = None) -> PolicyDecision:

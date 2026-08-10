@@ -249,7 +249,7 @@ def test_open_session_shows_recovery_modal_for_unknown_side_effect(tmp_path: Pat
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
     session = app._session_service.create_session(tmp_path, "codepilot", "default", "manual")
     store = app._session_service.store
-    turn = store.create_turn(
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="Turn 1",
         provider_snapshot="codepilot",
@@ -258,10 +258,10 @@ def test_open_session_shows_recovery_modal_for_unknown_side_effect(tmp_path: Pat
         branch_snapshot=None,
         status="running",
     )
-    attempt = store.create_attempt(turn_id=turn.turn_id, status="running", started_at="2024-01-01T00:00:00+00:00")
+    attempt = store.attempts.create_attempt(turn_id=turn.turn_id, status="running", started_at="2024-01-01T00:00:00+00:00")
     command = "git commit -m x"
-    call = store.create_tool_call(turn_id=turn.turn_id, attempt_id=attempt.attempt_id, tool_name="run_shell", arguments={"repo": str(tmp_path), "command": command})
-    store.persist_tool_execution_started(
+    call = store.tool_executions.create_tool_call(turn_id=turn.turn_id, attempt_id=attempt.attempt_id, tool_name="run_shell", arguments={"repo": str(tmp_path), "command": command})
+    store.tool_executions.persist_tool_execution_started(
         call.tool_call_id,
         {"command_sha256": hashlib.sha256(command.encode()).hexdigest(), "auto_retry_allowed": False},
     )
@@ -270,6 +270,7 @@ def test_open_session_shows_recovery_modal_for_unknown_side_effect(tmp_path: Pat
 
     assert app.last_screen.__class__.__name__ == "RecoveryModal"
     assert app.last_screen.tool_call_id == call.tool_call_id
-    assert store.get_turn(turn.turn_id).status == "recovery_required"
+    assert store.turns.get_turn(turn.turn_id).status == "recovery_required"
     app.last_screen_callback("abort")
-    assert store.get_turn(turn.turn_id).status == "cancelled"
+    assert store.turns.get_turn(turn.turn_id).status == "cancelled"
+

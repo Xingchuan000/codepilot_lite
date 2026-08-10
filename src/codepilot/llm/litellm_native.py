@@ -17,7 +17,7 @@ from codepilot.llm.types import (
     LLMToolCall,
     RichChatMessage,
 )
-from codepilot.session.provider_messages import to_provider_messages
+from codepilot.llm.provider_messages import to_provider_messages
 from codepilot.tools.base import ToolSpec
 
 

@@ -104,20 +104,35 @@ def extract_changed_files(
     changed: list[str] = []
     if report is not None:
         changed.extend(report.changed_files)
-    patch = manifest_summary.get("patch") if isinstance(manifest_summary.get("patch"), dict) else {}
-    if isinstance(patch, dict):
+    elif events:
+        changed.extend(_current_trace_changed_files(events))
+    else:
+        patch = manifest_summary.get("patch") if isinstance(manifest_summary.get("patch"), dict) else {}
         changed.extend(str(item) for item in patch.get("changed_files", []) if isinstance(item, str))
+    return tuple(sorted(dict.fromkeys(item for item in changed if item)))
+
+
+def _current_trace_changed_files(events: list[dict[str, Any]]) -> list[str]:
+    changed: list[str] = []
     for event in events:
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
-        for key in ("changed_files", "touched_paths"):
-            value = metadata.get(key)
-            if isinstance(value, list):
-                changed.extend(str(item) for item in value if isinstance(item, str))
-        if event.get("tool_name") in {"git_status", "apply_patch", "replace_range", "git_diff"}:
-            path_value = metadata.get("path")
-            if isinstance(path_value, str):
-                changed.append(path_value)
-    return tuple(sorted(dict.fromkeys(item for item in changed if item)))
+        event_type = event.get("event_type")
+        tool_name = event.get("tool_name")
+        if event_type == "agent_finish":
+            changed.extend(item for item in metadata.get("changed_files", []) if isinstance(item, str))
+        elif tool_name == "git_status":
+            changed.extend(item for item in metadata.get("changed_files", []) if isinstance(item, str))
+        elif tool_name == "apply_patch":
+            changed.extend(item for item in metadata.get("touched_paths", []) if isinstance(item, str))
+        elif tool_name == "replace_range" and metadata.get("changed") is True:
+            path = metadata.get("path")
+            if isinstance(path, str):
+                changed.append(path)
+        elif tool_name == "git_diff":
+            path = metadata.get("path")
+            if isinstance(path, str):
+                changed.append(path)
+    return changed
 
 
 def extract_test_status(events: list[dict[str, Any]], report: RunReport | None) -> str | None:
@@ -139,7 +154,7 @@ def count_policy(events: list[dict[str, Any]]) -> dict[str, int]:
         if event.get("event_type") != "policy_decision":
             continue
         metadata = event.get("metadata") if isinstance(event.get("metadata"), dict) else {}
-        decision = event.get("policy_decision") or metadata.get("policy_decision")
+        decision = event.get("policy_decision")
         approved = metadata.get("approved")
         executed = metadata.get("executed")
         summary["total"] += 1
@@ -320,7 +335,7 @@ def build_run_entry(run_dir: str | Path) -> RunIndexEntry:
             if event.get("event_type") == "policy_decision"
             and (
                 (event.get("metadata") if isinstance(event.get("metadata"), dict) else {}).get("requires_approval") is True
-                or (event.get("policy_decision") or (event.get("metadata") if isinstance(event.get("metadata"), dict) else {}).get("policy_decision")) == "ask"
+                or event.get("policy_decision") == "ask"
             )
         ),
         unexecuted_action_count=count_policy(events)["unexecuted"],

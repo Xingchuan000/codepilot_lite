@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from codepilot.auto_pr.models import (
     AutoPRResult,
     AutoPRSafetyGate,
     BranchPushPlan,
+    GitHubRepoRef,
     PRCreateRequest,
     PRCreateResult,
     RemoteActionMode,
@@ -39,7 +41,7 @@ from codepilot.auto_pr.workflow_inputs import validate_head_branch, validate_rep
 from codepilot.repo.git_utils import sha256_file
 from codepilot.security.secrets import scan_token_like_strings
 from codepilot.workflow_artifacts import build_artifact_record, prepare_owned_artifacts
-from codepilot.workflow_manifest import load_source_artifact_manifest
+from codepilot.auto_pr.manifest_loader import load_source_artifact_manifest
 
 
 AUTO_PR_ARTIFACT_NAMES = [
@@ -277,27 +279,60 @@ def _write_manifest_invalid_result(
     return AutoPRResult(**{**result.__dict__, "auto_pr_manifest_path": manifest_path})
 
 
-def run_auto_pr(
+
+@dataclass
+class AutoPRWorkflowContext:
+    run_dir: Path
+    mode: RemoteActionMode
+    execute: bool
+    allow_push: bool
+    allow_create_pr: bool
+    allow_comment: bool
+    allow_empty_pr: bool
+    remote_name: str
+    base_branch: str | None
+    head_branch: str | None
+    repo_slug: str | None
+    token_env: str
+    draft: bool
+    generate_workflow_template: bool
+    github_client: GitHubClientProtocol | None
+    pr_assist_manifest_path: Path
+    pr_assist_manifest: dict[str, Any]
+    source_manifest: dict[str, Any]
+    artifacts: dict[str, Path]
+    run_id: str
+    safety_gate: AutoPRSafetyGate
+    validation_errors: list[str]
+    manifest_errors: list[str]
+    blockers: list[str]
+    warnings: list[str]
+    repo_path: str | Path | None
+    repo_ref: GitHubRepoRef | None
+    branch_push_plan: BranchPushPlan | None
+    pr_request: PRCreateRequest | None
+    plan_path: Path | None = None
+    controlled_workflow_path: Path | None = None
+
+
+def _build_auto_pr_context(
     *,
     run_dir: str | Path,
-    dry_run: bool = True,
-    execute: bool = False,
-    allow_push: bool = False,
-    allow_create_pr: bool = False,
-    allow_comment: bool = False,
-    allow_empty_pr: bool = False,
-    remote_name: str = "origin",
-    base_branch: str | None = None,
-    head_branch: str | None = None,
-    repo_slug: str | None = None,
-    token_env: str = "GITHUB_TOKEN",
-    draft: bool = True,
-    generate_workflow_template: bool = True,
-    overwrite: bool = False,
-    github_client: GitHubClientProtocol | None = None,
-) -> AutoPRResult:
-    """执行第十三步 Controlled Auto PR workflow。"""
-
+    execute: bool,
+    allow_push: bool,
+    allow_create_pr: bool,
+    allow_comment: bool,
+    allow_empty_pr: bool,
+    remote_name: str,
+    base_branch: str | None,
+    head_branch: str | None,
+    repo_slug: str | None,
+    token_env: str,
+    draft: bool,
+    generate_workflow_template: bool,
+    github_client: GitHubClientProtocol | None,
+    overwrite: bool,
+) -> AutoPRWorkflowContext | AutoPRResult:
     mode: RemoteActionMode = "execute" if execute else "dry_run"
     run_dir_path = Path(run_dir).expanduser().resolve()
     if not run_dir_path.exists() or not run_dir_path.is_dir():
@@ -347,6 +382,7 @@ def run_auto_pr(
             overwrite=True,
         )
         return AutoPRResult(**{**minimal_result.__dict__, "auto_pr_plan_path": plan_path, "auto_pr_manifest_path": manifest_path})
+
     run_id = validate_run_id(str(pr_assist_manifest.get("run_id") or run_dir_path.name))
     validated_head_branch = validate_head_branch(head_branch, run_id=run_id)
     validated_repo_slug = validate_repo_slug(repo_slug)
@@ -361,6 +397,7 @@ def run_auto_pr(
             reason=redact_github_error(str(exc)),
             overwrite=True,
         )
+
     validation_errors = validate_pr_assist_manifest(pr_assist_manifest, run_dir_path, allow_empty_pr=allow_empty_pr)
     safety_gate = build_auto_pr_safety_gate(
         pr_assist_manifest=pr_assist_manifest,
@@ -388,23 +425,19 @@ def run_auto_pr(
     commit_sha = str(pr_assist_manifest.get("commit_sha") or "")
     resolved_base_branch = (
         base_branch
-        or (None if repo_path == "[REDACTED_PATH]" else get_default_base_branch(repo_path, remote_name))  # type: ignore[arg-type]
+        or (None if repo_path == "[REDACTED_PATH]" else get_default_base_branch(repo_path, remote_name))
         or ((source_manifest.get("before") or {}).get("branch"))
         or "main"
     )
     resolved_head_branch = validated_head_branch or f"codepilot/{run_id}"
     branch_push_plan: BranchPushPlan | None = None
     pr_request: PRCreateRequest | None = None
-    repo_ref = None
+    repo_ref: GitHubRepoRef | None = None
     if not validation_errors:
         try:
-            repo_ref = resolve_repo_ref(
-                repo_path,
-                remote_name=remote_name,
-                repo_slug=validated_repo_slug,
-            )  # type: ignore[arg-type]
+            repo_ref = resolve_repo_ref(repo_path, remote_name=remote_name, repo_slug=validated_repo_slug)
             branch_push_plan = build_push_plan(
-                repo_path=repo_path,  # type: ignore[arg-type]
+                repo_path=repo_path,
                 remote_name=remote_name,
                 local_branch=local_branch,
                 remote_branch=resolved_head_branch,
@@ -414,91 +447,92 @@ def run_auto_pr(
             pr_request = build_pr_create_request(
                 repo=repo_ref,
                 pr_body_path=artifacts["pr_body"],
-                title=extract_pr_title(pr_body_path=artifacts["pr_body"], issue_json_path=run_dir_path / "issue.json", fallback=f"CodePilot changes for {run_id}"),
+                title=extract_pr_title(
+                    pr_body_path=artifacts["pr_body"],
+                    issue_json_path=run_dir_path / "issue.json",
+                    fallback=f"CodePilot changes for {run_id}",
+                ),
                 head_branch=resolved_head_branch,
                 base_branch=resolved_base_branch,
                 draft=draft,
             )
         except Exception as exc:
             blockers.append(redact_github_error(str(exc)))
-
-    status = _status_from_gate(safety_gate, execute=execute, blockers=blockers, validation_errors=manifest_errors)
-    plan_path = write_auto_pr_plan(
-        render_auto_pr_plan(
-            run_id=run_id,
-            mode=mode,
-            safety_gate=safety_gate,
-            source_artifact_manifest=source_manifest,
-            pr_assist_manifest=pr_assist_manifest,
-            branch_push_plan=branch_push_plan,
-            pr_request=pr_request,
-            blockers=blockers,
-            warnings=warnings,
-        ),
-        run_dir_path / "auto_pr_plan.md",
-        overwrite=True,
-    )
-    controlled_workflow_path = None
-    if generate_workflow_template:
-        controlled_workflow_path = write_controlled_auto_pr_workflow_template(
-            run_dir_path / "controlled_auto_pr_workflow.yml",
-            overwrite=True,
-        )
-
-    result = AutoPRResult(
-        run_id=run_id,
+    return AutoPRWorkflowContext(
         run_dir=run_dir_path,
-        status=status,  # type: ignore[arg-type]
+        mode=mode,
+        execute=execute,
+        allow_push=allow_push,
+        allow_create_pr=allow_create_pr,
+        allow_comment=allow_comment,
+        allow_empty_pr=allow_empty_pr,
+        remote_name=remote_name,
+        base_branch=base_branch,
+        head_branch=validated_head_branch,
+        repo_slug=validated_repo_slug,
+        token_env=token_env,
+        draft=draft,
+        generate_workflow_template=generate_workflow_template,
+        github_client=github_client,
+        pr_assist_manifest_path=pr_assist_manifest_path,
+        pr_assist_manifest=pr_assist_manifest,
+        source_manifest=source_manifest,
+        artifacts=artifacts,
+        run_id=run_id,
         safety_gate=safety_gate,
-        auto_pr_plan_path=plan_path,
-        controlled_workflow_path=controlled_workflow_path,
+        validation_errors=validation_errors,
+        manifest_errors=manifest_errors,
+        blockers=blockers,
+        warnings=warnings,
+        repo_path=repo_path,
+        repo_ref=repo_ref,
         branch_push_plan=branch_push_plan,
         pr_request=pr_request,
-        warnings=warnings,
     )
-    if manifest_errors:
-        manifest_path = write_auto_pr_manifest(
-            output_path=run_dir_path / "auto_pr_manifest.json",
-            result=result,
-            pr_assist_manifest_path=pr_assist_manifest_path,
-            source_artifact_manifest_path=run_dir_path / "artifact_manifest.json",
-            artifacts={"auto_pr_plan": plan_path, "controlled_auto_pr_workflow": controlled_workflow_path},
-            mode=mode,
-            blockers=blockers,
-            warnings=warnings,
+
+
+def _persist_auto_pr_plan(ctx: AutoPRWorkflowContext) -> AutoPRResult:
+    status = _status_from_gate(
+        ctx.safety_gate,
+        execute=ctx.execute,
+        blockers=ctx.blockers,
+        validation_errors=ctx.manifest_errors,
+    )
+    ctx.plan_path = write_auto_pr_plan(
+        render_auto_pr_plan(
+            run_id=ctx.run_id,
+            mode=ctx.mode,
+            safety_gate=ctx.safety_gate,
+            source_artifact_manifest=ctx.source_manifest,
+            pr_assist_manifest=ctx.pr_assist_manifest,
+            branch_push_plan=ctx.branch_push_plan,
+            pr_request=ctx.pr_request,
+            blockers=ctx.blockers,
+            warnings=ctx.warnings,
+        ),
+        ctx.run_dir / "auto_pr_plan.md",
+        overwrite=True,
+    )
+    if ctx.generate_workflow_template:
+        ctx.controlled_workflow_path = write_controlled_auto_pr_workflow_template(
+            ctx.run_dir / "controlled_auto_pr_workflow.yml",
             overwrite=True,
         )
-        return AutoPRResult(**{**result.__dict__, "auto_pr_manifest_path": manifest_path})
+    return AutoPRResult(
+        run_id=ctx.run_id,
+        run_dir=ctx.run_dir,
+        status=status,
+        safety_gate=ctx.safety_gate,
+        auto_pr_plan_path=ctx.plan_path,
+        controlled_workflow_path=ctx.controlled_workflow_path,
+        branch_push_plan=ctx.branch_push_plan,
+        pr_request=ctx.pr_request,
+        warnings=ctx.warnings,
+    )
 
-    if not execute:
-        manifest_path = write_auto_pr_manifest(
-            output_path=run_dir_path / "auto_pr_manifest.json",
-            result=result,
-            pr_assist_manifest_path=pr_assist_manifest_path,
-            source_artifact_manifest_path=run_dir_path / "artifact_manifest.json",
-            artifacts={"auto_pr_plan": plan_path, "controlled_auto_pr_workflow": controlled_workflow_path},
-            mode=mode,
-            blockers=blockers,
-            warnings=warnings,
-            overwrite=True,
-        )
-        return AutoPRResult(**{**result.__dict__, "auto_pr_manifest_path": manifest_path})
 
-    if execute and status == "blocked_by_safety":
-        manifest_path = write_auto_pr_manifest(
-            output_path=run_dir_path / "auto_pr_manifest.json",
-            result=result,
-            pr_assist_manifest_path=pr_assist_manifest_path,
-            source_artifact_manifest_path=run_dir_path / "artifact_manifest.json",
-            artifacts={"auto_pr_plan": plan_path, "controlled_auto_pr_workflow": controlled_workflow_path},
-            mode=mode,
-            blockers=blockers,
-            warnings=warnings,
-            overwrite=True,
-        )
-        return AutoPRResult(**{**result.__dict__, "auto_pr_manifest_path": manifest_path})
-
-    pushed_plan = branch_push_plan
+def _execute_auto_pr_phase(ctx: AutoPRWorkflowContext, planned: AutoPRResult) -> AutoPRResult:
+    pushed_plan = ctx.branch_push_plan
     push_executed = False
     pr_created = False
     github_api_called = False
@@ -506,127 +540,165 @@ def run_auto_pr(
     pr_result: PRCreateResult | None = None
     try:
         assert_remote_side_effect_allowed(
-            safety_gate=safety_gate,
-            execute=execute,
-            allow_push=allow_push,
-            allow_create_pr=allow_create_pr,
+            safety_gate=ctx.safety_gate,
+            execute=ctx.execute,
+            allow_push=ctx.allow_push,
+            allow_create_pr=ctx.allow_create_pr,
         )
-        if execute and allow_create_pr and github_client is None:
-            assert_github_token_available(token_env)
-        if branch_push_plan is None or pr_request is None:
+        if ctx.execute and ctx.allow_create_pr and ctx.github_client is None:
+            assert_github_token_available(ctx.token_env)
+        if ctx.branch_push_plan is None or ctx.pr_request is None:
             raise AutoPRError("push plan or pr request unavailable")
         pushed_plan = push_branch(
-            repo_path=repo_path,  # type: ignore[arg-type]
-            push_plan=branch_push_plan,
-            execute=execute,
-            allow_push=allow_push,
+            repo_path=ctx.repo_path,
+            push_plan=ctx.branch_push_plan,
+            execute=ctx.execute,
+            allow_push=ctx.allow_push,
         )
         push_executed = pushed_plan.will_push
-        client = github_client or RestGitHubClient(token_env=token_env)
+        client = ctx.github_client or RestGitHubClient(token_env=ctx.token_env)
         try:
             pr_result = create_pr_if_allowed(
                 client=client,
-                request=pr_request,
-                execute=execute,
-                allow_create_pr=allow_create_pr,
+                request=ctx.pr_request,
+                execute=ctx.execute,
+                allow_create_pr=ctx.allow_create_pr,
                 push_executed=push_executed,
                 remote_ref_verified=pushed_plan.remote_ref_verified,
             )
             pr_created = pr_result.created
             github_api_called = pr_result.api_called
         except Exception as exc:
-            warnings.append(redact_github_error(str(exc)))
-            final_result = AutoPRResult(
-                run_id=run_id,
-                run_dir=run_dir_path,
+            ctx.warnings.append(redact_github_error(str(exc)))
+            return AutoPRResult(
+                run_id=ctx.run_id,
+                run_dir=ctx.run_dir,
                 status="failed",
-                safety_gate=safety_gate,
-                auto_pr_plan_path=plan_path,
-                controlled_workflow_path=controlled_workflow_path,
+                safety_gate=ctx.safety_gate,
+                auto_pr_plan_path=ctx.plan_path,
+                controlled_workflow_path=ctx.controlled_workflow_path,
                 branch_push_plan=pushed_plan,
-                pr_request=pr_request,
+                pr_request=ctx.pr_request,
                 pr_result=pr_result,
                 push_executed=push_executed,
                 pr_created=False,
                 github_api_called=github_api_called,
                 comment_posted=False,
-                warnings=warnings,
+                warnings=ctx.warnings,
             )
-            manifest_path = write_auto_pr_manifest(
-                output_path=run_dir_path / "auto_pr_manifest.json",
-                result=final_result,
-                pr_assist_manifest_path=pr_assist_manifest_path,
-                source_artifact_manifest_path=run_dir_path / "artifact_manifest.json",
-                artifacts={"auto_pr_plan": plan_path, "controlled_auto_pr_workflow": controlled_workflow_path},
-                mode=mode,
-                blockers=blockers,
-                warnings=warnings,
-                overwrite=True,
-            )
-            return AutoPRResult(**{**final_result.__dict__, "auto_pr_manifest_path": manifest_path})
-        if pr_created and repo_ref is not None:
+        if pr_created and ctx.repo_ref is not None:
             try:
                 comment = post_issue_comment_if_allowed(
                     client=client,
-                    repo=repo_ref,
-                    issue_number=extract_issue_number(source_manifest, issue_json_path=run_dir_path / "issue.json"),
+                    repo=ctx.repo_ref,
+                    issue_number=extract_issue_number(ctx.source_manifest, issue_json_path=ctx.run_dir / "issue.json"),
                     body=build_issue_comment_body(
                         pr_url=pr_result.url,
-                        run_id=run_id,
-                        safety_summary=summarize_safety_gate(safety_gate),
+                        run_id=ctx.run_id,
+                        safety_summary=summarize_safety_gate(ctx.safety_gate),
                         artifact_summary=["auto_pr_plan.md", "auto_pr_manifest.json", "pr_body.md"],
                         dry_run=False,
                     ),
-                    execute=execute,
-                    allow_comment=allow_comment,
+                    execute=ctx.execute,
+                    allow_comment=ctx.allow_comment,
                 )
                 comment_posted = comment is not None
             except Exception as exc:
-                warnings.append(redact_github_error(str(exc)))
+                ctx.warnings.append(redact_github_error(str(exc)))
         final_status = "pr_created" if pr_created else ("pushed" if push_executed else "failed")
-        final_result = AutoPRResult(
-            run_id=run_id,
-            run_dir=run_dir_path,
-            status=final_status,  # type: ignore[arg-type]
-            safety_gate=safety_gate,
-            auto_pr_plan_path=plan_path,
-            controlled_workflow_path=controlled_workflow_path,
+        return AutoPRResult(
+            run_id=ctx.run_id,
+            run_dir=ctx.run_dir,
+            status=final_status,
+            safety_gate=ctx.safety_gate,
+            auto_pr_plan_path=ctx.plan_path,
+            controlled_workflow_path=ctx.controlled_workflow_path,
             branch_push_plan=pushed_plan,
-            pr_request=pr_request,
+            pr_request=ctx.pr_request,
             pr_result=pr_result,
             push_executed=push_executed,
             pr_created=pr_created,
             github_api_called=github_api_called,
             comment_posted=comment_posted,
-            warnings=warnings,
+            warnings=ctx.warnings,
         )
     except Exception as exc:
-        warnings.append(redact_github_error(str(exc)))
-        final_result = AutoPRResult(
-            run_id=run_id,
-            run_dir=run_dir_path,
+        ctx.warnings.append(redact_github_error(str(exc)))
+        return AutoPRResult(
+            run_id=ctx.run_id,
+            run_dir=ctx.run_dir,
             status="failed",
-            safety_gate=safety_gate,
-            auto_pr_plan_path=plan_path,
-            controlled_workflow_path=controlled_workflow_path,
+            safety_gate=ctx.safety_gate,
+            auto_pr_plan_path=ctx.plan_path,
+            controlled_workflow_path=ctx.controlled_workflow_path,
             branch_push_plan=pushed_plan,
-            pr_request=pr_request,
+            pr_request=ctx.pr_request,
             pr_result=pr_result,
             push_executed=push_executed,
             pr_created=pr_created,
             github_api_called=github_api_called,
             comment_posted=comment_posted,
-            warnings=warnings,
+            warnings=ctx.warnings,
         )
+
+
+def _finalize_auto_pr(ctx: AutoPRWorkflowContext, result: AutoPRResult) -> AutoPRResult:
     manifest_path = write_auto_pr_manifest(
-        output_path=run_dir_path / "auto_pr_manifest.json",
-        result=final_result,
-        pr_assist_manifest_path=pr_assist_manifest_path,
-        source_artifact_manifest_path=run_dir_path / "artifact_manifest.json",
-        artifacts={"auto_pr_plan": plan_path, "controlled_auto_pr_workflow": controlled_workflow_path},
-        mode=mode,
-        blockers=blockers,
-        warnings=warnings,
+        output_path=ctx.run_dir / "auto_pr_manifest.json",
+        result=result,
+        pr_assist_manifest_path=ctx.pr_assist_manifest_path,
+        source_artifact_manifest_path=ctx.run_dir / "artifact_manifest.json",
+        artifacts={
+            "auto_pr_plan": ctx.plan_path,
+            "controlled_auto_pr_workflow": ctx.controlled_workflow_path,
+        },
+        mode=ctx.mode,
+        blockers=ctx.blockers,
+        warnings=ctx.warnings,
         overwrite=True,
     )
-    return AutoPRResult(**{**final_result.__dict__, "auto_pr_manifest_path": manifest_path})
+    return AutoPRResult(**{**result.__dict__, "auto_pr_manifest_path": manifest_path})
+
+
+def run_auto_pr(
+    *,
+    run_dir: str | Path,
+    dry_run: bool = True,
+    execute: bool = False,
+    allow_push: bool = False,
+    allow_create_pr: bool = False,
+    allow_comment: bool = False,
+    allow_empty_pr: bool = False,
+    remote_name: str = "origin",
+    base_branch: str | None = None,
+    head_branch: str | None = None,
+    repo_slug: str | None = None,
+    token_env: str = "GITHUB_TOKEN",
+    draft: bool = True,
+    generate_workflow_template: bool = True,
+    overwrite: bool = False,
+    github_client: GitHubClientProtocol | None = None,
+) -> AutoPRResult:
+    ctx = _build_auto_pr_context(
+        run_dir=run_dir,
+        execute=execute,
+        allow_push=allow_push,
+        allow_create_pr=allow_create_pr,
+        allow_comment=allow_comment,
+        allow_empty_pr=allow_empty_pr,
+        remote_name=remote_name,
+        base_branch=base_branch,
+        head_branch=head_branch,
+        repo_slug=repo_slug,
+        token_env=token_env,
+        draft=draft,
+        generate_workflow_template=generate_workflow_template,
+        github_client=github_client,
+        overwrite=overwrite,
+    )
+    if isinstance(ctx, AutoPRResult):
+        return ctx
+    planned = _persist_auto_pr_plan(ctx)
+    if ctx.manifest_errors or not execute or planned.status == "blocked_by_safety":
+        return _finalize_auto_pr(ctx, planned)
+    return _finalize_auto_pr(ctx, _execute_auto_pr_phase(ctx, planned))

@@ -4,12 +4,13 @@ from pathlib import Path
 
 from codepilot.agent.prompts import build_system_prompt
 from codepilot.llm.types import ChatMessage
-from codepilot.multi_agent.runtime_tools import AgentControlContext, build_agent_control_registry
+from codepilot.agent.boundary import RuntimeToolContext
+from codepilot.multi_agent.runtime_tools import build_agent_control_registry
 from codepilot.multi_agent.supervisor import AgentSupervisor
 from codepilot.session.context import ContextAssembler
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
-from codepilot.session.store import SessionStore
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tools.base import DefaultPermission, ToolRisk, ToolSideEffect, ToolSpec
 
 
@@ -39,14 +40,14 @@ def test_native_prompt_keeps_role_instructions_without_tool_catalog() -> None:
 def test_context_assembler_keeps_native_prompt_and_current_task_order(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(
         project_path=tmp_path,
         provider="openai",
         current_model="fake",
         permission_mode="manual",
     )
-    turn = store.create_turn(
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="child",
         provider_snapshot="openai",
@@ -54,7 +55,7 @@ def test_context_assembler_keeps_native_prompt_and_current_task_order(tmp_path: 
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    store.create_message(
+    store.messages.create_message(
         session_id=session.session_id,
         turn_id=turn.turn_id,
         role="user",
@@ -85,7 +86,7 @@ def test_primary_prompt_adds_delegated_result_consumption_guidance(tmp_path: Pat
     supervisor = AgentSupervisor(database=database, child_runtime_factory=lambda _: None)
     registry = build_agent_control_registry(
         supervisor,
-        AgentControlContext("parent", "turn", "attempt", tmp_path),
+        RuntimeToolContext("parent", "turn", "attempt", tmp_path),
     )
 
     prompt = build_system_prompt(tool_specs=registry.list_specs())
@@ -116,3 +117,4 @@ def test_child_prompt_without_spawn_agent_omits_primary_agent_control_guidance()
     )
     prompt = build_system_prompt(tool_specs=(read_only,), agent_instructions="delegated role")
     assert prompt == build_system_prompt(agent_instructions="delegated role")
+

@@ -69,9 +69,7 @@ def test_run_agent_task_read_only_does_not_modify_file(tmp_path: Path) -> None:
     assert (repo / "src" / "calc.py").read_text(encoding="utf-8") == "def add(a, b):\n    return a - b\n"
 
 
-def test_native_model_rejects_drop_params(monkeypatch) -> None:
-    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
-
+def test_native_model_rejects_drop_params() -> None:
     with pytest.raises(ModelConfigurationRequired, match="drop_params=true"):
         build_codepilot_llm(
             model="openai/gpt-4o-mini",
@@ -79,15 +77,13 @@ def test_native_model_rejects_drop_params(monkeypatch) -> None:
         )
 
 
-def test_native_model_fails_fast_when_function_calling_is_unsupported(monkeypatch) -> None:
-    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: False)
+def test_native_model_is_not_blocked_by_stale_litellm_capability_metadata() -> None:
+    built = build_codepilot_llm(model="deepseek/deepseek-v4-flash")
 
-    with pytest.raises(ModelConfigurationRequired, match="does not support native function calling"):
-        build_codepilot_llm(model="unsupported/model")
+    assert built.client.__class__.__name__ == "LiteLLMNativeClient"
 
 
-def test_native_model_is_constructed_from_litellm_config(monkeypatch) -> None:
-    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
+def test_native_model_is_constructed_from_litellm_config() -> None:
     config = resolve_litellm_config(
         model=None,
         model_config=["model.model_name=openai/gpt-4o-mini", "model.model_kwargs.temperature=0.2"],
@@ -106,7 +102,6 @@ def test_native_model_loads_minisweagent_global_config(monkeypatch, tmp_path: Pa
     config_file.write_text("CODEPILOT_TEST_API_KEY=from-minisweagent\n", encoding="utf-8")
     monkeypatch.delenv("CODEPILOT_TEST_API_KEY", raising=False)
     monkeypatch.setattr("minisweagent.global_config_file", config_file)
-    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
 
     build_codepilot_llm(model="openai/gpt-4o-mini")
 
@@ -117,9 +112,7 @@ def test_native_model_loads_minisweagent_global_config(monkeypatch, tmp_path: Pa
     ("model_name",),
     [("openai/test-model",), ("anthropic/test-model",), ("gemini/test-model",), ("deepseek/test-model",)],
 )
-def test_provider_matrix_builds_the_same_native_client(monkeypatch, model_name: str) -> None:
-    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
-
+def test_provider_matrix_builds_the_same_native_client(model_name: str) -> None:
     built = build_codepilot_llm(model=model_name)
 
     assert built.client.__class__.__name__ == "LiteLLMNativeClient"

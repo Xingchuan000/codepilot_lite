@@ -4,7 +4,8 @@ import pytest
 
 from codepilot.mcp.models import MCPServerConfig, MCPToolInfo
 from codepilot.mcp.risk import classify_mcp_tool
-from codepilot.multi_agent.runtime_tools import AgentControlContext, _tool_specs, build_agent_control_registry
+from codepilot.agent.boundary import RuntimeToolContext
+from codepilot.multi_agent.runtime_tools import _tool_specs, build_agent_control_registry
 from codepilot.multi_agent.supervisor import AgentSupervisor
 from codepilot.session.database import SessionDatabase
 from codepilot.tools.registry import list_tool_specs
@@ -49,7 +50,7 @@ def test_m2_agent_control_schemas_keep_exact_types_and_bounds(tmp_path) -> None:
     database.initialize()
     registry = build_agent_control_registry(
         AgentSupervisor(database=database, child_runtime_factory=lambda _: None),
-        AgentControlContext("parent", "turn", "attempt", tmp_path),
+        RuntimeToolContext("parent", "turn", "attempt", tmp_path),
     )
 
     spawn = registry.find_spec("spawn_agent")
@@ -74,7 +75,7 @@ def test_m2_invalid_arguments_are_rejected_without_alias_or_repair(tmp_path) -> 
     database.initialize()
     registry = build_agent_control_registry(
         AgentSupervisor(database=database, child_runtime_factory=lambda _: None),
-        AgentControlContext("parent", "turn", "attempt", tmp_path),
+        RuntimeToolContext("parent", "turn", "attempt", tmp_path),
     )
 
     invalid_scope = registry.call("spawn_agent", {"agent_type": "general", "task": "inspect", "write_scope": "src/"})

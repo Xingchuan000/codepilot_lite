@@ -4,7 +4,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from codepilot.policy import PolicyChecker, PolicyContext, PolicyDecision
 from codepilot.permissions import (
     PermissionBroker,
     PermissionRequest,
@@ -12,15 +11,18 @@ from codepilot.permissions import (
     make_permission_request_id,
     permission_now_iso,
 )
-from codepilot.router.actions import ToolAction, ToolRouteResult
+from codepilot.policy import PolicyChecker, PolicyContext, PolicyDecision
+from codepilot.router.actions import ToolRouteResult
 from codepilot.router.errors import ToolExecutionUncertainError, ToolPreExecutionError
+from codepilot.router.external_registry import ExternalToolRegistry
+from codepilot.router.runtime_tools import RuntimeToolRegistry
 from codepilot.session.permission import PermissionRequestContext, PermissionScopeBuilder
+from codepilot.tools.actions import ToolAction
 from codepilot.tools.base import ToolResult, ToolSpec
 from codepilot.tools.registry import call_external_tool_traced, call_tool_traced, find_tool_spec, list_tool_specs
+from codepilot.trace.events import TraceEvent
 from codepilot.trace.logger import TraceLogger
 from codepilot.trace.protocol import TraceRecorder
-from codepilot.trace.events import TraceEvent
-from codepilot.router.runtime_tools import RuntimeToolRegistry
 
 
 class ToolLifecycleObserver(Protocol):
@@ -75,7 +77,7 @@ class ToolRouter:
         output_preview_chars: int = 1000,
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
-        external_tool_registry: Any | None = None,
+        external_tool_registry: ExternalToolRegistry | None = None,
         runtime_tool_registry: RuntimeToolRegistry | None = None,
         permission_broker: PermissionBroker | None = None,
         lifecycle_observer: ToolLifecycleObserver | None = None,
@@ -108,7 +110,7 @@ class ToolRouter:
         output_preview_chars: int = 1000,
         policy_checker: PolicyChecker | None = None,
         policy_context: PolicyContext | None = None,
-        external_tool_registry: Any | None = None,
+        external_tool_registry: ExternalToolRegistry | None = None,
         runtime_tool_registry: RuntimeToolRegistry | None = None,
         trace_logger: TraceRecorder | None = None,
         permission_broker: PermissionBroker | None = None,
@@ -116,7 +118,7 @@ class ToolRouter:
         permission_scope_builder: PermissionScopeBuilder | None = None,
         permission_request_context: PermissionRequestContext | None = None,
         allowed_tool_names: Iterable[str] | None = None,
-    ) -> "ToolRouter":
+    ) -> ToolRouter:
         logger = trace_logger or TraceLogger(runs_dir=runs_dir, run_id=run_id)
         return cls(
             trace_logger=logger,
@@ -222,22 +224,16 @@ class ToolRouter:
             if spec is not None:
                 return spec
         if self.external_tool_registry is not None:
-            find_spec = getattr(self.external_tool_registry, "find_spec", None)
-            if callable(find_spec):
-                spec = find_spec(tool_name)
-                if spec is not None:
-                    return spec
+            spec = self.external_tool_registry.find_spec(tool_name)
+            if spec is not None:
+                return spec
         return find_tool_spec(tool_name)
 
     def list_visible_tool_specs(self) -> tuple[ToolSpec, ...]:
         specs: dict[str, ToolSpec] = {spec.name: spec for spec in list_tool_specs()}
         if self.external_tool_registry is not None:
-            list_specs = getattr(self.external_tool_registry, "list_exposed_specs", None)
-            if not callable(list_specs):
-                list_specs = getattr(self.external_tool_registry, "list_specs", None)
-            if callable(list_specs):
-                for spec in list_specs():
-                    specs[spec.name] = spec
+            for spec in self.external_tool_registry.list_exposed_specs():
+                specs[spec.name] = spec
         if self.runtime_tool_registry is not None:
             for spec in self.runtime_tool_registry.list_specs():
                 specs[spec.name] = spec

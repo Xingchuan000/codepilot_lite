@@ -1,5 +1,4 @@
 from pathlib import Path
-from types import SimpleNamespace
 
 from codepilot.agent.loop import MinimalAgentLoop
 from codepilot.llm.errors import LLMContextOverflowError
@@ -8,10 +7,10 @@ from codepilot.router import ToolRouter
 from codepilot.session.context import ContextAssembler
 from codepilot.session.context_audit import ContextAuditRepository
 from codepilot.session.context_budget import ContextBudgetExceeded, estimate_tokens
-from codepilot.session.context_recovery import SessionContextRecoveryCoordinator
+from codepilot.session.context_recovery import ContextRecoveryResult, SessionContextRecoveryCoordinator
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
-from codepilot.session.store import SessionStore
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.session.repositories import SessionRepositories
 
 
 class _OverflowThenFinish:
@@ -38,7 +37,10 @@ class _Recovery:
         self.calls += 1
         self.original_messages = values["original_messages"]
         self.original_base_message_count = values["original_base_message_count"]
-        return SimpleNamespace(messages=[ChatMessage("system", "short"), ChatMessage("user", values["task"])], base_message_count=2)
+        return ContextRecoveryResult(
+            messages=[ChatMessage("system", "short"), ChatMessage("user", values["task"])],
+            base_message_count=2,
+        )
 
     def retry_exhausted(self, **values):
         self.exhausted += 1
@@ -92,10 +94,10 @@ class _NoHistoryCompaction:
 def test_recovery_records_one_aggregate_snapshot_with_original_request_tokens(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
-    turn = store.create_turn(session_id=session.session_id, title="overflow", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="inspect")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
+    turn = store.turns.create_turn(session_id=session.session_id, title="overflow", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
+    store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="inspect")
     profile = ModelContextProfile("openai", "tiny", 16_384, False, protocol_overhead_tokens=11)
     compaction = _NoHistoryCompaction()
     coordinator = SessionContextRecoveryCoordinator(database, compaction, ContextAssembler(database), profile)
@@ -115,3 +117,4 @@ def test_recovery_records_one_aggregate_snapshot_with_original_request_tokens(tm
     assert snapshots[0].estimated_tokens_after == sum(estimate_tokens(message) for message in result.messages) + 11
     assert compaction.values["trigger"] == "provider_overflow"
     assert compaction.values["audit"] is False
+

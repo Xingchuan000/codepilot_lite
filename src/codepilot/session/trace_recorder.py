@@ -5,11 +5,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from codepilot.common.best_effort import run_best_effort
 from codepilot.llm.types import LLMReasoningReplay
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
 from codepilot.session.ids import now_iso
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.trace.events import TraceEvent
 
 
@@ -17,7 +18,7 @@ class SessionTraceRecorder:
     """把 Loop/Router 事件先写入 SQLite，再通知可选的 UI hook。"""
 
     def __init__(self, database: SessionDatabase, session_id: str, turn_id: str | None = None, attempt_id: str | None = None, record_hook: Callable[[TraceEvent], None] | None = None) -> None:
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
         self.artifacts = ArtifactStore(database)
         self.session_id = session_id
         self.turn_id = turn_id
@@ -32,8 +33,6 @@ class SessionTraceRecorder:
 
     @property
     def next_step(self) -> int:
-        """兼容现有 traced tool helper 的步骤分配接口。"""
-
         self._step += 1
         return self._step
 
@@ -45,53 +44,80 @@ class SessionTraceRecorder:
 
     def assistant_message_started(self, **_: Any) -> None:
         self._streaming_message = bool(_.get("streaming", True))
-        message = self.store.create_message(session_id=self.session_id, turn_id=self.turn_id or "", attempt_id=self.attempt_id, role="assistant", status="in_progress", content="")
+        self._last_message_id = None
+
+    def _create_assistant_message_with_part(self, *, part_type: str, part_content: Any, provider_format: str | None = None, replayable: bool = True, artifact_id: str | None = None, part_metadata: dict[str, Any] | None = None) -> None:
+        message, _ = self.store.messages.create_message_with_part(
+            session_id=self.session_id,
+            turn_id=self.turn_id or "",
+            attempt_id=self.attempt_id,
+            role="assistant",
+            status="in_progress",
+            content="",
+            part_type=part_type,
+            part_content=part_content,
+            provider_format=provider_format,
+            replayable=replayable,
+            artifact_id=artifact_id,
+            part_metadata=part_metadata,
+        )
         self._last_message_id = message.message_id
 
     def assistant_message_completed(self, *, content: str, reasoning_replay: LLMReasoningReplay | None = None, **_: Any) -> None:
-        if self._last_message_id is None:
-            self.assistant_message_started()
         if reasoning_replay is not None:
-            self.store.append_message_part(
-                self._last_message_id,
-                type="reasoning_replay",
-                content={"blocks": list(reasoning_replay.blocks)},
+            self._create_assistant_message_with_part(
+                part_type="reasoning_replay",
+                part_content={"blocks": list(reasoning_replay.blocks)},
                 provider_format=reasoning_replay.provider_format,
                 replayable=True,
             )
-        if not self._streaming_message:
-            # 流式消息已经逐段关联 MessagePart；只有非流式消息才持久化完整正文，避免
-            # 创建一条没有任何 MessagePart 引用的孤儿 Artifact。
+        if not self._streaming_message and content:
             persisted = self.artifacts.persist_content(self.session_id, "assistant_message", content)
-            self.store.append_message_part(
-                self._last_message_id,
-                type="text",
-                content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
-                artifact_id=persisted.artifact_id,
-            )
-        self.store.update_message_status(self._last_message_id, "completed")
+            if self._last_message_id is None:
+                self._create_assistant_message_with_part(
+                    part_type="text",
+                    part_content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+                    artifact_id=persisted.artifact_id,
+                )
+            else:
+                self.store.messages.append_message_part(
+                    self._last_message_id,
+                    type="text",
+                    content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+                    artifact_id=persisted.artifact_id,
+                )
+        if self._last_message_id is not None:
+            self.store.messages.update_message_status(self._last_message_id, "completed")
         self._streaming_message = False
 
     def assistant_text_delta(self, **_: Any) -> None:
-        if self._last_message_id is None:
-            self.assistant_message_started()
         content = str(_.get("content", ""))
         delta_type = str(_.get("type", "text"))
         if delta_type not in {"text", "reasoning"}:
             delta_type = "text"
         persisted = self.artifacts.persist_content(self.session_id, "assistant_message_delta", content)
-        self.store.append_message_part(
-            self._last_message_id,
-            type=delta_type,
-            content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
-            provider_format=_.get("provider_format"),
-            replayable=bool(_.get("replayable", True)),
-            artifact_id=persisted.artifact_id,
-        )
+        if self._last_message_id is None:
+            self.assistant_message_started(streaming=True)
+            self._create_assistant_message_with_part(
+                part_type=delta_type,
+                part_content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+                provider_format=_.get("provider_format"),
+                replayable=bool(_.get("replayable", True)),
+                artifact_id=persisted.artifact_id,
+            )
+        else:
+            self.store.messages.append_message_part(
+                self._last_message_id,
+                type=delta_type,
+                content=persisted.inline_content if persisted.inline_content is not None else persisted.preview,
+                provider_format=_.get("provider_format"),
+                replayable=bool(_.get("replayable", True)),
+                artifact_id=persisted.artifact_id,
+            )
 
     def assistant_message_interrupted(self, **_: Any) -> None:
         if self._last_message_id is not None:
-            self.store.update_message_status(self._last_message_id, "interrupted", interrupted_at=now_iso())
+            self.store.messages.update_message_status(self._last_message_id, "interrupted", interrupted_at=now_iso())
 
     def tool_call_created(self, *, tool_name: str, arguments: dict[str, Any], **_: Any) -> None:
         # ToolCall 业务表只允许 Router Lifecycle 写入；此入口保留给 Loop/UI 事件协议。
@@ -100,18 +126,16 @@ class SessionTraceRecorder:
     def record_native_tool_call(self, *, provider_tool_call_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
         """Persist an internal native call that does not pass through ToolRouter."""
 
+        content = {
+            "provider_tool_call_id": provider_tool_call_id,
+            "tool_name": tool_name,
+            "arguments": arguments,
+        }
+        metadata = {"provider_tool_call_id": provider_tool_call_id, "tool_name": tool_name}
         if self._last_message_id is None:
-            raise RuntimeError("tool call requires an assistant message")
-        self.store.append_message_part(
-            self._last_message_id,
-            type="tool_call",
-            content={
-                "provider_tool_call_id": provider_tool_call_id,
-                "tool_name": tool_name,
-                "arguments": arguments,
-            },
-            metadata={"provider_tool_call_id": provider_tool_call_id, "tool_name": tool_name},
-        )
+            self._create_assistant_message_with_part(part_type="tool_call", part_content=content, part_metadata=metadata)
+        else:
+            self.store.messages.append_message_part(self._last_message_id, type="tool_call", content=content, metadata=metadata)
 
     def attach_tool_call(
         self,
@@ -123,31 +147,29 @@ class SessionTraceRecorder:
     ) -> None:
         """把 Router 创建的 ToolCall 投影到产生该调用的 Assistant Message。"""
 
-        if self._last_message_id is None:
-            raise RuntimeError("tool call requires an assistant message")
         if provider_tool_call_id is None:
-            return
-        self.store.append_message_part(
-            self._last_message_id,
-            type="tool_call",
-            content={
-                "provider_tool_call_id": provider_tool_call_id,
-                "tool_name": tool_name,
-                "arguments": arguments,
-            },
-            metadata={
-                "tool_call_id": tool_call_id,
-                "provider_tool_call_id": provider_tool_call_id,
-                "tool_name": tool_name,
-            },
-        )
+            raise ValueError("Tool calls require provider_tool_call_id")
+        content = {
+            "provider_tool_call_id": provider_tool_call_id,
+            "tool_name": tool_name,
+            "arguments": arguments,
+        }
+        metadata = {
+            "tool_call_id": tool_call_id,
+            "provider_tool_call_id": provider_tool_call_id,
+            "tool_name": tool_name,
+        }
+        if self._last_message_id is None:
+            self._create_assistant_message_with_part(part_type="tool_call", part_content=content, part_metadata=metadata)
+        elif self.store.messages.find_tool_call_part(self._last_message_id, provider_tool_call_id) is None:
+            self.store.messages.append_message_part(self._last_message_id, type="tool_call", content=content, metadata=metadata)
 
     def tool_result_created(self, *, tool_name: str, success: bool, content: Any, **_: Any) -> None:
         tool_call_id = _.get("tool_call_id")
         provider_tool_call_id = _.get("provider_tool_call_id")
         if not isinstance(provider_tool_call_id, str) or not provider_tool_call_id:
             raise ValueError("Native tool results require provider_tool_call_id")
-        result = self.store.get_tool_result_by_call(str(tool_call_id)) if tool_call_id else None
+        result = self.store.tool_executions.get_tool_result_by_call(str(tool_call_id)) if tool_call_id else None
         observation = _.get("observation")
         artifact_id = result.artifact_id if result is not None else None
         message_content = observation if observation is not None else content or ""
@@ -157,28 +179,23 @@ class SessionTraceRecorder:
             if observation is None:
                 message_content = persisted.inline_content if persisted.inline_content is not None else persisted.preview
         prune_metadata = dict(_.get("prune_metadata") or {})
-        message = self.store.create_message(
+        self.store.messages.create_message_with_part(
             session_id=self.session_id,
             turn_id=self.turn_id or "",
             attempt_id=self.attempt_id,
             role="tool",
             status="completed",
             content=message_content,
-            metadata={"tool_name": tool_name, "success": success, "tool_call_id": tool_call_id, **prune_metadata},
-        )
-        self.store.append_message_part(
-            message.message_id,
-            type="tool_result",
-            # replayable 正文保存 Loop 实际看到的规范 observation；Artifact 仅引用业务
-            # ToolResult 已持久化的原始大输出，不在消息层重复创建第二份内容。
-            content={
+            part_type="tool_result",
+            part_content={
                 "provider_tool_call_id": provider_tool_call_id,
                 "tool_name": tool_name,
                 "content": message_content,
                 "codepilot_tool_call_id": tool_call_id,
             },
+            metadata={"tool_name": tool_name, "success": success, "tool_call_id": tool_call_id, **prune_metadata},
             artifact_id=artifact_id,
-            metadata={
+            part_metadata={
                 "tool_call_id": tool_call_id,
                 "provider_tool_call_id": provider_tool_call_id,
                 "tool_name": tool_name,
@@ -190,7 +207,7 @@ class SessionTraceRecorder:
     def loop_observation_created(self, *, content: str, category: str, **_: Any) -> None:
         """把模型可见的内部纠错消息写成可恢复的 synthetic user Message。"""
 
-        message = self.store.create_message(
+        message = self.store.messages.create_message(
             session_id=self.session_id,
             turn_id=self.turn_id or "",
             attempt_id=self.attempt_id,
@@ -199,7 +216,7 @@ class SessionTraceRecorder:
             content=content,
             metadata={"synthetic": True, "category": category},
         )
-        self.store.append_message_part(
+        self.store.messages.append_message_part(
             message.message_id,
             type="system_event" if category != "pre_execution_error" else "error",
             content=content,
@@ -215,9 +232,9 @@ class SessionTraceRecorder:
         return self.record(event)
 
     def record(self, event: TraceEvent) -> TraceEvent:
-        """兼容 traced tool helper，并保持先写 SQLite、后通知 Hook。"""
+        """先写入 SQLite，再通知可选的非关键观察 hook。"""
 
-        self.store.append_event(
+        self.store.events.append_event(
             session_id=self.session_id,
             event_type=event.event_type,
             payload=event.model_dump(mode="json"),
@@ -225,10 +242,16 @@ class SessionTraceRecorder:
             attempt_id=self.attempt_id,
         )
         if self.record_hook is not None:
-            try:
-                self.record_hook(event)
-            except Exception as exc:
-                self.last_record_hook_error = exc
+            hook_errors: list[Exception] = []
+            run_best_effort(
+                lambda: self.record_hook(event),
+                operation_name="session trace observer hook",
+                context={"session_id": self.session_id, "event_type": event.event_type},
+                expected_errors=(Exception,),
+                on_error=hook_errors.append,
+            )
+            if hook_errors:
+                self.last_record_hook_error = hook_errors[0]
         return event
 
     def record_run_start(self, task: str | None = None, metadata: dict | None = None) -> TraceEvent:

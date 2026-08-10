@@ -2,36 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any, Mapping
 
 from codepilot.mcp.models import MCPServerConfig, MCPToolInfo
 
-SENSITIVE_KEYS = {
-    "token",
-    "access_token",
-    "refresh_token",
-    "password",
-    "secret",
-    "api_key",
-    "apikey",
-    "authorization",
-    "cookie",
-    "set-cookie",
-    "client_secret",
-    "private_key",
-}
+import re
 
 _SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 _TOOL_NAME_RE = re.compile(r"[^a-zA-Z0-9_.:-]+")
-_MCP_TEXT_REDACTIONS = (
-    (re.compile(r"(?i)\b(token|access_token|refresh_token)\s*=\s*([^\s,;]+)"), r"\1=[REDACTED]"),
-    (re.compile(r"(?i)\bpassword\s*=\s*([^\s,;]+)"), "password=[REDACTED]"),
-    (re.compile(r"(?i)\b(secret|api_key|apikey|private_key|client_secret)\s*=\s*([^\s,;]+)"), "[REDACTED]"),
-    (re.compile(r"(?i)\bauthorization:\s*bearer\s+[^\s,;]+"), "Authorization: [REDACTED]"),
-    (re.compile(r"(?i)\b(set-cookie|cookie):\s*[^\r\n]+"), r"\1: [REDACTED]"),
-)
 
 
 def sanitize_mcp_server_name(name: str) -> str:
@@ -50,41 +29,6 @@ def sanitize_mcp_tool_name(name: str) -> str:
 
 def build_codepilot_mcp_tool_name(server_name: str, tool_name: str) -> str:
     return f"mcp.{sanitize_mcp_server_name(server_name)}.{sanitize_mcp_tool_name(tool_name)}"
-
-
-def _redact_text(value: str, *, max_chars: int = 4000) -> str:
-    if len(value) <= max_chars:
-        return value
-    suffix = "... truncated"
-    return f"{value[: max(0, max_chars - len(suffix))]}{suffix}"
-
-
-def redact_mcp_text(value: str, *, max_chars: int = 4000) -> str:
-    redacted = value
-    for pattern, replacement in _MCP_TEXT_REDACTIONS:
-        redacted = pattern.sub(replacement, redacted)
-    return _redact_text(redacted, max_chars=max_chars)
-
-
-def redact_mcp_mapping(value: Any) -> Any:
-    if isinstance(value, dict):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if any(token in key_text.lower() for token in SENSITIVE_KEYS):
-                redacted[key_text] = "[REDACTED]"
-            else:
-                redacted[key_text] = redact_mcp_mapping(item)
-        return redacted
-    if isinstance(value, list):
-        return [redact_mcp_mapping(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(redact_mcp_mapping(item) for item in value)
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, str):
-        return redact_mcp_text(value)
-    return value
 
 
 def truncate_mcp_text(text: str, max_chars: int) -> tuple[str, bool]:

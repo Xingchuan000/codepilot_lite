@@ -7,21 +7,21 @@ import pytest
 from codepilot.session.context import ContextAssembler
 from codepilot.session.context_fork import ForkContextPolicy
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
+from codepilot.session.model_context import ModelContextProfile
 from codepilot.session.service import SessionService
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 def _fixture(tmp_path: Path, mode: str, recent_turns: int = 3):
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
-    store = SessionStore(database)
+    store = SessionRepositories(database)
     service = SessionService(database)
     parent = service.create_session(tmp_path / "repo", "openai", "fake", "manual")
 
     turns = []
     for index in range(3):
-        turn = store.create_turn(
+        turn = store.turns.create_turn(
             session_id=parent.session_id,
             title=f"parent {index + 1}",
             provider_snapshot="openai",
@@ -30,21 +30,22 @@ def _fixture(tmp_path: Path, mode: str, recent_turns: int = 3):
             branch_snapshot=None,
         )
         turns.append(turn)
-        store.create_message(
+        store.messages.create_message(
             session_id=parent.session_id,
             turn_id=turn.turn_id,
             role="user",
             status="completed",
             content=f"parent-task-{index + 1}",
         )
-        store.create_message(
+        assistant = store.messages.create_message(
             session_id=parent.session_id,
             turn_id=turn.turn_id,
             role="assistant",
             status="completed",
             content=f"parent-result-{index + 1}",
         )
-    store.create_context_summary(
+        store.messages.append_message_part(assistant.message_id, type="text", content=f"parent-result-{index + 1}")
+    store.context_summaries.create_context_summary(
         session_id=parent.session_id,
         turn_id=turns[0].turn_id,
         content="summary-before-fork",
@@ -59,7 +60,7 @@ def _fixture(tmp_path: Path, mode: str, recent_turns: int = 3):
         permission_mode="manual",
         metadata={"context_fork": {"mode": mode, "recent_turns": recent_turns}},
     )
-    child_turn = store.create_turn(
+    child_turn = store.turns.create_turn(
         session_id=child.session_id,
         title="child",
         provider_snapshot="openai",
@@ -67,7 +68,7 @@ def _fixture(tmp_path: Path, mode: str, recent_turns: int = 3):
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    store.create_message(
+    store.messages.create_message(
         session_id=child.session_id,
         turn_id=child_turn.turn_id,
         role="user",
@@ -123,10 +124,10 @@ def test_context_fork_policy_normalizes_unknown_mode_and_recent_turns() -> None:
 def test_summary_recent_inherits_native_parent_tool_exchange_without_crashing(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
-    store = SessionStore(database)
+    store = SessionRepositories(database)
     service = SessionService(database)
     parent = service.create_session(tmp_path / "repo", "deepseek", "deepseek/test", "manual")
-    parent_turn = store.create_turn(
+    parent_turn = store.turns.create_turn(
         session_id=parent.session_id,
         title="parent",
         provider_snapshot="deepseek",
@@ -134,21 +135,21 @@ def test_summary_recent_inherits_native_parent_tool_exchange_without_crashing(tm
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    store.create_message(
+    store.messages.create_message(
         session_id=parent.session_id,
         turn_id=parent_turn.turn_id,
         role="user",
         status="completed",
         content="inspect README",
     )
-    assistant = store.create_message(
+    assistant = store.messages.create_message(
         session_id=parent.session_id,
         turn_id=parent_turn.turn_id,
         role="assistant",
         status="completed",
         content="",
     )
-    store.append_message_part(
+    store.messages.append_message_part(
         assistant.message_id,
         type="tool_call",
         content={
@@ -157,14 +158,14 @@ def test_summary_recent_inherits_native_parent_tool_exchange_without_crashing(tm
             "arguments": {"path": "README.md"},
         },
     )
-    tool = store.create_message(
+    tool = store.messages.create_message(
         session_id=parent.session_id,
         turn_id=parent_turn.turn_id,
         role="tool",
         status="completed",
         content="ok",
     )
-    store.append_message_part(
+    store.messages.append_message_part(
         tool.message_id,
         type="tool_result",
         content={
@@ -183,7 +184,7 @@ def test_summary_recent_inherits_native_parent_tool_exchange_without_crashing(tm
         permission_mode="manual",
         metadata={"context_fork": {"mode": "summary_recent", "recent_turns": 3}},
     )
-    child_turn = store.create_turn(
+    child_turn = store.turns.create_turn(
         session_id=child.session_id,
         title="child",
         provider_snapshot="deepseek",
@@ -191,7 +192,7 @@ def test_summary_recent_inherits_native_parent_tool_exchange_without_crashing(tm
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    store.create_message(
+    store.messages.create_message(
         session_id=child.session_id,
         turn_id=child_turn.turn_id,
         role="user",
@@ -212,3 +213,4 @@ def test_summary_recent_inherits_native_parent_tool_exchange_without_crashing(tm
     assert "[tool_result] read_file: README contents" in contents
     assert messages[-1].role == "user"
     assert "delegated-child-task\nRepository:" in messages[-1].content
+

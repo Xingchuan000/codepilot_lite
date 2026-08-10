@@ -8,21 +8,21 @@ from codepilot.agent.loop import MinimalAgentLoop
 from codepilot.llm.fake import StructuredFakeLLM
 from codepilot.llm.types import ChatMessage, ChatMessagePart, LLMResponse, LLMToolCall, RichChatMessage
 from codepilot.memory.repository import TurnCheckpointRepository
-from codepilot.memory.turn_window import CHECKPOINT_PREFIX, TurnContextWindow
+from codepilot.memory.turn_window import CHECKPOINT_PREFIX, ContextPreparationResult, TurnContextWindow
 from codepilot.router import ToolRouter
 from codepilot.session.context import ContextAssembler
 from codepilot.session.context_budget import ContextBudgetExceeded, estimate_tokens
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
-from codepilot.session.store import SessionStore
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.session.repositories import SessionRepositories
 
 
 def _turn(tmp_path: Path):
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="rolling",
         provider_snapshot="openai",
@@ -30,7 +30,7 @@ def _turn(tmp_path: Path):
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="fix the project")
+    store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="fix the project")
     return database, store, session, turn
 
 
@@ -65,12 +65,12 @@ def _native_exchange(tool_name: str, provider_tool_call_id: str, arguments: dict
     )
 
 
-def _store_native_exchange(store: SessionStore, session_id: str, turn_id: str, exchange: tuple[RichChatMessage, RichChatMessage]) -> None:
+def _store_native_exchange(store: SessionRepositories, session_id: str, turn_id: str, exchange: tuple[RichChatMessage, RichChatMessage]) -> None:
     assistant, tool = exchange
-    assistant_record = store.create_message(session_id=session_id, turn_id=turn_id, role="assistant", status="completed", content="")
-    store.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
-    tool_record = store.create_message(session_id=session_id, turn_id=turn_id, role="tool", status="completed", content=tool.parts[0].content["content"])
-    store.append_message_part(tool_record.message_id, type="tool_result", content=tool.parts[0].content)
+    assistant_record = store.messages.create_message(session_id=session_id, turn_id=turn_id, role="assistant", status="completed", content="")
+    store.messages.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
+    tool_record = store.messages.create_message(session_id=session_id, turn_id=turn_id, role="tool", status="completed", content=tool.parts[0].content["content"])
+    store.messages.append_message_part(tool_record.message_id, type="tool_result", content=tool.parts[0].content)
 
 
 def test_turn_window_persists_checkpoint_and_keeps_raw_messages(tmp_path: Path) -> None:
@@ -83,7 +83,7 @@ def test_turn_window_persists_checkpoint_and_keeps_raw_messages(tmp_path: Path) 
     messages = [ChatMessage("system", "system"), ChatMessage("user", "fix the project"), *dynamic]
     profile = ModelContextProfile("openai", "tiny", 500, False, protocol_overhead_tokens=0)
 
-    prepared, base_count = TurnContextWindow(database, profile, soft_limit=0.4, recent_group_count=2).prepare_for_llm(
+    prepared = TurnContextWindow(database, profile, soft_limit=0.4, recent_group_count=2).prepare_for_llm(
         session_id=session.session_id,
         turn_id=turn.turn_id,
         attempt_id=None,
@@ -97,20 +97,20 @@ def test_turn_window_persists_checkpoint_and_keeps_raw_messages(tmp_path: Path) 
 
     assert checkpoint is not None
     assert checkpoint.covered_message_ids
-    assert len(store.list_messages_with_parts(session.session_id)) == 11
-    assert any(message.role == "system" and message.content.startswith(CHECKPOINT_PREFIX) for message in prepared)
-    assert sum(estimate_tokens(message) for message in prepared) <= profile.max_input_tokens
-    assert base_count == 3
+    assert len(store.messages.list_messages_with_parts(session.session_id)) == 11
+    assert any(message.role == "system" and message.content.startswith(CHECKPOINT_PREFIX) for message in prepared.messages)
+    assert sum(estimate_tokens(message) for message in prepared.messages) <= profile.max_input_tokens
+    assert prepared.base_message_count == 3
 
     next_assistant, next_observation = _native_exchange("git_diff", "provider-next", {}, "y" * 500)
     _store_native_exchange(store, session.session_id, turn.turn_id, (next_assistant, next_observation))
-    prepared, base_count = TurnContextWindow(database, profile, soft_limit=0.4, recent_group_count=2).prepare_for_llm(
+    prepared = TurnContextWindow(database, profile, soft_limit=0.4, recent_group_count=2).prepare_for_llm(
         session_id=session.session_id,
         turn_id=turn.turn_id,
         attempt_id=None,
         step=7,
-        messages=[*prepared, next_assistant, next_observation],
-        base_message_count=base_count,
+        messages=[*prepared.messages, next_assistant, next_observation],
+        base_message_count=prepared.base_message_count,
         task="fix the project",
         evidence={"diff_checked": True},
     )
@@ -132,7 +132,7 @@ def test_turn_window_persists_checkpoint_and_keeps_raw_messages(tmp_path: Path) 
         item.key for item in plan.current_turn_items
     }
     recovery_profile = ModelContextProfile("openai", "tiny", 16_384, False, protocol_overhead_tokens=0)
-    recovered = ContextAssembler(database).build(
+    recovery_messages = ContextAssembler(database).build(
         session.session_id,
         turn.turn_id,
         "openai",
@@ -140,18 +140,18 @@ def test_turn_window_persists_checkpoint_and_keeps_raw_messages(tmp_path: Path) 
         profile=recovery_profile,
     )
 
-    _, recovered_base_count = TurnContextWindow(database, recovery_profile, soft_limit=1).prepare_for_llm(
+    recovered = TurnContextWindow(database, recovery_profile, soft_limit=1).prepare_for_llm(
         session_id=session.session_id,
         turn_id=turn.turn_id,
         attempt_id=None,
         step=7,
-        messages=recovered,
-        base_message_count=len(recovered),
+        messages=recovery_messages,
+        base_message_count=len(recovery_messages),
         task="fix the project",
         evidence={},
     )
 
-    assert recovered_base_count < len(recovered)
+    assert recovered.base_message_count < len(recovered.messages)
 
 
 class _RecordingWindow:
@@ -160,7 +160,10 @@ class _RecordingWindow:
 
     def prepare_for_llm(self, **values):
         self.steps.append(values["step"])
-        return values["messages"], values["base_message_count"]
+        return ContextPreparationResult(
+            messages=values["messages"],
+            base_message_count=values["base_message_count"],
+        )
 
 
 def test_agent_loop_checks_context_before_every_llm_call(tmp_path: Path) -> None:
@@ -185,7 +188,7 @@ def test_agent_loop_checks_context_before_every_llm_call(tmp_path: Path) -> None
 def test_turn_window_fits_checkpoint_with_large_pending_replacement(tmp_path: Path) -> None:
     database, store, session, turn = _turn(tmp_path)
     replacement = "new line\n" * 2500
-    call = store.create_tool_call(
+    call = store.tool_executions.create_tool_call(
         turn_id=turn.turn_id,
         tool_name="replace_range",
         arguments={"path": "src/app.py", "start_line": 1, "end_line": 2, "replacement": replacement},
@@ -197,7 +200,7 @@ def test_turn_window_fits_checkpoint_with_large_pending_replacement(tmp_path: Pa
         _store_native_exchange(store, session.session_id, turn.turn_id, exchange)
     profile = ModelContextProfile("openai", "tiny", 900, False, protocol_overhead_tokens=0)
 
-    prepared, _ = TurnContextWindow(database, profile, soft_limit=0.5, recent_group_count=1).prepare_for_llm(
+    prepared = TurnContextWindow(database, profile, soft_limit=0.5, recent_group_count=1).prepare_for_llm(
         session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=5,
         messages=[ChatMessage("system", "system"), ChatMessage("user", "fix"), *dynamic], base_message_count=2,
         task="fix", evidence={},
@@ -207,8 +210,8 @@ def test_turn_window_fits_checkpoint_with_large_pending_replacement(tmp_path: Pa
     assert checkpoint is not None
     assert replacement not in str(checkpoint.content)
     assert checkpoint.content["pending_tool_calls"][0]["arguments"]["replacement_chars"] == len(replacement)
-    assert store.get_tool_call(call.tool_call_id).arguments["replacement"] == replacement
-    assert sum(estimate_tokens(message) for message in prepared) <= profile.max_input_tokens
+    assert store.tool_executions.get_tool_call(call.tool_call_id).arguments["replacement"] == replacement
+    assert sum(estimate_tokens(message) for message in prepared.messages) <= profile.max_input_tokens
 
 
 def test_turn_window_covers_oversized_latest_completed_tool_group(tmp_path: Path) -> None:
@@ -217,12 +220,12 @@ def test_turn_window_covers_oversized_latest_completed_tool_group(tmp_path: Path
     _store_native_exchange(store, session.session_id, turn.turn_id, (small_assistant, small_result))
     patch = "x" * 30_000
     assistant, result_message = _native_exchange("apply_patch", "provider-patch", {"path": "src/app.py", "patch": patch}, "changed")
-    assistant_record = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="")
-    store.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
-    call = store.create_tool_call(turn_id=turn.turn_id, tool_name="apply_patch", arguments={"path": "src/app.py", "patch": patch}, message_id=assistant_record.message_id)
-    store.persist_tool_result(call.tool_call_id, call_status="completed", result_status="success", content="changed", success=True, metadata={"changed": True, "changed_files": ["src/app.py"]})
-    result_record = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="changed", metadata={"tool_call_id": call.tool_call_id, "success": True})
-    store.append_message_part(result_record.message_id, type="tool_result", content={**result_message.parts[0].content, "codepilot_tool_call_id": call.tool_call_id})
+    assistant_record = store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="")
+    store.messages.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
+    call = store.tool_executions.create_tool_call(turn_id=turn.turn_id, tool_name="apply_patch", arguments={"path": "src/app.py", "patch": patch}, message_id=assistant_record.message_id)
+    store.tool_executions.persist_tool_result(call.tool_call_id, call_status="completed", result_status="success", content="changed", success=True, metadata={"changed": True, "changed_files": ["src/app.py"]})
+    result_record = store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="changed", metadata={"tool_call_id": call.tool_call_id, "success": True})
+    store.messages.append_message_part(result_record.message_id, type="tool_result", content={**result_message.parts[0].content, "codepilot_tool_call_id": call.tool_call_id})
     profile = ModelContextProfile("openai", "tiny", 500, False, protocol_overhead_tokens=0)
 
     prepared = TurnContextWindow(database, profile, soft_limit=0.4, recent_group_count=2).prepare_for_llm(
@@ -236,7 +239,7 @@ def test_turn_window_covers_oversized_latest_completed_tool_group(tmp_path: Path
     assert result_record.message_id in checkpoint.covered_message_ids
     assert "src/app.py" in str(checkpoint.content)
     assert sum(estimate_tokens(message) for message in prepared.messages) <= profile.max_input_tokens
-    assert store.get_tool_call(call.tool_call_id).arguments["patch"] == patch
+    assert store.tool_executions.get_tool_call(call.tool_call_id).arguments["patch"] == patch
 
 
 def test_minimal_checkpoint_still_fails_when_mandatory_base_cannot_fit(tmp_path: Path) -> None:
@@ -249,3 +252,4 @@ def test_minimal_checkpoint_still_fails_when_mandatory_base_cannot_fit(tmp_path:
             messages=[ChatMessage("system", "x" * 200), ChatMessage("user", "fix")], base_message_count=2,
             task="fix", evidence={},
         )
+

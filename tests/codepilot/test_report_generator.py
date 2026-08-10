@@ -16,9 +16,9 @@ def test_generate_report_writes_markdown_and_json(tmp_path: Path) -> None:
     _write_trace(
         trace_path,
         [
-            '{"run_id":"run-test","step":1,"event_type":"run_start","metadata":{"task":"demo","repo":"%s","max_steps":3}}' % tmp_path,
-            '{"run_id":"run-test","step":2,"event_type":"agent_finish","success":true,"output_summary":"done","metadata":{"status":"success","changed_files":["src/calc.py"]}}',
-            '{"run_id":"run-test","step":3,"event_type":"run_end","success":true,"output_summary":"done"}',
+            json.dumps({"schema_version": "trace.v1", "run_id": "run-test", "step": 1, "event_type": "run_start", "metadata": {"task": "demo", "repo": str(tmp_path), "max_steps": 3}}),
+            '{"schema_version":"trace.v1","run_id":"run-test","step":2,"event_type":"agent_finish","success":true,"output_summary":"done","metadata":{"status":"success","changed_files":["src/calc.py"]}}',
+            '{"schema_version":"trace.v1","run_id":"run-test","step":3,"event_type":"run_end","success":true,"output_summary":"done"}',
         ],
     )
 
@@ -34,7 +34,7 @@ def test_generate_report_writes_markdown_and_json(tmp_path: Path) -> None:
 
 def test_generate_report_respects_overwrite_flag(tmp_path: Path) -> None:
     trace_path = tmp_path / "trace.jsonl"
-    _write_trace(trace_path, ['{"run_id":"run-test","step":1,"event_type":"run_end","success":true}'])
+    _write_trace(trace_path, ['{"schema_version":"trace.v1","run_id":"run-test","step":1,"event_type":"run_end","success":true}'])
     output_path = trace_path.parent / "report.md"
     output_path.write_text("exists", encoding="utf-8")
 
@@ -44,7 +44,7 @@ def test_generate_report_respects_overwrite_flag(tmp_path: Path) -> None:
 
 def test_generate_report_overwrites_existing_report(tmp_path: Path) -> None:
     trace_path = tmp_path / "trace.jsonl"
-    _write_trace(trace_path, ['{"run_id":"run-test","step":1,"event_type":"run_end","success":true,"output_summary":"done"}'])
+    _write_trace(trace_path, ['{"schema_version":"trace.v1","run_id":"run-test","step":1,"event_type":"run_end","success":true,"output_summary":"done"}'])
     output_path = trace_path.parent / "report.md"
     output_path.write_text("exists", encoding="utf-8")
 

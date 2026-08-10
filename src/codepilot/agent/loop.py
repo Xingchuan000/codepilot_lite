@@ -41,11 +41,14 @@ from codepilot.llm.types import (
     RichChatMessage,
 )
 from codepilot.memory.policy import redact_memory_value
-from codepilot.router import ToolAction, ToolRouter
+from codepilot.memory.turn_window import ContextPreparationResult
+from codepilot.router import ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError, ToolPreExecutionError
 from codepilot.session.context_adapters import PreparedContext
 from codepilot.session.context_budget import estimate_tokens
-from codepilot.session.model_capabilities import ModelContextProfile
+from codepilot.session.context_recovery import ContextRecoveryResult
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.tools.actions import ToolAction
 from codepilot.tools.base import ToolSpec
 from codepilot.tools.registry import list_tool_specs
 from codepilot.trace.protocol import TraceRecorder
@@ -155,6 +158,7 @@ class AgentEventSink(Protocol):
     def assistant_message_completed(self, **kwargs: Any) -> None: ...
     def tool_call_created(self, **kwargs: Any) -> None: ...
     def tool_result_created(self, **kwargs: Any) -> None: ...
+    def record_native_tool_call(self, **kwargs: Any) -> None: ...
     def loop_observation_created(self, **kwargs: Any) -> None: ...
     def agent_finished(self, **kwargs: Any) -> None: ...
 
@@ -173,11 +177,23 @@ class AgentContextWindow(Protocol):
         base_message_count: int,
         task: str,
         evidence: dict[str, Any],
-    ) -> Any: ...
+    ) -> ContextPreparationResult: ...
 
 
 class AgentContextRecovery(Protocol):
-    def recover_from_provider_overflow(self, **kwargs: Any) -> Any: ...
+    def recover_from_provider_overflow(
+        self,
+        *,
+        session_id: str | None,
+        turn_id: str | None,
+        attempt_id: str | None,
+        step: int,
+        task: str,
+        evidence: dict[str, Any],
+        original_messages: list[ChatMessage | RichChatMessage],
+        original_base_message_count: int,
+        error: LLMContextOverflowError,
+    ) -> ContextRecoveryResult: ...
 
     def retry_exhausted(self, **kwargs: Any) -> None: ...
 
@@ -753,15 +769,15 @@ class MinimalAgentLoop:
                 )
             )
         state.messages.append(RichChatMessage(role="assistant", parts=tuple(assistant_parts)))
+        if self.event_sink is not None:
+            for call in response.tool_calls:
+                self.event_sink.record_native_tool_call(
+                    provider_tool_call_id=call.provider_tool_call_id,
+                    tool_name=call.name,
+                    arguments=call.arguments,
+                )
         for call in response.tool_calls:
             if call.name == CODEPILOT_FINISH_TOOL_NAME:
-                recorder = getattr(self.event_sink, "record_native_tool_call", None)
-                if callable(recorder):
-                    recorder(
-                        provider_tool_call_id=call.provider_tool_call_id,
-                        tool_name=call.name,
-                        arguments=call.arguments,
-                    )
                 result = self._handle_finish_tool_call(state=state, context=context, call=call)
                 if result is not None:
                     return result
@@ -857,10 +873,10 @@ class MinimalAgentLoop:
                         selected_context_items=state.base_context_items,
                         omitted_context_items=state.omitted_context_items,
                     )
-                    state.messages, state.base_message_count = preparation
-                    if hasattr(preparation, "selected_context_items"):
-                        state.base_context_items = preparation.selected_context_items
-                        state.omitted_context_items = preparation.omitted_context_items
+                    state.messages = preparation.messages
+                    state.base_message_count = preparation.base_message_count
+                    state.base_context_items = preparation.selected_context_items
+                    state.omitted_context_items = preparation.omitted_context_items
                 overflow_retried = False
                 while True:
                     try:
@@ -891,8 +907,8 @@ class MinimalAgentLoop:
                             return self._runtime_failure_result(state, status="llm_error", stop_reason="llm_error", error=_safe_error(recovery_error))
                         state.messages = recovered.messages
                         state.base_message_count = recovered.base_message_count
-                        state.base_context_items = getattr(recovered, "selected_context_items", state.base_context_items)
-                        state.omitted_context_items = getattr(recovered, "omitted_context_items", state.omitted_context_items)
+                        state.base_context_items = recovered.selected_context_items
+                        state.omitted_context_items = recovered.omitted_context_items
                         overflow_retried = True
                     except Exception as exc:
                         if self.event_sink is not None:

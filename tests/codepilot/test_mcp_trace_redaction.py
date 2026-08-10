@@ -3,12 +3,12 @@ from __future__ import annotations
 from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.trace.logger import TraceLogger
 from codepilot.tools.registry import call_external_tool_traced
-from codepilot.mcp.trace import redact_mcp_mapping, redact_mcp_text
+from codepilot.security.redaction import redact_mapping, redact_text
 
 
 def test_redact_mcp_text_masks_sensitive_values() -> None:
     text = "token=abc password=xyz Authorization: Bearer secret Cookie: a=b Set-Cookie: c=d api_key=1 private_key=2"
-    redacted = redact_mcp_text(text, max_chars=4000)
+    redacted = redact_text(text, max_chars=4000)
     assert "abc" not in redacted
     assert "xyz" not in redacted
     assert "Bearer secret" not in redacted
@@ -18,7 +18,7 @@ def test_redact_mcp_text_masks_sensitive_values() -> None:
 
 def test_redact_mcp_mapping_masks_nested_sensitive_keys() -> None:
     mapping = {"nested": {"token": "abc", "ok": "value"}}
-    redacted = redact_mcp_mapping(mapping)
+    redacted = redact_mapping(mapping)
     assert redacted["nested"]["token"] == "[REDACTED]"
     assert redacted["nested"]["ok"] == "value"
 
@@ -43,7 +43,7 @@ def test_mcp_trace_redacts_sensitive_text_values(tmp_path) -> None:
 
 
 def test_redact_mcp_mapping_redacts_sensitive_text_values() -> None:
-    value = redact_mcp_mapping({"note": "api_key=sk-test token=abc"})
+    value = redact_mapping({"note": "api_key=sk-test token=abc"})
     assert "sk-test" not in str(value)
     assert "abc" not in str(value)
     assert "[REDACTED]" in str(value)

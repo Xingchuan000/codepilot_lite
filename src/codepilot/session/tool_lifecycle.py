@@ -4,15 +4,29 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from codepilot.router.actions import ToolAction
+from codepilot.tools.actions import ToolAction
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
 from codepilot.session.models import to_jsonable
 from codepilot.session.reconcilers import shell_command_is_read_only
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tools.base import ToolResult, ToolSpec
+
+
+class MessageRecorder(Protocol):
+    @property
+    def current_assistant_message_id(self) -> str | None: ...
+
+    def attach_tool_call(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        provider_tool_call_id: str | None = None,
+    ) -> None: ...
 
 
 class SQLiteToolLifecycleObserver:
@@ -22,9 +36,9 @@ class SQLiteToolLifecycleObserver:
     Token 和 `execution_started` 已经持久化之后。
     """
 
-    def __init__(self, database: SessionDatabase, session_id: str, turn_id: str, attempt_id: str, message_recorder: Any | None = None) -> None:
+    def __init__(self, database: SessionDatabase, session_id: str, turn_id: str, attempt_id: str, message_recorder: MessageRecorder | None = None) -> None:
         self.database = database
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
         self.artifacts = ArtifactStore(database)
         self.session_id = session_id
         self.turn_id = turn_id
@@ -32,10 +46,14 @@ class SQLiteToolLifecycleObserver:
         self.message_recorder = message_recorder
 
     def on_tool_call_created(self, action: ToolAction, spec: ToolSpec | None) -> str:
-        record = self.store.create_tool_call(
+        provider_tool_call_id = action.metadata.get("provider_tool_call_id")
+        if self.message_recorder is not None and not isinstance(provider_tool_call_id, str):
+            raise ValueError("Tool calls require provider_tool_call_id")
+        message_id = self.message_recorder.current_assistant_message_id if self.message_recorder is not None else None
+        record = self.store.tool_executions.create_tool_call(
             turn_id=self.turn_id,
             attempt_id=self.attempt_id,
-            message_id=getattr(self.message_recorder, "current_assistant_message_id", None),
+            message_id=message_id,
             tool_name=action.tool_name,
             arguments=to_jsonable(action.arguments),
             side_effect=spec.side_effect.value if spec is not None else None,
@@ -43,11 +61,7 @@ class SQLiteToolLifecycleObserver:
             recovery_strategy=spec.recovery_strategy.value if spec is not None else None,
             metadata={
                 "action_id": action.action_id,
-                **(
-                    {"provider_tool_call_id": action.metadata["provider_tool_call_id"]}
-                    if isinstance(action.metadata.get("provider_tool_call_id"), str)
-                    else {}
-                ),
+                **({"provider_tool_call_id": provider_tool_call_id} if isinstance(provider_tool_call_id, str) else {}),
             },
         )
         if self.message_recorder is not None:
@@ -57,13 +71,18 @@ class SQLiteToolLifecycleObserver:
                 record.tool_call_id,
                 action.tool_name,
                 to_jsonable(action.arguments),
-                provider_tool_call_id=action.metadata.get("provider_tool_call_id"),
+                provider_tool_call_id=provider_tool_call_id,
             )
+            attached_message_id = self.message_recorder.current_assistant_message_id
+            if attached_message_id is None:
+                raise RuntimeError("tool call recorder did not create an assistant message")
+            if attached_message_id != message_id:
+                self.store.tool_executions.attach_message(record.tool_call_id, attached_message_id)
         return record.tool_call_id
 
     def on_policy_denied(self, tool_call_id: str, result: ToolResult) -> None:
         persisted = self.artifacts.persist_content(self.session_id, "tool_result", result.error or "policy denied")
-        self.store.persist_tool_result(
+        self.store.tool_executions.persist_tool_result(
             tool_call_id,
             call_status="denied",
             result_status="denied",
@@ -82,7 +101,7 @@ class SQLiteToolLifecycleObserver:
         if result is None:
             return
         persisted = self.artifacts.persist_content(self.session_id, "tool_result", result.error or "permission denied")
-        self.store.persist_tool_result(
+        self.store.tool_executions.persist_tool_result(
             tool_call_id,
             call_status="denied",
             result_status="denied",
@@ -163,13 +182,13 @@ class SQLiteToolLifecycleObserver:
         return token
 
     def on_execution_started(self, tool_call_id: str, recovery_token: dict[str, Any]) -> None:
-        self.store.persist_tool_execution_started(tool_call_id, recovery_token)
+        self.store.tool_executions.persist_tool_execution_started(tool_call_id, recovery_token)
 
     def on_pre_execution_failure(self, tool_call_id: str, error: Exception) -> None:
         """Token 构建失败发生在副作用前，明确写 failed 而不是 uncertain。"""
 
         persisted = self.artifacts.persist_content(self.session_id, "tool_result", str(error))
-        self.store.persist_tool_result(
+        self.store.tool_executions.persist_tool_result(
             tool_call_id,
             call_status="failed",
             result_status="failed",
@@ -183,7 +202,7 @@ class SQLiteToolLifecycleObserver:
 
     def on_execution_finished(self, tool_call_id: str, result: ToolResult) -> None:
         persisted = self.artifacts.persist_content(self.session_id, "tool_result", result.output or result.error or "")
-        self.store.persist_tool_result(
+        self.store.tool_executions.persist_tool_result(
             tool_call_id,
             call_status="completed" if result.success else "failed",
             result_status="success" if result.success else "failed",
@@ -198,7 +217,7 @@ class SQLiteToolLifecycleObserver:
     def on_execution_exception(self, tool_call_id: str, error: Exception) -> None:
         """保留无结果的 uncertain 调用，交由 RecoveryService 对账。"""
 
-        self.store.mark_tool_execution_uncertain_with_event(tool_call_id, str(error))
+        self.store.tool_executions.mark_tool_execution_uncertain_with_event(tool_call_id, str(error))
 
 
 def _sha256_bytes(value: bytes) -> str:

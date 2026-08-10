@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -10,9 +11,9 @@ from codepilot.memory.rendering import render_session_summary
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.context_budget import ContextBudgetAllocator, ContextItem, ContextPlan, estimate_tokens
 from codepilot.session.errors import SessionProtocolMismatch
-from codepilot.session.model_capabilities import ModelContextProfile
+from codepilot.session.model_context import ModelContextProfile
 from codepilot.session.models import ContextSummaryRecord, MessagePartRecord, MessageRecord
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tools.base import ToolSpec
 
 
@@ -43,7 +44,7 @@ class PreparedContext:
 class ProviderContextAdapter:
     """把 SQLite 历史恢复为 Provider 可重放的 Native 消息。"""
 
-    def __init__(self, store: SessionStore, artifacts: ArtifactStore | None = None) -> None:
+    def __init__(self, store: SessionRepositories, artifacts: ArtifactStore | None = None) -> None:
         self.store = store
         self.artifacts = artifacts or ArtifactStore(store.database)
 
@@ -61,6 +62,8 @@ class ProviderContextAdapter:
         不足时优先保留最近事实；最终发送给模型前会恢复为正常的时间顺序。任何一个
         工具调用组都不会在这里拆成独立字符串。
         """
+
+        validate_current_session_protocol(history.messages)
 
         system_messages = [
             ChatMessage(
@@ -112,7 +115,7 @@ class ProviderContextAdapter:
         group_metadata: dict[str, tuple[bool, int, str | None]] = {}
         call_message_ids = {
             call.message_id: call.tool_call_id
-            for call in self.store.list_tool_calls(history.session_id)
+            for call in self.store.tool_executions.list_tool_calls(history.session_id)
             if call.message_id is not None
         }
         for message, parts in history.messages:
@@ -258,12 +261,12 @@ def _tool_call_ids(message: MessageRecord, parts: tuple[MessagePartRecord, ...])
     return ids
 
 
-def _unresolved_tool_call_ids(store: SessionStore, session_id: str) -> set[str]:
-    return {call.tool_call_id for call in store.list_unresolved_tool_calls() if _call_belongs_to_session(store, call.turn_id, session_id)}
+def _unresolved_tool_call_ids(store: SessionRepositories, session_id: str) -> set[str]:
+    return {call.tool_call_id for call in store.tool_executions.list_unresolved_tool_calls() if _call_belongs_to_session(store, call.turn_id, session_id)}
 
 
-def _call_belongs_to_session(store: SessionStore, turn_id: str, session_id: str) -> bool:
-    return store.get_turn(turn_id).session_id == session_id
+def _call_belongs_to_session(store: SessionRepositories, turn_id: str, session_id: str) -> bool:
+    return store.turns.get_turn(turn_id).session_id == session_id
 
 
 def _summary_content(summary: ContextSummaryRecord) -> str:
@@ -282,6 +285,8 @@ def _render_message(
     profile: ModelContextProfile,
 ) -> ChatMessage | RichChatMessage | None:
     if message.role == "assistant":
+        if not parts:
+            raise SessionProtocolMismatch("session uses unsupported pre-native-message format")
         rendered_parts: list[ChatMessagePart] = []
         for part in parts:
             if not part.replayable:
@@ -317,7 +322,7 @@ def _render_message(
             data = part.content
             if not isinstance(data.get("provider_tool_call_id"), str) or not data["provider_tool_call_id"]:
                 raise SessionProtocolMismatch(
-                    "Session was created before native tool calling migration; start a new session"
+                    "Session tool-call record is missing provider_tool_call_id; start a new session"
                 )
             rendered_parts.append(
                 ChatMessagePart(
@@ -330,59 +335,71 @@ def _render_message(
                 )
             )
         if rendered_parts:
+            if message.status == "interrupted":
+                rendered_parts.append(
+                    ChatMessagePart(
+                        type="text",
+                        content="The previous assistant response was interrupted. Use the persisted content only as evidence and produce a complete response again. Do not continue from the last character.",
+                    )
+                )
             return RichChatMessage(role="assistant", parts=tuple(rendered_parts))
-        content = _message_content(artifacts, message, parts, profile)
+        content = _message_content(artifacts, parts, profile, message.status)
         return ChatMessage(role="assistant", content=content) if content else None
 
     if message.role == "tool":
         tool_parts = [part for part in parts if part.replayable and part.type == "tool_result"]
         if len(tool_parts) != 1:
             raise SessionProtocolMismatch(
-                "Session was created before native tool calling migration; start a new session"
+                "Session tool-result record is missing its tool part; start a new session"
             )
         if not isinstance(tool_parts[0].content, dict):
             raise ValueError("tool_result content must be a dict")
         data = tool_parts[0].content
         if not isinstance(data.get("provider_tool_call_id"), str) or not data["provider_tool_call_id"]:
             raise SessionProtocolMismatch(
-                "Session was created before native tool calling migration; start a new session"
+                "Session tool-result record is missing provider_tool_call_id; start a new session"
             )
         return RichChatMessage(
             role="tool",
             parts=(ChatMessagePart(type="tool_result", content=data),),
         )
 
-    content = _message_content(artifacts, message, parts, profile)
+    content = _message_text(message.content)
     if not content:
         return None
     return ChatMessage(role=message.role, content=content)
 
 
-def _message_content(artifacts: ArtifactStore, message: MessageRecord, parts: tuple[MessagePartRecord, ...], profile: ModelContextProfile) -> str:
-    if parts:
-        values: list[str] = []
-        for part in parts:
-            if not part.replayable:
-                continue
-            if part.type == "tool_call":
-                # Native tool calls are replayed as structured assistant parts above.
-                continue
-            if part.type == "reasoning" and (
-                not profile.supports_reasoning_replay
-                or part.provider_format not in {None, profile.reasoning_format, profile.provider}
-            ):
-                continue
-            text = _part_content(artifacts, part)
-            if text:
-                values.append(text)
-        content = "\n".join(values)
-    else:
-        content = _message_text(message.content)
-    if message.status == "interrupted" and message.role == "assistant" and not content:
+def _message_content(artifacts: ArtifactStore, parts: tuple[MessagePartRecord, ...], profile: ModelContextProfile, status: str) -> str:
+    values: list[str] = []
+    for part in parts:
+        if not part.replayable:
+            continue
+        if part.type == "tool_call":
+            # Native tool calls are replayed as structured assistant parts above.
+            continue
+        if part.type == "reasoning" and (
+            not profile.supports_reasoning_replay
+            or part.provider_format not in {None, profile.reasoning_format, profile.provider}
+        ):
+            continue
+        text = _part_content(artifacts, part)
+        if text:
+            values.append(text)
+    content = "\n".join(values)
+    if status == "interrupted" and not content:
         return ""
-    if message.status == "interrupted" and message.role == "assistant":
+    if status == "interrupted":
         content += "\nThe previous assistant response was interrupted. Use the persisted content only as evidence and produce a complete response again. Do not continue from the last character."
     return content
+
+
+def validate_current_session_protocol(
+    messages_with_parts: Iterable[tuple[MessageRecord, tuple[MessagePartRecord, ...]]],
+) -> None:
+    for message, parts in messages_with_parts:
+        if message.role in {"assistant", "tool"} and not parts:
+            raise SessionProtocolMismatch("session uses unsupported pre-native-message format")
 
 
 def _part_content(artifacts: ArtifactStore, part: MessagePartRecord) -> str:

@@ -4,6 +4,7 @@ from pathlib import Path
 
 from codepilot.llm.fake import StructuredFakeLLM
 from codepilot.llm.types import LLMResponse
+from codepilot.multi_agent.boundary import MultiAgentBoundaryResolver
 from codepilot.multi_agent.profiles import EXPLORE_PROFILE
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
@@ -11,7 +12,7 @@ from codepilot.session.database import SessionDatabase
 from codepilot.session.models import TurnSubmission
 from codepilot.session.runtime import SessionRuntime
 from codepilot.session.service import SessionService
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 def test_child_runtime_does_not_extract_memory_candidates(tmp_path: Path) -> None:
@@ -20,9 +21,9 @@ def test_child_runtime_does_not_extract_memory_candidates(tmp_path: Path) -> Non
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
     service = SessionService(database)
-    store = SessionStore(database)
+    store = SessionRepositories(database)
     parent = service.create_session(repo, "fake", "fake", "manual")
-    parent_turn = store.create_turn(
+    parent_turn = store.turns.create_turn(
         session_id=parent.session_id,
         title="primary",
         provider_snapshot="fake",
@@ -47,7 +48,7 @@ def test_child_runtime_does_not_extract_memory_candidates(tmp_path: Path) -> Non
             policy_checker=PolicyChecker.default(),
             policy_context=PolicyContext(repo=repo, mode="read_only", interactive=False),
         ),
-        agent_profile=EXPLORE_PROFILE,
+        boundary_resolver=MultiAgentBoundaryResolver(EXPLORE_PROFILE),
     )
     submission = runtime.submit_user_message(child.session_id, "inspect")
     assert isinstance(submission, TurnSubmission)
@@ -55,4 +56,5 @@ def test_child_runtime_does_not_extract_memory_candidates(tmp_path: Path) -> Non
     execution = runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
 
     assert execution.result.status == "message_complete"
-    assert all(event.event_type != "memory_candidates_extracted" for event in store.list_events(child.session_id))
+    assert all(event.event_type != "memory_candidates_extracted" for event in store.events.list_events(child.session_id))
+

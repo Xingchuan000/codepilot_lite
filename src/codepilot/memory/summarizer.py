@@ -10,7 +10,7 @@ from codepilot.memory.models import SessionSummaryContent
 from codepilot.memory.policy import redact_memory_value, sanitize_memory_content
 from codepilot.session.context_budget import estimate_tokens
 from codepilot.session.database import SessionDatabase
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 _LIMITS = {
     "user_constraints": (12, 300),
@@ -43,7 +43,7 @@ class SessionSummaryEvidence:
 
 class SessionSummaryEvidenceCollector:
     def __init__(self, database: SessionDatabase) -> None:
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
 
     def collect(
         self,
@@ -59,7 +59,7 @@ class SessionSummaryEvidenceCollector:
                 "role": message.role,
                 "content": str(message.content)[:2_000],
             }
-            for message, _ in self.store.list_messages_with_parts(session_id)
+            for message, _ in self.store.messages.list_messages_with_parts(session_id)
             if message.message_id in covered
         )
         turn_ids = {message["turn_id"] for message in messages}
@@ -69,7 +69,7 @@ class SessionSummaryEvidenceCollector:
         files_modified: list[str] = []
         errors: list[str] = []
         diff_status: dict[str, Any] = {}
-        for call in self.store.list_tool_calls(session_id):
+        for call in self.store.tool_executions.list_tool_calls(session_id):
             if call.turn_id not in turn_ids:
                 continue
             command = call.arguments.get("command") or call.arguments.get("cmd")
@@ -80,7 +80,7 @@ class SessionSummaryEvidenceCollector:
                 files_read.extend(paths)
             if call.tool_name in _WRITE_TOOLS:
                 files_modified.extend(paths)
-            result = self.store.get_tool_result_by_call(call.tool_call_id)
+            result = self.store.tool_executions.get_tool_result_by_call(call.tool_call_id)
             if result is not None and (call.tool_name == "run_tests" or _is_test_command(command)):
                 preview = result.output_preview or result.error or str(result.content)
                 tests.append(f"{call.tool_name}: {'success' if result.success else 'failed'}: {preview[:400]}")
@@ -89,11 +89,11 @@ class SessionSummaryEvidenceCollector:
             if call.tool_name == "git_diff" and result is not None:
                 preview = result.output_preview or str(result.content)
                 diff_status = {"present": bool(preview.strip()), "summary": preview[:400]}
-        for event in self.store.list_events(session_id):
+        for event in self.store.events.list_events(session_id):
             if event.turn_id in turn_ids and ("error" in event.event_type or "failed" in event.event_type):
                 errors.append(f"{event.event_type}: {str(event.payload.get('error', event.payload))[:450]}")
-        session = self.store.get_session(session_id)
-        turn = self.store.get_turn(current_turn_id) if current_turn_id is not None else None
+        session = self.store.sessions.get_session(session_id)
+        turn = self.store.turns.get_turn(current_turn_id) if current_turn_id is not None else None
         return SessionSummaryEvidence(
             messages,
             _merge_strings(commands, limit=20, item_limit=500),

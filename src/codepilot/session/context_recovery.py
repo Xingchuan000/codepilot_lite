@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
 
+from codepilot.common.best_effort import run_best_effort
+from codepilot.llm.errors import LLMContextOverflowError
 from codepilot.llm.types import ChatMessage, RichChatMessage
 from codepilot.memory.policy import redact_memory_value
 from codepilot.memory.turn_window import TurnContextWindow
@@ -12,8 +15,8 @@ from codepilot.session.context_adapters import PreparedContext
 from codepilot.session.context_audit import ContextAuditRepository
 from codepilot.session.context_budget import ContextBudgetExceeded, ContextItem, estimate_tokens
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
-from codepilot.session.store import SessionStore
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.session.repositories import SessionRepositories
 
 
 @dataclass(frozen=True)
@@ -27,7 +30,7 @@ class ContextRecoveryResult:
 
 class SessionContextRecoveryCoordinator:
     def __init__(self, database: SessionDatabase, compaction_service: CompactionService, assembler: ContextAssembler, profile: ModelContextProfile) -> None:
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
         self.compaction_service = compaction_service
         self.assembler = assembler
         self.profile = profile
@@ -45,7 +48,7 @@ class SessionContextRecoveryCoordinator:
         evidence: dict[str, Any],
         original_messages: list[ChatMessage | RichChatMessage],
         original_base_message_count: int,
-        error: BaseException,
+        error: LLMContextOverflowError,
     ) -> ContextRecoveryResult:
         if session_id is None or turn_id is None:
             raise RuntimeError("provider overflow recovery requires a persisted Session")
@@ -85,8 +88,10 @@ class SessionContextRecoveryCoordinator:
             )
         except Exception as exc:
             self._event(session_id, turn_id, attempt_id, "provider_context_overflow_recovery_failed", step, error=exc)
-            try:
-                self.audit.record(
+            failure_error_type = type(exc).__name__
+            failure_error = str(exc)
+            run_best_effort(
+                lambda: self.audit.record(
                     session_id=session_id,
                     turn_id=turn_id,
                     attempt_id=attempt_id,
@@ -100,20 +105,22 @@ class SessionContextRecoveryCoordinator:
                     protocol_overhead_tokens=self.profile.protocol_overhead_tokens,
                     max_input_tokens=self.profile.max_input_tokens,
                     metadata={
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
+                        "error_type": failure_error_type,
+                        "error": failure_error,
                         "original_request_tokens": original_tokens,
                         "after_session_compaction_tokens": after_session_tokens,
                         "original_base_message_count": original_base_message_count,
                         "retry_number": 1,
                     },
-                )
-            except Exception:
-                pass
+                ),
+                operation_name="provider overflow failure audit",
+                context={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id},
+                expected_errors=(sqlite3.Error,),
+            )
             raise
         snapshot_id = None
-        try:
-            snapshot_id = self.audit.record(
+        snapshot = run_best_effort(
+            lambda: self.audit.record(
                 session_id=session_id,
                 turn_id=turn_id,
                 attempt_id=attempt_id,
@@ -146,9 +153,13 @@ class SessionContextRecoveryCoordinator:
                     "turn_checkpoint_id": prepared.checkpoint_id,
                     "original_base_message_count": original_base_message_count,
                 },
-            ).snapshot_id
-        except Exception:
-            pass
+            ),
+            operation_name="provider overflow recovery audit",
+            context={"session_id": session_id, "turn_id": turn_id, "attempt_id": attempt_id},
+            expected_errors=(sqlite3.Error,),
+        )
+        if snapshot is not None:
+            snapshot_id = snapshot.snapshot_id
         self._event(
             session_id,
             turn_id,
@@ -177,6 +188,6 @@ class SessionContextRecoveryCoordinator:
     def _event(self, session_id: str, turn_id: str, attempt_id: str | None, event_type: str, step: int, *, error: BaseException | None = None, extra: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {"step": step, "provider": self.profile.provider, "model": self.profile.model, "retry_number": 1}
         if error is not None:
-            payload.update({"error_type": type(error).__name__, "error": str(redact_memory_value(str(error)).value), "output_started": bool(getattr(error, "output_started", False))})
+            payload.update({"error_type": type(error).__name__, "error": str(redact_memory_value(str(error)).value), "output_started": error.output_started})
         payload.update(extra or {})
-        self.store.append_event(session_id=session_id, turn_id=turn_id, attempt_id=attempt_id, event_type=event_type, payload=payload, metadata={"source": "context_recovery"})
+        self.store.events.append_event(session_id=session_id, turn_id=turn_id, attempt_id=attempt_id, event_type=event_type, payload=payload, metadata={"source": "context_recovery"})

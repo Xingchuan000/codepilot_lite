@@ -11,7 +11,7 @@ from codepilot.multi_agent.models import SpawnContract
 from codepilot.multi_agent.supervisor import AgentSupervisor, AgentSupervisorConfig, scopes_may_overlap
 from codepilot.session.database import SessionDatabase
 from codepilot.session.service import SessionService
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 def _git_repo(tmp_path: Path) -> Path:
@@ -27,7 +27,7 @@ def _git_repo(tmp_path: Path) -> Path:
 
 
 class _ChildRuntime:
-    def __init__(self, store: SessionStore, child_id: str, mode: str) -> None:
+    def __init__(self, store: SessionRepositories, child_id: str, mode: str) -> None:
         self.store = store
         self.child_id = child_id
         self.mode = mode
@@ -39,7 +39,7 @@ class _ChildRuntime:
         )
 
     def run_turn(self, turn_id: str, attempt_id: str, cancellation_token):
-        session = self.store.get_session(self.child_id)
+        session = self.store.sessions.get_session(self.child_id)
         workspace = session.metadata.get("workspace_path")
         if self.mode in {"write", "write_outside"} and isinstance(workspace, str):
             Path(workspace, "README.md").write_text("after\n", encoding="utf-8")
@@ -51,17 +51,30 @@ class _ChildRuntime:
             "max_steps_exceeded" if self.mode == "fail_write_outside" else "success"
         )
         error = "max_steps_exceeded" if status == "max_steps_exceeded" else None
-        return SimpleNamespace(result=SimpleNamespace(status=status, summary="child result", error=error))
+        return SimpleNamespace(
+            result=SimpleNamespace(
+                status=status,
+                summary="child result",
+                error=error,
+                outcome=SimpleNamespace(
+                    completion_kind="task_success" if status == "success" else None,
+                    delivery_kind=None,
+                    tests=None,
+                    last_test_status=None,
+                    evidence=SimpleNamespace(diff_checked=False, missing=()),
+                ),
+            )
+        )
 
 
 def _fixture(tmp_path: Path, mode: str = "complete", config: AgentSupervisorConfig | None = None):
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
     service = SessionService(database)
-    store = SessionStore(database)
+    store = SessionRepositories(database)
     repo = _git_repo(tmp_path)
     parent = service.create_session(repo, "openai", "fake", "manual")
-    turn = store.create_turn(
+    turn = store.turns.create_turn(
         session_id=parent.session_id,
         title="primary turn",
         provider_snapshot="openai",
@@ -92,12 +105,12 @@ def test_spawn_explore_persists_child_and_wait_reads_sqlite_tree(tmp_path: Path)
     result = supervisor.wait(parent.session_id, str(spawned["agent_id"]), timeout=5)
 
     assert result["status"] == "completed"
-    child = store.get_session(str(spawned["agent_id"]))
+    child = store.sessions.get_session(str(spawned["agent_id"]))
     assert child.parent_session_id == parent.session_id
     assert child.project_id == parent.project_id
     assert [item["agent_id"] for item in supervisor.list_agents(parent.session_id)] == [child.session_id]
     assert {item["type"] for item in events} >= {"agent_spawned", "agent_started", "agent_completed"}
-    assert {item.event_type for item in store.list_events(parent.session_id)} >= {
+    assert {item.event_type for item in store.events.list_events(parent.session_id)} >= {
         "agent_spawned",
         "agent_started",
         "agent_completed",
@@ -112,7 +125,7 @@ def test_general_writer_uses_worktree_and_explicit_apply_only(tmp_path: Path) ->
     )
 
     result = supervisor.wait(parent.session_id, str(spawned["agent_id"]), timeout=5)
-    child = store.get_session(str(spawned["agent_id"]))
+    child = store.sessions.get_session(str(spawned["agent_id"]))
     assert result["status"] == "completed"
     assert Path(str(child.metadata["workspace_path"]), "README.md").read_text(encoding="utf-8") == "after\n"
     assert (repo / "README.md").read_text(encoding="utf-8") == "before\n"
@@ -137,7 +150,7 @@ def test_general_writer_scope_violation_fails_before_patch_ready(tmp_path: Path)
     )
 
     result = supervisor.wait(parent.session_id, str(spawned["agent_id"]), timeout=5)
-    child = store.get_session(str(spawned["agent_id"]))
+    child = store.sessions.get_session(str(spawned["agent_id"]))
 
     assert result["status"] == "failed"
     assert child.metadata["scope_violation_files"] == ["OUTSIDE.md"]
@@ -175,7 +188,7 @@ def test_writer_scope_overlap_and_parent_read_only_are_rejected(tmp_path: Path) 
         )
     supervisor.close(parent.session_id, str(first["agent_id"]))
 
-    readonly = store.update_session(parent.session_id, permission_mode="read_only")
+    readonly = store.sessions.update_session(parent.session_id, permission_mode="read_only")
     assert readonly.permission_mode == "read_only"
     with pytest.raises(PermissionError, match="read-only"):
         supervisor.spawn(
@@ -191,7 +204,7 @@ def test_max_children_depth_and_wait_timeout_are_enforced(tmp_path: Path) -> Non
     with pytest.raises(RuntimeError, match="maximum active child"):
         supervisor.spawn(context=context, contract=SpawnContract(agent_type="explore", task="second"))
     assert supervisor.wait(parent.session_id, str(first["agent_id"]), timeout=0)["status"] == "running"
-    child_turn = store.create_turn(
+    child_turn = store.turns.create_turn(
         session_id=str(first["agent_id"]),
         title="child",
         provider_snapshot="openai",
@@ -226,7 +239,7 @@ def test_failed_general_still_audits_final_diff_for_scope_violation(tmp_path: Pa
     )
 
     result = supervisor.wait(parent.session_id, str(spawned["agent_id"]), timeout=5)
-    child = store.get_session(str(spawned["agent_id"]))
+    child = store.sessions.get_session(str(spawned["agent_id"]))
 
     assert result["status"] == "failed"
     assert result["scope_violation_files"] == ["OUTSIDE.md"]
@@ -238,3 +251,4 @@ def test_failed_general_still_audits_final_diff_for_scope_violation(tmp_path: Pa
     assert any(item["type"] == "agent_failed" for item in events)
     assert (repo / "README.md").read_text(encoding="utf-8") == "before\n"
     assert not (repo / "OUTSIDE.md").exists()
+

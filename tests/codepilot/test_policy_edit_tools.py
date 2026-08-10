@@ -1,5 +1,5 @@
 from codepilot.policy import PolicyChecker, PolicyContext
-from codepilot.router import ToolAction
+from codepilot.tools.actions import ToolAction
 
 
 def _decision(tool_name: str, arguments: dict, *, mode: str = "build", approved: bool = False):

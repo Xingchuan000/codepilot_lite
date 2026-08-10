@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from codepilot.policy import PolicyChecker, PolicyContext
-from codepilot.router.actions import ToolAction
+from codepilot.tools.actions import ToolAction
 
 
 def _check(tool_name: str, arguments: dict[str, object], context: PolicyContext | None = None):

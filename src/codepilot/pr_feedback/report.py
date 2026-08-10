@@ -23,7 +23,7 @@ def display_path(path: Path | str | None, *, run_dir: Path) -> str:
     resolved = Path(path)
     try:
         return str(resolved.resolve().relative_to(run_dir.resolve()))
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return resolved.name
 
 

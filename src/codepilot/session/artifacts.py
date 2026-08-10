@@ -14,7 +14,7 @@ from codepilot.session.database import SessionDatabase
 from codepilot.session.ids import make_artifact_id
 from codepilot.session.models import ArtifactRecord, to_jsonable
 from codepilot.session.paths import SessionPaths, resolve_session_paths
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 INLINE_CONTENT_MAX_CHARS = 16_000
@@ -54,7 +54,7 @@ class ArtifactStore:
     def __init__(self, database: SessionDatabase, paths: SessionPaths | None = None) -> None:
         self.database = database
         self.paths = paths or resolve_session_paths(database.path.parent)
-        self.store = SessionStore(database, self.paths)
+        self.store = SessionRepositories(database)
 
     def persist_content(self, session_id: str, kind: str, content: Any) -> PersistedContent:
         # 先把内容规整成稳定文本，再按长度决定直接内联还是落盘成 artifact。
@@ -66,7 +66,7 @@ class ArtifactStore:
 
     def put_text(self, session_id: str, kind: str, content: str, mime_type: str = "text/plain") -> ArtifactRecord:
         if len(content) <= INLINE_CONTENT_MAX_CHARS:
-            return self.store.create_artifact(
+            return self.store.artifacts.create_artifact(
                 session_id=session_id,
                 kind=kind,
                 mime_type=mime_type,
@@ -79,7 +79,7 @@ class ArtifactStore:
 
     def put_bytes(self, session_id: str, kind: str, content: bytes, mime_type: str = "application/octet-stream") -> ArtifactRecord:
         if len(content) <= INLINE_CONTENT_MAX_CHARS:
-            return self.store.create_artifact(
+            return self.store.artifacts.create_artifact(
                 session_id=session_id,
                 kind=kind,
                 mime_type=mime_type,
@@ -132,14 +132,7 @@ class ArtifactStore:
             artifact_dir = session_dir / "artifacts"
             if not artifact_dir.is_dir():
                 continue
-            with self.database.transaction() as connection:
-                known = {
-                    row[0]
-                    for row in connection.execute(
-                        "SELECT artifact_id FROM artifacts WHERE session_id = ?",
-                        (session_dir.name,),
-                    )
-                }
+            known = {artifact.artifact_id for artifact in self.store.artifacts.list_artifacts(session_dir.name)}
             for path in artifact_dir.iterdir():
                 if not path.is_file() or path.name in known or path.stat().st_mtime >= cutoff:
                     continue
@@ -166,7 +159,7 @@ class ArtifactStore:
                 os.fsync(dir_fd)
             finally:
                 os.close(dir_fd)
-            record = self.store.create_artifact(
+            record = self.store.artifacts.create_artifact(
                 session_id=session_id,
                 kind=kind,
                 mime_type=mime_type,
@@ -182,11 +175,7 @@ class ArtifactStore:
         return record
 
     def _get_artifact(self, artifact_id: str) -> ArtifactRecord:
-        with self.database.transaction() as connection:
-            row = connection.execute("SELECT * FROM artifacts WHERE artifact_id = ?", (artifact_id,)).fetchone()
-        if row is None:
-            raise LookupError(artifact_id)
-        return self.store._artifact_from_row(row)
+        return self.store.artifacts.get_artifact(artifact_id)
 
 
 def _sha256_text(content: str) -> str:

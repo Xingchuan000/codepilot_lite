@@ -4,13 +4,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
+from codepilot.trace.events import TraceEvent
+
+CURRENT_TRACE_SCHEMA_VERSION = "trace.v1"
+
 
 def read_trace_events(trace_path: str | Path) -> tuple[list[dict[str, Any]], list[str]]:
-    """逐行读取 trace.jsonl，并把损坏行转换成 warning。
-
-    这里严格遵循计划，不尝试修复 JSON，只做容错跳过。
-    """
-
     path = Path(trace_path)
     if not path.exists():
         raise FileNotFoundError(f"Trace file does not exist: {trace_path}")
@@ -21,12 +22,17 @@ def read_trace_events(trace_path: str | Path) -> tuple[list[dict[str, Any]], lis
         if not line.strip():
             continue
         try:
-            data = json.loads(line)
+            payload = json.loads(line)
+            if not isinstance(payload, dict):
+                raise ValueError(f"expected JSON object, got {type(payload).__name__}")
+            if payload.get("schema_version") != CURRENT_TRACE_SCHEMA_VERSION:
+                raise ValueError(f"unsupported schema_version: {payload.get('schema_version')!r}")
+            event = TraceEvent.model_validate_json(line)
         except json.JSONDecodeError as exc:
             warnings.append(f"Line {line_number}: invalid JSON: {exc.msg}")
             continue
-        if not isinstance(data, dict):
-            warnings.append(f"Line {line_number}: expected JSON object, got {type(data).__name__}")
+        except (ValidationError, ValueError) as exc:
+            warnings.append(f"Line {line_number}: invalid current trace event: {exc}")
             continue
-        events.append(data)
+        events.append(event.model_dump(mode="json"))
     return events, warnings

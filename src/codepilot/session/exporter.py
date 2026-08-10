@@ -243,12 +243,6 @@ class SessionExporter:
                     )
         return snapshots, children_by_parent
 
-    def _snapshot(self, session_id: str) -> Snapshot:
-        """保留原有单 Session snapshot helper，供内部/测试兼容使用。"""
-
-        with self.database.transaction() as connection:
-            return self._snapshot_with_connection(connection, session_id)
-
     def _snapshot_with_connection(self, connection: sqlite3.Connection, session_id: str) -> Snapshot:
         session = connection.execute(
             "SELECT * FROM sessions WHERE session_id = ?", (session_id,)

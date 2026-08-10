@@ -55,6 +55,7 @@ class _RenewingStore:
     def __init__(self, failures: list[Exception]) -> None:
         self.failures = iter(failures)
         self.calls = 0
+        self.attempts = SimpleNamespace(renew_attempt_lease=self.renew_attempt_lease)
 
     def renew_attempt_lease(self, attempt_id: str, worker_id: str, lease_expires_at: str) -> None:
         self.calls += 1
@@ -100,9 +101,9 @@ def test_branch_confirmation_atomically_creates_submission(tmp_path: Path) -> No
     pending = runtime.submit_user_message(session_id, "  修复   登录问题  ")
 
     assert pending == BranchConfirmationRequired(session_id, "main", "feature")
-    assert service.store.list_turns(session_id) == []
-    assert service.store.list_messages_with_parts(session_id) == []
-    assert service.store.list_events(session_id) == []
+    assert service.store.turns.list_turns(session_id) == []
+    assert service.store.messages.list_messages_with_parts(session_id) == []
+    assert service.store.events.list_events(session_id) == []
 
     submission = runtime.submit_user_message(session_id, "  修复   登录问题  ", confirmed_branch="feature")
 
@@ -111,10 +112,10 @@ def test_branch_confirmation_atomically_creates_submission(tmp_path: Path) -> No
     assert submission.turn.branch_snapshot == "feature"
     assert submission.attempt.attempt_number == 1
     assert submission.attempt.status == "created"
-    assert service.store.list_messages_with_parts(session_id)[0][0].content == "  修复   登录问题  "
-    assert service.store.get_session(session_id).title == "修复 登录问题"
-    assert service.store.get_session(session_id).current_branch == "feature"
-    assert [event.event_type for event in service.store.list_events(session_id)] == [
+    assert service.store.messages.list_messages_with_parts(session_id)[0][0].content == "  修复   登录问题  "
+    assert service.store.sessions.get_session(session_id).title == "修复 登录问题"
+    assert service.store.sessions.get_session(session_id).current_branch == "feature"
+    assert [event.event_type for event in service.store.events.list_events(session_id)] == [
         "branch_changed",
         "turn_created",
         "user_message_created",
@@ -130,10 +131,10 @@ def test_confirmation_rechecks_actual_branch_without_writing(tmp_path: Path) -> 
     pending = runtime.submit_user_message(session_id, "fix", confirmed_branch="feature")
 
     assert pending == BranchConfirmationRequired(session_id, "feature", "feature-2")
-    assert service.store.list_turns(session_id) == []
-    assert service.store.list_messages_with_parts(session_id) == []
-    assert service.store.list_events(session_id) == []
-    assert service.store.get_session(session_id).current_branch == "main"
+    assert service.store.turns.list_turns(session_id) == []
+    assert service.store.messages.list_messages_with_parts(session_id) == []
+    assert service.store.events.list_events(session_id) == []
+    assert service.store.sessions.get_session(session_id).current_branch == "main"
 
 
 def test_submission_sql_failure_rolls_back_all_business_facts(tmp_path: Path) -> None:
@@ -148,11 +149,11 @@ def test_submission_sql_failure_rolls_back_all_business_facts(tmp_path: Path) ->
     with pytest.raises(Exception, match="injected failure"):
         runtime.submit_user_message(session_id, "fix", confirmed_branch="feature")
 
-    assert service.store.list_turns(session_id) == []
-    assert service.store.list_messages_with_parts(session_id) == []
-    assert service.store.list_events(session_id) == []
-    assert service.store.get_session(session_id).title == "New session"
-    assert service.store.get_session(session_id).current_branch == "main"
+    assert service.store.turns.list_turns(session_id) == []
+    assert service.store.messages.list_messages_with_parts(session_id) == []
+    assert service.store.events.list_events(session_id) == []
+    assert service.store.sessions.get_session(session_id).title == "New session"
+    assert service.store.sessions.get_session(session_id).current_branch == "main"
 
 
 def test_none_branch_can_be_explicitly_confirmed(tmp_path: Path) -> None:
@@ -165,7 +166,7 @@ def test_none_branch_can_be_explicitly_confirmed(tmp_path: Path) -> None:
     assert pending == BranchConfirmationRequired(session_id, "main", None)
     assert isinstance(submission, TurnSubmission)
     assert submission.turn.branch_snapshot is None
-    assert service.store.get_session(session_id).current_branch is None
+    assert service.store.sessions.get_session(session_id).current_branch is None
 
 
 def test_transaction_rechecks_branch_after_initial_validation(tmp_path: Path, monkeypatch) -> None:
@@ -176,8 +177,8 @@ def test_transaction_rechecks_branch_after_initial_validation(tmp_path: Path, mo
     pending = runtime.submit_user_message(session_id, "fix", confirmed_branch="feature")
 
     assert pending == BranchConfirmationRequired(session_id, "feature", "feature-2")
-    assert service.store.list_turns(session_id) == []
-    assert service.store.list_events(session_id) == []
+    assert service.store.turns.list_turns(session_id) == []
+    assert service.store.events.list_events(session_id) == []
 
 
 class _Cancelled:
@@ -197,7 +198,7 @@ def test_run_turn_sets_precise_attempt_times_and_terminal_status(tmp_path: Path)
     assert isinstance(submission, TurnSubmission)
 
     execution = runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
-    attempt = service.store.get_attempt(submission.attempt.attempt_id)
+    attempt = service.store.attempts.get_attempt(submission.attempt.attempt_id)
 
     assert execution.result.status == "message_complete"
     assert execution.attempt_id == submission.attempt.attempt_id
@@ -205,15 +206,15 @@ def test_run_turn_sets_precise_attempt_times_and_terminal_status(tmp_path: Path)
     assert attempt.status == "completed"
     assert attempt.started_at is not None
     assert attempt.ended_at is not None
-    assert service.store.get_turn(submission.turn.turn_id).status == "completed"
+    assert service.store.turns.get_turn(submission.turn.turn_id).status == "completed"
     with pytest.raises(RuntimeError, match="created state"):
         runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
-    assert service.store.get_attempt(submission.attempt.attempt_id).status == "completed"
+    assert service.store.attempts.get_attempt(submission.attempt.attempt_id).status == "completed"
 
 
 class _FailingCandidateExtractor:
     def extract(self, session_id: str, turn_id: str):
-        raise RuntimeError("boom")
+        raise sqlite3.OperationalError("boom")
 
 
 class _SuccessfulCandidateExtractor:
@@ -247,15 +248,15 @@ def test_memory_candidate_postprocessing_does_not_change_completed_turn(
     execution = runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
 
     assert execution.result.status == "message_complete"
-    assert service.store.get_turn(submission.turn.turn_id).status == "completed"
-    assert service.store.get_attempt(submission.attempt.attempt_id).status == "completed"
-    event = next(event for event in service.store.list_events(session_id) if event.event_type == event_type)
+    assert service.store.turns.get_turn(submission.turn.turn_id).status == "completed"
+    assert service.store.attempts.get_attempt(submission.attempt.attempt_id).status == "completed"
+    event = next(event for event in service.store.events.list_events(session_id) if event.event_type == event_type)
     assert event.payload == payload
 
 
 def test_submit_user_message_blocks_recovery_required_turns(tmp_path: Path) -> None:
     _, service, session_id, _ = _runtime(tmp_path)
-    turn = service.store.create_turn(
+    turn = service.store.turns.create_turn(
         session_id=session_id,
         title="Turn 1",
         provider_snapshot="openai",
@@ -263,7 +264,7 @@ def test_submit_user_message_blocks_recovery_required_turns(tmp_path: Path) -> N
         permission_mode_snapshot="manual",
         branch_snapshot="main",
     )
-    service.store.update_turn_status(turn.turn_id, "recovery_required")
+    service.store.turns.update_turn_status(turn.turn_id, "recovery_required")
     runtime = SessionRuntime(service.database, StructuredFakeLLM([LLMResponse(content="hello")]), lambda trace: ToolRouter(trace))
 
     with pytest.raises(RuntimeError, match="running turn"):
@@ -277,16 +278,16 @@ def test_run_turn_maps_cancelled_and_llm_error_explicitly(tmp_path: Path) -> Non
     assert isinstance(cancelled, TurnSubmission)
     result = cancelled_runtime.run_turn(cancelled.turn.turn_id, cancelled.attempt.attempt_id, _Cancelled())
     assert result.result.status == "cancelled"
-    assert service.store.get_attempt(cancelled.attempt.attempt_id).status == "cancelled"
-    assert service.store.get_turn(cancelled.turn.turn_id).status == "cancelled"
+    assert service.store.attempts.get_attempt(cancelled.attempt.attempt_id).status == "cancelled"
+    assert service.store.turns.get_turn(cancelled.turn.turn_id).status == "cancelled"
 
     failed_runtime = SessionRuntime(service.database, _RaisingLLM(), lambda trace: ToolRouter(trace))
     failed = failed_runtime.submit_user_message(session_id, "fail")
     assert isinstance(failed, TurnSubmission)
     result = failed_runtime.run_turn(failed.turn.turn_id, failed.attempt.attempt_id)
     assert result.result.status == "llm_error"
-    assert service.store.get_attempt(failed.attempt.attempt_id).status == "failed"
-    assert service.store.get_turn(failed.turn.turn_id).status == "failed"
+    assert service.store.attempts.get_attempt(failed.attempt.attempt_id).status == "failed"
+    assert service.store.turns.get_turn(failed.turn.turn_id).status == "failed"
 
 
 def test_run_turn_setup_exception_is_interrupted(tmp_path: Path) -> None:
@@ -302,7 +303,7 @@ def test_run_turn_setup_exception_is_interrupted(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="router setup failed"):
         runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
 
-    attempt = service.store.get_attempt(submission.attempt.attempt_id)
+    attempt = service.store.attempts.get_attempt(submission.attempt.attempt_id)
     assert attempt.status == "interrupted"
     assert attempt.interruption_reason == "router setup failed"
-    assert service.store.get_turn(submission.turn.turn_id).status == "interrupted"
+    assert service.store.turns.get_turn(submission.turn.turn_id).status == "interrupted"

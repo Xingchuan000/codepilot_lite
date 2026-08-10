@@ -5,7 +5,6 @@ from typer.testing import CliRunner
 
 from codepilot.cli import app
 
-
 runner = CliRunner()
 
 
@@ -16,7 +15,7 @@ def _write_trace(path: Path, lines: list[str]) -> None:
 
 def test_cli_report_from_trace(tmp_path: Path) -> None:
     trace_path = tmp_path / "runs" / "run-test" / "trace.jsonl"
-    _write_trace(trace_path, ['{"run_id":"run-test","step":1,"event_type":"run_end","success":true,"output_summary":"done"}'])
+    _write_trace(trace_path, ['{"schema_version":"trace.v1","run_id":"run-test","step":1,"event_type":"run_end","success":true,"output_summary":"done"}'])
 
     result = runner.invoke(app, ["report", "--trace", str(trace_path), "--overwrite"])
 
@@ -28,7 +27,7 @@ def test_cli_report_from_trace(tmp_path: Path) -> None:
 
 def test_cli_report_from_run_id(tmp_path: Path) -> None:
     trace_path = tmp_path / "runs" / "run-test" / "trace.jsonl"
-    _write_trace(trace_path, ['{"run_id":"run-test","step":1,"event_type":"run_end","success":true,"output_summary":"done"}'])
+    _write_trace(trace_path, ['{"schema_version":"trace.v1","run_id":"run-test","step":1,"event_type":"run_end","success":true,"output_summary":"done"}'])
 
     result = runner.invoke(app, ["report", "--run-id", "run-test", "--runs-dir", str(tmp_path / "runs"), "--overwrite"])
 
@@ -38,7 +37,7 @@ def test_cli_report_from_run_id(tmp_path: Path) -> None:
 
 def test_cli_report_supports_output_and_json(tmp_path: Path) -> None:
     trace_path = tmp_path / "trace.jsonl"
-    _write_trace(trace_path, ['{"run_id":"run-test","step":1,"event_type":"run_end","success":true,"output_summary":"done"}'])
+    _write_trace(trace_path, ['{"schema_version":"trace.v1","run_id":"run-test","step":1,"event_type":"run_end","success":true,"output_summary":"done"}'])
 
     output_path = tmp_path / "custom" / "report.md"
     result = runner.invoke(app, ["report", "--trace", str(trace_path), "--output", str(output_path), "--json", "--overwrite"])
@@ -72,7 +71,7 @@ def test_cli_report_rejects_missing_trace(tmp_path: Path) -> None:
 
 def test_cli_report_rejects_existing_output_without_overwrite(tmp_path: Path) -> None:
     trace_path = tmp_path / "trace.jsonl"
-    _write_trace(trace_path, ['{"run_id":"run-test","step":1,"event_type":"run_end","success":true}'])
+    _write_trace(trace_path, ['{"schema_version":"trace.v1","run_id":"run-test","step":1,"event_type":"run_end","success":true}'])
     (trace_path.parent / "report.md").write_text("exists", encoding="utf-8")
 
     result = runner.invoke(app, ["report", "--trace", str(trace_path)])

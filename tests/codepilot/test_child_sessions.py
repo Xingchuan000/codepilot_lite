@@ -6,13 +6,13 @@ import pytest
 
 from codepilot.session.database import SessionDatabase
 from codepilot.session.service import SessionService
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
-def _service(tmp_path: Path) -> tuple[SessionService, SessionStore]:
+def _service(tmp_path: Path) -> tuple[SessionService, SessionRepositories]:
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
-    return SessionService(database), SessionStore(database)
+    return SessionService(database), SessionRepositories(database)
 
 
 def test_child_session_reuses_project_and_overrides_only_effective_workspace(tmp_path: Path) -> None:
@@ -22,7 +22,7 @@ def test_child_session_reuses_project_and_overrides_only_effective_workspace(tmp
     source.mkdir()
     workspace.mkdir()
     parent = service.create_session(source, "openai", "fake", "manual")
-    fork = store.create_turn(
+    fork = store.turns.create_turn(
         session_id=parent.session_id,
         title="parent turn",
         provider_snapshot="openai",
@@ -43,14 +43,14 @@ def test_child_session_reuses_project_and_overrides_only_effective_workspace(tmp
     assert child.project_id == parent.project_id
     assert service.open_session(parent.session_id).project_path == source
     assert service.open_session(child.session_id).project_path == workspace
-    assert store.list_child_sessions(parent.session_id) == [child]
+    assert store.sessions.list_children(parent.session_id) == [child]
 
 
 def test_child_creation_rejects_fork_turn_from_another_parent(tmp_path: Path) -> None:
     service, store = _service(tmp_path)
     first = service.create_session(tmp_path / "one", "openai", "fake", "manual")
     second = service.create_session(tmp_path / "two", "openai", "fake", "manual")
-    first_turn = store.create_turn(
+    first_turn = store.turns.create_turn(
         session_id=first.session_id,
         title="first",
         provider_snapshot="openai",

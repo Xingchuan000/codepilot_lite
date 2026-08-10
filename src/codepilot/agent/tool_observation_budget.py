@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from codepilot.session.model_capabilities import ModelContextProfile
+from codepilot.session.model_context import ModelContextProfile
 
 
 @dataclass(frozen=True)

@@ -114,7 +114,7 @@ def relative_paths_in_text(text: str, *, base_dir: str | Path | None = None) -> 
             continue
         try:
             pieces.append(relative_path_for_display(path_text, base_dir=base_dir))
-        except Exception:
+        except (OSError, RuntimeError, ValueError):
             pieces.append(Path(path_text).name)
         pieces.append(suffix)
         last_index = end
@@ -129,5 +129,5 @@ def relative_path_for_display(path: str | Path, *, base_dir: str | Path | None =
     base = Path(base_dir)
     try:
         return str(path_obj.resolve().relative_to(base.resolve()))
-    except Exception:
+    except (OSError, RuntimeError, ValueError):
         return path_obj.name if path_obj.is_absolute() else str(path_obj)

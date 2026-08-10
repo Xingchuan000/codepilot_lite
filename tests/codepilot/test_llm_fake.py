@@ -47,7 +47,7 @@ def test_structured_fake_llm_from_jsonl_requires_native_response_shape(tmp_path)
     assert StructuredFakeLLM.from_jsonl(path).complete([]).tool_calls[0].provider_tool_call_id == "call-1"
 
 
-def test_structured_fake_llm_rejects_legacy_action_fixture(tmp_path) -> None:
+def test_structured_fake_llm_rejects_malformed_action_fixture(tmp_path) -> None:
     path = tmp_path / "responses.jsonl"
     path.write_text('{"type":"finish","status":"success","summary":"done"}\n', encoding="utf-8")
 

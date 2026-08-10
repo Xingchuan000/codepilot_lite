@@ -157,7 +157,7 @@ def test_build_run_report_handles_max_steps_exceeded() -> None:
 
     report = build_run_report(events, trace_path=Path("/tmp/runs/run-abc/trace.jsonl"))
 
-    assert report.run_id == "run-abc"
+    assert report.run_id == "run-test"
     assert report.status == "max_steps_exceeded"
     assert "Run ended because max_steps was exceeded." in report.warnings
 
@@ -175,11 +175,11 @@ def test_build_run_report_message_complete_does_not_warn_about_tests_or_diff() -
     assert report.warnings == []
 
 
-def test_build_run_report_missing_run_start_uses_trace_path_parent(tmp_path: Path) -> None:
+def test_build_run_report_missing_run_start_uses_event_run_id(tmp_path: Path) -> None:
     trace_path = tmp_path / "run-demo" / "trace.jsonl"
     report = build_run_report([_event("run_end", step=1, success=True, output_summary="done")], trace_path=trace_path)
 
-    assert report.run_id == "run-demo"
+    assert report.run_id == "run-test"
     assert "Missing run_start event." in report.warnings
 
 

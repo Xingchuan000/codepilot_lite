@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from codepilot.agent.boundary import RuntimeToolContext
 from codepilot.multi_agent.models import SpawnContract
 from codepilot.multi_agent.supervisor import AgentSupervisor
 from codepilot.router.runtime_tools import RuntimeToolRegistry
@@ -43,14 +42,6 @@ class WaitAgentArgs(AgentIdArgs):
 
 class _EmptyArgs(BaseModel):
     model_config = ConfigDict(extra="forbid")
-
-
-@dataclass(frozen=True)
-class AgentControlContext:
-    parent_session_id: str
-    parent_turn_id: str
-    parent_attempt_id: str
-    parent_repo: Path
 
 
 def _spec(
@@ -177,7 +168,7 @@ def _failure(error: Exception) -> ToolResult:
 
 def build_agent_control_registry(
     supervisor: AgentSupervisor,
-    context: AgentControlContext,
+    context: RuntimeToolContext,
 ) -> RuntimeToolRegistry:
     def spawn(arguments: dict[str, Any]) -> ToolResult:
         try:

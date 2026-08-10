@@ -6,7 +6,7 @@ from pathlib import Path
 
 from codepilot.session.database import SessionDatabase
 from codepilot.session.service import SessionService
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tui_agent.app import create_tui_agent_app
 from codepilot.tui_agent.models import TUIEvent
 from codepilot.tui_agent.session_picker import SessionPickerResult, SessionPickerScreen
@@ -182,14 +182,14 @@ def test_real_textual_model_command_opens_model_picker(tmp_path: Path) -> None:
 
 def _seed_message(database: SessionDatabase, project: Path, text: str):
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(
         project_path=project,
         provider="fake",
         current_model="fake",
         permission_mode="manual",
     )
-    turn = store.create_turn(
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title=text,
         provider_snapshot="fake",
@@ -198,7 +198,7 @@ def _seed_message(database: SessionDatabase, project: Path, text: str):
         branch_snapshot=None,
         status="completed",
     )
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content=text)
+    store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content=text)
     return session
 
 
@@ -341,3 +341,4 @@ def test_real_textual_new_event_is_mounted_once(tmp_path: Path) -> None:
             assert sum("新事件" in text for text in rendered) == 1
 
     asyncio.run(check())
+

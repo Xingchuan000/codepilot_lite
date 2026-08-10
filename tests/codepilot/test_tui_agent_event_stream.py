@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from codepilot.session.database import SessionDatabase
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.session.trace_recorder import SessionTraceRecorder
 from codepilot.trace.events import TraceEvent
 from codepilot.trace.logger import TraceLogger
@@ -62,9 +62,9 @@ def test_permission_response_trace_event_is_normalized() -> None:
 def test_session_trace_recorder_keeps_permission_ids_structured(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="Turn 1",
         provider_snapshot="openai",
@@ -185,3 +185,4 @@ def test_long_natural_reply_survives_trace_preview_pipeline(tmp_path: Path) -> N
     assert view.transcript[0].body == text
     assert "... truncated" not in view.transcript[0].body
     assert len(view.transcript[0].body) == len(text)
+

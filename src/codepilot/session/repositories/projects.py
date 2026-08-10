@@ -32,3 +32,10 @@ class ProjectRepository:
             if row is not None:
                 return project_from_row(row)
         return self.create_project(resolved)
+
+    def get_project(self, project_id: str) -> ProjectRecord:
+        with self.database.transaction() as connection:
+            row = connection.execute("SELECT * FROM projects WHERE project_id = ?", (project_id,)).fetchone()
+        if row is None:
+            raise LookupError(project_id)
+        return project_from_row(row)

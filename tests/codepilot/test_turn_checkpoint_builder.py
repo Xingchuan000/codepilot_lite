@@ -1,20 +1,31 @@
 from pathlib import Path
 
+import pytest
+
+from codepilot.memory.models import TurnCheckpointContent
 from codepilot.memory.turn_checkpoint_builder import TurnCheckpointBuilder
 from codepilot.session.database import SessionDatabase
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
+
+
+def test_checkpoint_reader_accepts_only_current_schema(tmp_path: Path) -> None:
+    current = TurnCheckpointContent(current_goal="fix").to_dict()
+
+    assert TurnCheckpointContent.from_dict(current).current_goal == "fix"
+    with pytest.raises(ValueError, match="unsupported turn checkpoint schema"):
+        TurnCheckpointContent.from_dict({"task_goal": "old", "step": 1, "earlier_exchanges": []})
 
 
 def test_builder_uses_persisted_tool_facts_for_files_tests_errors_and_next_step(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
-    turn = store.create_turn(session_id=session.session_id, title="facts", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
-    read = store.create_tool_call(turn_id=turn.turn_id, tool_name="read_file", arguments={"path": "src/app.py"})
-    store.persist_tool_result(read.tool_call_id, call_status="completed", result_status="success", content="source", success=True, metadata={"path": "src/app.py"})
-    tests = store.create_tool_call(turn_id=turn.turn_id, tool_name="run_tests", arguments={"command": "pytest -q"})
-    store.persist_tool_result(tests.tool_call_id, call_status="failed", result_status="failed", content="failed", error="AssertionError", success=False, metadata={"command": "pytest -q", "status": "failed", "returncode": 1, "summary_line": "1 failed"})
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
+    turn = store.turns.create_turn(session_id=session.session_id, title="facts", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
+    read = store.tool_executions.create_tool_call(turn_id=turn.turn_id, tool_name="read_file", arguments={"path": "src/app.py"})
+    store.tool_executions.persist_tool_result(read.tool_call_id, call_status="completed", result_status="success", content="source", success=True, metadata={"path": "src/app.py"})
+    tests = store.tool_executions.create_tool_call(turn_id=turn.turn_id, tool_name="run_tests", arguments={"command": "pytest -q"})
+    store.tool_executions.persist_tool_result(tests.tool_call_id, call_status="failed", result_status="failed", content="failed", error="AssertionError", success=False, metadata={"command": "pytest -q", "status": "failed", "returncode": 1, "summary_line": "1 failed"})
 
     content = TurnCheckpointBuilder(database).build(
         session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=3, task="fix tests",
@@ -31,10 +42,10 @@ def test_builder_uses_persisted_tool_facts_for_files_tests_errors_and_next_step(
 
 def test_later_passing_test_clears_active_failure_but_keeps_history(tmp_path: Path) -> None:
     database, store, session, turn = _facts(tmp_path)
-    failed = store.create_tool_call(turn_id=turn.turn_id, tool_name="run_tests", arguments={"command": "pytest -q"})
-    store.persist_tool_result(failed.tool_call_id, call_status="failed", result_status="failed", content="failed", error="AssertionError", success=False, metadata={"command": "pytest -q", "status": "failed", "summary_line": "1 failed"})
-    passed = store.create_tool_call(turn_id=turn.turn_id, tool_name="run_tests", arguments={"command": "pytest -q"})
-    store.persist_tool_result(passed.tool_call_id, call_status="completed", result_status="success", content="passed", success=True, metadata={"command": "pytest -q", "status": "passed", "summary_line": "10 passed"})
+    failed = store.tool_executions.create_tool_call(turn_id=turn.turn_id, tool_name="run_tests", arguments={"command": "pytest -q"})
+    store.tool_executions.persist_tool_result(failed.tool_call_id, call_status="failed", result_status="failed", content="failed", error="AssertionError", success=False, metadata={"command": "pytest -q", "status": "failed", "summary_line": "1 failed"})
+    passed = store.tool_executions.create_tool_call(turn_id=turn.turn_id, tool_name="run_tests", arguments={"command": "pytest -q"})
+    store.tool_executions.persist_tool_result(passed.tool_call_id, call_status="completed", result_status="success", content="passed", success=True, metadata={"command": "pytest -q", "status": "passed", "summary_line": "10 passed"})
 
     content = TurnCheckpointBuilder(database).build(session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=4, task="fix", evidence={"last_test_status": "passed"}, covered_message_ids=(), previous=None)
 
@@ -47,7 +58,7 @@ def test_later_passing_test_clears_active_failure_but_keeps_history(tmp_path: Pa
 def test_pending_large_patch_is_hashed_without_changing_sqlite_fact(tmp_path: Path) -> None:
     database, store, session, turn = _facts(tmp_path)
     patch = "x" * 20_000
-    call = store.create_tool_call(turn_id=turn.turn_id, tool_name="apply_patch", arguments={"path": "src/app.py", "patch": patch})
+    call = store.tool_executions.create_tool_call(turn_id=turn.turn_id, tool_name="apply_patch", arguments={"path": "src/app.py", "patch": patch})
 
     content = TurnCheckpointBuilder(database).build(session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=2, task="apply", evidence={"unknown": "y" * 20_000}, covered_message_ids=(), previous=None)
 
@@ -56,18 +67,18 @@ def test_pending_large_patch_is_hashed_without_changing_sqlite_fact(tmp_path: Pa
     assert len(arguments["patch_sha256"]) == 64
     assert patch not in str(content.to_dict())
     assert content.evidence == {}
-    assert store.get_tool_call(call.tool_call_id).arguments["patch"] == patch
+    assert store.tool_executions.get_tool_call(call.tool_call_id).arguments["patch"] == patch
 
 
 def test_recent_tool_facts_only_include_covered_tool_exchange(tmp_path: Path) -> None:
     database, store, session, turn = _facts(tmp_path)
-    covered_assistant = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="first")
-    covered_call = store.create_tool_call(turn_id=turn.turn_id, tool_name="read_file", arguments={"path": "old.py"}, message_id=covered_assistant.message_id)
-    store.persist_tool_result(covered_call.tool_call_id, call_status="completed", result_status="success", content="old", success=True, metadata={"path": "old.py"})
-    covered_result = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="old", metadata={"tool_call_id": covered_call.tool_call_id, "success": True})
-    retained_assistant = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="latest")
-    retained_call = store.create_tool_call(turn_id=turn.turn_id, tool_name="read_file", arguments={"path": "new.py"}, message_id=retained_assistant.message_id)
-    store.persist_tool_result(retained_call.tool_call_id, call_status="completed", result_status="success", content="new", success=True, metadata={"path": "new.py"})
+    covered_assistant = store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="first")
+    covered_call = store.tool_executions.create_tool_call(turn_id=turn.turn_id, tool_name="read_file", arguments={"path": "old.py"}, message_id=covered_assistant.message_id)
+    store.tool_executions.persist_tool_result(covered_call.tool_call_id, call_status="completed", result_status="success", content="old", success=True, metadata={"path": "old.py"})
+    covered_result = store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="old", metadata={"tool_call_id": covered_call.tool_call_id, "success": True})
+    retained_assistant = store.messages.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="latest")
+    retained_call = store.tool_executions.create_tool_call(turn_id=turn.turn_id, tool_name="read_file", arguments={"path": "new.py"}, message_id=retained_assistant.message_id)
+    store.tool_executions.persist_tool_result(retained_call.tool_call_id, call_status="completed", result_status="success", content="new", success=True, metadata={"path": "new.py"})
 
     content = TurnCheckpointBuilder(database).build(session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=3, task="inspect", evidence={}, covered_message_ids=(covered_assistant.message_id, covered_result.message_id), previous=None)
 
@@ -152,15 +163,15 @@ def test_non_executing_pytest_does_not_clear_test_failure(tmp_path: Path) -> Non
 def _facts(tmp_path: Path):
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
-    turn = store.create_turn(session_id=session.session_id, title="facts", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="tiny", permission_mode="manual")
+    turn = store.turns.create_turn(session_id=session.session_id, title="facts", provider_snapshot="openai", model_snapshot="tiny", permission_mode_snapshot="manual", branch_snapshot=None)
     return database, store, session, turn
 
 
-def _persist_test(store: SessionStore, turn_id: str, command: str, success: bool, summary: str) -> None:
-    call = store.create_tool_call(turn_id=turn_id, tool_name="run_tests", arguments={"command": command})
-    store.persist_tool_result(
+def _persist_test(store: SessionRepositories, turn_id: str, command: str, success: bool, summary: str) -> None:
+    call = store.tool_executions.create_tool_call(turn_id=turn_id, tool_name="run_tests", arguments={"command": command})
+    store.tool_executions.persist_tool_result(
         call.tool_call_id,
         call_status="completed" if success else "failed",
         result_status="success" if success else "failed",
@@ -169,3 +180,4 @@ def _persist_test(store: SessionStore, turn_id: str, command: str, success: bool
         success=success,
         metadata={"command": command, "status": "passed" if success else "failed", "summary_line": summary},
     )
+

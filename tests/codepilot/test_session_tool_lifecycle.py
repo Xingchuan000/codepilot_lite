@@ -2,20 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from codepilot.policy import PolicyChecker, PolicyContext
-from codepilot.router import ToolAction, ToolRouter
+from codepilot.router import ToolRouter
+from codepilot.tools.actions import ToolAction
 from codepilot.session.database import SessionDatabase
+from codepilot.session.repositories import SessionRepositories
 from codepilot.session.tool_lifecycle import SQLiteToolLifecycleObserver
 from codepilot.session.trace_recorder import SessionTraceRecorder
-from codepilot.session.store import SessionStore
 
 
-def _router(tmp_path: Path, *, approved: bool = True) -> tuple[ToolRouter, SessionStore, str]:
+def _router(tmp_path: Path, *, approved: bool = True) -> tuple[ToolRouter, SessionRepositories, str]:
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="Turn 1",
         provider_snapshot="openai",
@@ -23,7 +26,7 @@ def _router(tmp_path: Path, *, approved: bool = True) -> tuple[ToolRouter, Sessi
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    attempt = store.create_attempt(turn_id=turn.turn_id)
+    attempt = store.attempts.create_attempt(turn_id=turn.turn_id)
     trace = SessionTraceRecorder(database, session.session_id, turn.turn_id, attempt.attempt_id)
     return (
         ToolRouter(
@@ -80,7 +83,7 @@ def test_replace_range_persists_recovery_token_before_result(tmp_path: Path) -> 
             arguments={"repo": tmp_path, "path": "sample.txt", "start_line": 2, "end_line": 2, "replacement": "changed\n"},
         )
     )
-    call = store.get_tool_call(routed.metadata["tool_call_id"])
+    call = store.tool_executions.get_tool_call(routed.metadata["tool_call_id"])
 
     assert routed.success is True
     assert call.recovery_token is not None
@@ -93,24 +96,29 @@ def test_replace_range_persists_recovery_token_before_result(tmp_path: Path) -> 
 
 def test_execution_exception_marks_exact_call_uncertain(tmp_path: Path) -> None:
     class BrokenRegistry:
+        def find_spec(self, name: str):
+            return None
+
+        def list_exposed_specs(self):
+            return []
+
         def has_tool(self, name: str) -> bool:
             raise RuntimeError("registry failed after durable intent")
+
+        def call_tool(self, name: str, arguments: dict):
+            raise AssertionError("call_tool should not be reached")
 
     router, store, turn_id = _router(tmp_path)
     router.external_tool_registry = BrokenRegistry()
 
-    try:
+    with pytest.raises(RuntimeError, match="registry failed after durable intent"):
         router.route(ToolAction(tool_name="list_files", arguments={"repo": tmp_path, "path": "."}))
-    except RuntimeError as exc:
-        assert str(exc) == "registry failed after durable intent"
-    else:
-        raise AssertionError("route should preserve the execution exception")
 
     with store.database.transaction() as connection:
         row = connection.execute("SELECT tool_call_id, status, recovery_token_json FROM tool_calls WHERE turn_id = ?", (turn_id,)).fetchone()
     assert row["status"] == "execution_uncertain"
     assert row["recovery_token_json"] is not None
-    assert store.get_tool_result_by_call(row["tool_call_id"]) is None
+    assert store.tool_executions.get_tool_result_by_call(row["tool_call_id"]) is None
 
 
 def test_recovery_token_failure_closes_call_before_side_effect(tmp_path: Path) -> None:
@@ -130,7 +138,8 @@ def test_recovery_token_failure_closes_call_before_side_effect(tmp_path: Path) -
 
     with store.database.transaction() as connection:
         row = connection.execute("SELECT tool_call_id, status FROM tool_calls WHERE turn_id = ?", (turn_id,)).fetchone()
-    result = store.get_tool_result_by_call(row["tool_call_id"])
+    result = store.tool_executions.get_tool_result_by_call(row["tool_call_id"])
     assert row["status"] == "failed"
     assert result is not None
     assert result.metadata == {"executed": False, "phase": "recovery_token"}
+

@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+from codepilot.session.errors import UnsupportedSessionSchema
+
 SCHEMA_VERSION = 8
 
 
@@ -38,8 +40,6 @@ class SessionDatabase:
     def initialize(self) -> None:
         connection = self.connect()
         try:
-            # 旧库可能缺少新版本索引所引用的列，因此迁移前只能创建表，
-            # 不能直接执行包含完整索引的最新 Schema。
             has_schema_meta = _table_exists(connection, "schema_meta")
             has_business_tables = any(_table_exists(connection, table) for table in ("projects", "sessions", "turns"))
             if not has_schema_meta and not has_business_tables:
@@ -50,37 +50,15 @@ class SessionDatabase:
                 connection.commit()
                 return
 
-            connection.executescript(_schema_tables_sql())
+            if not has_schema_meta:
+                raise RuntimeError("Session database has business tables but no schema version")
             row = connection.execute("SELECT value FROM schema_meta WHERE key = 'schema_version'").fetchone()
             if row is None:
                 raise RuntimeError("Session database has business tables but no schema version")
             version = int(row[0])
-            if version > SCHEMA_VERSION or version < 1:
-                raise RuntimeError(f"unsupported Session schema version: {version}")
-            if version < 2:
-                _migrate_v1_to_v2(connection)
-                version = 2
-            if version < 3:
-                _migrate_v2_to_v3(connection)
-                version = 3
-            if version < 4:
-                _migrate_v3_to_v4(connection)
-                version = 4
-            if version < 5:
-                _migrate_v4_to_v5(connection)
-                version = 5
-            if version < 6:
-                _migrate_v5_to_v6(connection)
-                version = 6
-            if version < 7:
-                _migrate_v6_to_v7(connection)
-                version = 7
-            if version < 8:
-                _migrate_v7_to_v8(connection)
-                version = 8
-            _create_latest_indexes(connection)
-            _verify_schema(connection, version)
-            _write_schema_version(connection, version)
+            if version != SCHEMA_VERSION:
+                raise UnsupportedSessionSchema(version, SCHEMA_VERSION)
+            _verify_schema(connection, SCHEMA_VERSION)
             connection.commit()
         except Exception:
             connection.rollback()
@@ -102,141 +80,6 @@ class SessionDatabase:
                 connection.commit()
             finally:
                 connection.close()
-
-
-def _migrate_v1_to_v2(connection: sqlite3.Connection) -> None:
-    """幂等迁移 durable recovery 字段；部分迁移中断后可安全重入。"""
-
-    additions = {
-        "run_attempts": {
-            "interruption_reason": "TEXT",
-            "worker_id": "TEXT",
-            "lease_expires_at": "TEXT",
-        },
-        "tool_calls": {
-            "side_effect": "TEXT",
-            "idempotency": "TEXT",
-            "recovery_strategy": "TEXT",
-            "recovery_token_json": "TEXT",
-        },
-    }
-    for table, columns in additions.items():
-        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-        for column, type_name in columns.items():
-            if column not in existing:
-                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_name}")
-
-
-def _migrate_v2_to_v3(connection: sqlite3.Connection) -> None:
-    """补齐权限、消息和结果链路需要的新列。"""
-
-    additions = {
-        "message_parts": {
-            "artifact_id": "TEXT",
-        },
-        "tool_results": {
-            "output_preview": "TEXT",
-            "artifact_id": "TEXT",
-            "error": "TEXT",
-            "success": "INTEGER",
-        },
-        "permission_grants": {
-            "tool_name": "TEXT",
-            "scope_json": "TEXT",
-        },
-    }
-    for table, columns in additions.items():
-        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-        for column, type_name in columns.items():
-            if column not in existing:
-                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_name}")
-
-
-def _migrate_v3_to_v4(connection: sqlite3.Connection) -> None:
-    """补齐 turn / summary 字段与权限查询索引。"""
-
-    additions = {
-        "turns": {
-            "user_message_id": "TEXT",
-            "started_at": "TEXT",
-            "completed_at": "TEXT",
-            "error_code": "TEXT",
-        },
-        "context_summaries": {
-            "source_start_sequence": "INTEGER",
-            "source_end_sequence": "INTEGER",
-            "summary_message_id": "TEXT",
-            "model": "TEXT",
-            "status": "TEXT",
-        },
-        "permission_requests": {
-            "session_id": "TEXT",
-            "turn_id": "TEXT",
-            "attempt_id": "TEXT",
-            "tool_call_id": "TEXT",
-        },
-    }
-    for table, columns in additions.items():
-        existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-        for column, type_name in columns.items():
-            if column not in existing:
-                connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {type_name}")
-
-
-def _migrate_v4_to_v5(connection: sqlite3.Connection) -> None:
-    """重建权限请求表，使升级库与新建库拥有相同的外键约束。"""
-
-    # 临时表可能来自上次中断。正式表仍在时，旧临时表不可能是已提交的结果，
-    # 因此先删除并从正式表重新复制，保证迁移可重入且不误删正式数据。
-    connection.execute("PRAGMA foreign_keys = OFF")
-    connection.execute("DROP TABLE IF EXISTS permission_requests_v5")
-    connection.execute(
-        """CREATE TABLE permission_requests_v5 (
-            request_id TEXT PRIMARY KEY,
-            session_id TEXT,
-            turn_id TEXT,
-            attempt_id TEXT,
-            tool_call_id TEXT,
-            scope_key TEXT,
-            tool_name TEXT NOT NULL,
-            arguments_json TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            metadata_json TEXT NOT NULL,
-            FOREIGN KEY(session_id) REFERENCES sessions(session_id),
-            FOREIGN KEY(turn_id) REFERENCES turns(turn_id),
-            FOREIGN KEY(attempt_id) REFERENCES run_attempts(attempt_id),
-            FOREIGN KEY(tool_call_id) REFERENCES tool_calls(tool_call_id)
-        )"""
-    )
-    connection.execute(
-        """INSERT INTO permission_requests_v5
-        SELECT request_id,
-               CASE WHEN session_id IN (SELECT session_id FROM sessions) THEN session_id END,
-               CASE WHEN turn_id IN (SELECT turn_id FROM turns) THEN turn_id END,
-               CASE WHEN attempt_id IN (SELECT attempt_id FROM run_attempts) THEN attempt_id END,
-               CASE WHEN tool_call_id IN (SELECT tool_call_id FROM tool_calls) THEN tool_call_id END,
-               scope_key, tool_name, arguments_json, reason, status, created_at, metadata_json
-        FROM permission_requests"""
-    )
-    connection.execute("DROP TABLE permission_requests")
-    connection.execute("ALTER TABLE permission_requests_v5 RENAME TO permission_requests")
-    connection.execute("PRAGMA foreign_keys = ON")
-    if connection.execute("PRAGMA foreign_key_check").fetchall():
-        raise RuntimeError("Session schema migration left invalid foreign keys")
-
-
-def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
-    connection.executescript(_memory_tables_sql())
-
-
-def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
-    connection.executescript(_turn_checkpoint_tables_sql())
-
-
-def _migrate_v7_to_v8(connection: sqlite3.Connection) -> None:
-    connection.executescript(_context_compaction_snapshot_tables_sql())
 
 
 def _table_exists(connection: sqlite3.Connection, table: str) -> bool:

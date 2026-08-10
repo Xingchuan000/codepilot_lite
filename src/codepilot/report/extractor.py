@@ -15,15 +15,6 @@ def _get(event: dict[str, Any], key: str, default: Any = None) -> Any:
     return event.get(key, default)
 
 
-def _get_nested(mapping: dict[str, Any] | None, dotted_key: str, default: Any = None) -> Any:
-    current: Any = mapping or {}
-    for part in dotted_key.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return default
-        current = current[part]
-    return current
-
-
 def _get_metadata(event: dict[str, Any]) -> dict[str, Any]:
     metadata = event.get("metadata")
     return metadata if isinstance(metadata, dict) else {}
@@ -128,73 +119,16 @@ def _normalize_path_for_report(path: str | Path | None, repo: str | Path | None 
     return path_text
 
 
-def _looks_like_run_dir_name(name: str) -> bool:
-    """判断目录名是否像计划文档中定义的真实 run_id 目录。"""
-
-    return bool(name) and (name.startswith("run-") or name.startswith("demo-"))
-
-
-def _run_id_from_run_start(events: list[dict[str, Any]]) -> str | None:
-    """最高优先级：只从 run_start 事件读取 run_id。"""
-
-    for event in events:
-        if _as_str(event.get("event_type")) != "run_start":
-            continue
-        run_id = _as_str(event.get("run_id"))
-        if run_id is not None:
-            return run_id
-    return None
-
-
-def _run_id_from_trace_path(trace_path: str | Path | None) -> str | None:
-    """第二优先级：仅当父目录名看起来像真实 run_id 时，才使用 trace 路径。"""
-
-    if trace_path is None:
-        return None
-    path = Path(trace_path)
-    if path.name != "trace.jsonl":
-        return None
-    parent_name = path.parent.name
-    if _looks_like_run_dir_name(parent_name):
-        return parent_name
-    return None
-
-
-def _run_id_from_events(events: list[dict[str, Any]]) -> str | None:
-    """第三、四优先级：先查事件顶层 run_id，再查 metadata.run_id。"""
-
+def _event_run_id(events: list[dict[str, Any]]) -> str:
     for event in events:
         run_id = _as_str(event.get("run_id"))
         if run_id is not None:
             return run_id
-    for event in events:
-        metadata_run_id = _as_str(_get_metadata(event).get("run_id"))
-        if metadata_run_id is not None:
-            return metadata_run_id
-    return None
-
-
-def _event_run_id(events: list[dict[str, Any]], trace_path: str | Path | None) -> str:
-    """按第九步修复计划要求的顺序提取最终 report 的 run_id。"""
-
-    # 1. run_start 里的 run_id 最可信，优先级最高。
-    run_id = _run_id_from_run_start(events)
-    if run_id is not None:
-        return run_id
-    # 2. 如果 trace 位于标准 runs/<run_id>/trace.jsonl 结构下，并且目录名像真实 run_id，
-    #    就优先采用路径中的 run_id，避免被测试 helper 默认写入的 run-test 覆盖。
-    run_id = _run_id_from_trace_path(trace_path)
-    if run_id is not None:
-        return run_id
-    # 3/4. 只有当前两种更可信来源都缺失时，才回退到普通事件里的 run_id 字段。
-    run_id = _run_id_from_events(events)
-    if run_id is not None:
-        return run_id
     return "unknown-run"
 
 
 def _policy_decision_value(event: dict[str, Any]) -> str | None:
-    return _as_str(_get(event, "policy_decision")) or _as_str(_get_metadata(event).get("policy_decision"))
+    return _as_str(event.get("policy_decision"))
 
 
 def _delivery_kind_value(event: dict[str, Any]) -> str | None:
@@ -202,23 +136,17 @@ def _delivery_kind_value(event: dict[str, Any]) -> str | None:
 
 
 def _policy_approved_value(event: dict[str, Any]) -> bool | None:
-    value = _get_nested(event, "metadata.approved")
-    if isinstance(value, bool):
-        return value
-    value = _get(event, "approved")
+    value = _get_metadata(event).get("approved")
     return value if isinstance(value, bool) else None
 
 
 def _policy_executed_value(event: dict[str, Any]) -> bool | None:
-    value = _get_nested(event, "metadata.executed")
-    if isinstance(value, bool):
-        return value
-    value = _get(event, "executed")
+    value = _get_metadata(event).get("executed")
     return value if isinstance(value, bool) else None
 
 
 def _policy_key(event: dict[str, Any]) -> str:
-    return _as_str(_get_nested(event, "metadata.action_id")) or _as_str(_get(event, "action_id")) or _tool_key(event)
+    return _as_str(_get_metadata(event).get("action_id")) or _tool_key(event)
 
 
 def _tool_key(event: dict[str, Any]) -> str:
@@ -270,7 +198,7 @@ def build_run_report(
     """把 trace 事件压缩成可读的 RunReport。"""
 
     report = RunReport(
-        run_id=_event_run_id(events, trace_path),
+        run_id=_event_run_id(events),
         trace_path=str(trace_path) if trace_path is not None else None,
         warnings=list(warnings or []),
     )
@@ -359,8 +287,8 @@ def build_run_report(
                         step=step,
                         tool_name=tool_name,
                         decision=decision,
-                        reason=_as_str(_get(event, "policy_reason")) or _as_str(metadata.get("policy_reason")),
-                        rule=_as_str(_get(event, "policy_rule")) or _as_str(metadata.get("policy_rule")),
+                        reason=_as_str(event.get("policy_reason")),
+                        rule=_as_str(event.get("policy_rule")),
                         approved=approved,
                         executed=False if decision in {"deny", "ask"} and approved is not True else executed,
                     )
@@ -379,8 +307,8 @@ def build_run_report(
                 executed=True,
                 summary=_as_str(_get(event, "output_summary")),
                 error=_as_str(_get(event, "error")),
-                risk_level=_as_str(_get(event, "risk")) or _as_str(metadata.get("risk")),
-                side_effect=_as_str(_get(event, "side_effect")) or _as_str(metadata.get("side_effect")),
+                risk_level=_as_str(event.get("risk")),
+                side_effect=_as_str(event.get("side_effect")),
                 arguments_preview=_sanitize_dict_for_report(_get(event, "input") if isinstance(_get(event, "input"), dict) else {}),
                 metadata=_sanitize_dict_for_report(metadata),
             )

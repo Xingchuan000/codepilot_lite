@@ -5,15 +5,15 @@ from pathlib import Path
 from codepilot.permissions import PermissionRequest, PermissionResponse
 from codepilot.session.database import SessionDatabase
 from codepilot.session.permission import SessionPermissionBroker
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tui_agent.permission_broker import TestBroker
 
 
 def test_persisted_grant_is_replayed_without_ui_request(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
     request = PermissionRequest(
         request_id="permission-first",
         run_id="run-1",
@@ -41,3 +41,4 @@ def test_persisted_grant_is_replayed_without_ui_request(tmp_path: Path) -> None:
 
     assert second_inner.requests == []
     assert second.wait(replayed.request_id).decision == "approve_session"
+

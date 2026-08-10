@@ -7,9 +7,9 @@ from codepilot.llm.litellm_native import LiteLLMNativeClient
 from codepilot.llm.types import ChatMessage, ChatMessagePart, LLMReasoningReplay, RichChatMessage
 from codepilot.session.context_adapters import ProviderContextAdapter, SessionHistory
 from codepilot.session.database import SessionDatabase
-from codepilot.session.model_capabilities import ModelContextProfile
-from codepilot.session.provider_messages import to_provider_messages
-from codepilot.session.store import SessionStore
+from codepilot.session.model_context import ModelContextProfile
+from codepilot.llm.provider_messages import to_provider_messages
+from codepilot.session.repositories import SessionRepositories
 from codepilot.session.trace_recorder import SessionTraceRecorder
 
 
@@ -79,9 +79,9 @@ def test_provider_serializer_replays_thinking_blocks_before_tool_result() -> Non
 def test_sqlite_round_trip_preserves_thinking_block_signature(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="anthropic", current_model="claude", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="anthropic", current_model="claude", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="turn",
         provider_snapshot="anthropic",
@@ -110,10 +110,11 @@ def test_sqlite_round_trip_preserves_thinking_block_signature(tmp_path: Path) ->
         tool_call_id="internal-call-1",
     )
 
-    history = SessionHistory(session.session_id, turn.turn_id, tmp_path, (), tuple(store.list_messages_with_parts(session.session_id)))
+    history = SessionHistory(session.session_id, turn.turn_id, tmp_path, (), tuple(store.messages.list_messages_with_parts(session.session_id)))
     restored = ProviderContextAdapter(store).build_messages(
         history,
         ModelContextProfile("anthropic", "claude", 16_384, False),
     )
 
     assert to_provider_messages(restored)[1]["thinking_blocks"][0]["signature"] == "sig"
+

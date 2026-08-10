@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from codepilot.policy import PolicyChecker, PolicyContext
-from codepilot.router.actions import ToolAction
+from codepilot.tools.actions import ToolAction
 
 
 def test_structured_write_scope_allows_inside_and_denies_outside(tmp_path: Path) -> None:

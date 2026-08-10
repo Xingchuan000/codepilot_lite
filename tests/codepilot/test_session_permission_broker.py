@@ -6,16 +6,16 @@ from pathlib import Path
 from codepilot.permissions import PermissionRequest, PermissionResponse
 from codepilot.session.database import SessionDatabase
 from codepilot.session.permission import SessionPermissionBroker
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 from codepilot.tui_agent.permission_broker import TestBroker
 
 
 def test_session_permission_broker_persists_request_response_grant_and_event(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "sessions.sqlite3")
     database.initialize()
-    store = SessionStore(database)
-    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
-    turn = store.create_turn(
+    store = SessionRepositories(database)
+    session = store.sessions.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.turns.create_turn(
         session_id=session.session_id,
         title="Turn 1",
         provider_snapshot="openai",
@@ -23,8 +23,8 @@ def test_session_permission_broker_persists_request_response_grant_and_event(tmp
         permission_mode_snapshot="manual",
         branch_snapshot=None,
     )
-    attempt = store.create_attempt(turn_id=turn.turn_id)
-    call = store.create_tool_call(turn_id=turn.turn_id, attempt_id=attempt.attempt_id, tool_name="replace_range", arguments={"path": "src/demo.py"})
+    attempt = store.attempts.create_attempt(turn_id=turn.turn_id)
+    call = store.tool_executions.create_tool_call(turn_id=turn.turn_id, attempt_id=attempt.attempt_id, tool_name="replace_range", arguments={"path": "src/demo.py"})
     broker = SessionPermissionBroker(database, session.session_id, TestBroker())
     request = PermissionRequest(
         request_id="perm-1",
@@ -65,3 +65,4 @@ def test_session_permission_broker_persists_request_response_grant_and_event(tmp
         event_rows = connection.execute("SELECT event_type, payload_json FROM session_events WHERE session_id = ? ORDER BY sequence", (session.session_id,)).fetchall()
         assert [row["event_type"] for row in event_rows] == ["permission_pending", "permission_resolved"]
         assert json.loads(event_rows[-1]["payload_json"])["decision"] == "approve_session"
+

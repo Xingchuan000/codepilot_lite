@@ -7,17 +7,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import litellm
 import yaml
 
 from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop
 from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.capabilities import ModelCapabilities, resolve_model_capabilities
 from codepilot.llm.litellm_native import LiteLLMNativeClient
 from codepilot.llm.model_capabilities import resolve_litellm_model_capabilities
 from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
-from codepilot.session.model_capabilities import ModelCapabilities, resolve_model_capabilities
 
 
 @dataclass(frozen=True)
@@ -193,7 +192,7 @@ def resolve_litellm_config(
 
     model_kwargs = dict(configured.get("model_kwargs") or {})
     if model_kwargs.pop("drop_params", False):
-        raise ModelConfigurationRequired("drop_params=true is incompatible with CodePilot native tool calling")
+        raise ModelConfigurationRequired("drop_params=true cannot be used with CodePilot native tool calling")
     return ResolvedLiteLLMConfig(
         model_name=model_name,
         model_kwargs=model_kwargs,
@@ -223,13 +222,6 @@ def _configured_model_capabilities(
         supports_reasoning_replay=bool(values.get("supports_reasoning_replay", False)),
         source="config",
     )
-
-
-def _require_function_calling(model_name: str) -> None:
-    if not litellm.supports_function_calling(model=model_name):
-        raise ModelConfigurationRequired(
-            f"Model {model_name!r} does not support native function calling through LiteLLM"
-        )
 
 
 def _load_minisweagent_config() -> None:
@@ -263,7 +255,6 @@ def build_codepilot_llm(
         model_config=model_config or [],
     )
     config = resolve_litellm_config(model=model, model_config=model_config or [])
-    _require_function_calling(config.model_name)
     client = LiteLLMNativeClient(model_name=config.model_name, model_kwargs=config.model_kwargs)
     capabilities = (
         _configured_model_capabilities(identity.provider, config.model_name, config.model_capabilities)

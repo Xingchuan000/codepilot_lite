@@ -1,4 +1,6 @@
-from codepilot.github.issue_models import IssueRef, IssueTask
-from codepilot.github.workflow import IssueWorkflowResult, run_issue_workflow
+"""GitHub issue and patch integrations.
 
-__all__ = ["IssueRef", "IssueTask", "IssueWorkflowResult", "run_issue_workflow"]
+Import a concrete submodule so lightweight helpers do not initialize workflows.
+"""
+
+__all__: list[str] = []

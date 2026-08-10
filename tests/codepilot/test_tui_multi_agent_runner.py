@@ -41,10 +41,10 @@ def _runner(tmp_path: Path) -> tuple[TUIAgentRunner, SessionController, str]:
 def test_runtime_factory_gives_primary_controls_but_not_child_controls(tmp_path: Path) -> None:
     runner, controller, parent_id = _runner(tmp_path)
     primary = runner._build_runtime_for_session(parent_id, supervisor=runner.agent_supervisor)
-    assert primary.agent_profile is None
+    assert primary.boundary_resolver is None
     assert primary.runtime_tool_registry_factory is not None
 
-    parent_turn = controller.store.create_turn(
+    parent_turn = controller.store.turns.create_turn(
         session_id=parent_id,
         title="delegate",
         provider_snapshot="fake",
@@ -62,13 +62,13 @@ def test_runtime_factory_gives_primary_controls_but_not_child_controls(tmp_path:
     )
 
     child_runtime = runner._build_runtime_for_session(child.session_id, supervisor=None)
-    assert child_runtime.agent_profile.name == "explore"
+    assert child_runtime.boundary_resolver.profile.name == "explore"
     assert child_runtime.runtime_tool_registry_factory is None
 
 
 def test_child_permission_resolution_uses_request_session_id(tmp_path: Path) -> None:
     runner, controller, parent_id = _runner(tmp_path)
-    parent_turn = controller.store.create_turn(
+    parent_turn = controller.store.turns.create_turn(
         session_id=parent_id,
         title="delegate",
         provider_snapshot="fake",
@@ -84,7 +84,7 @@ def test_child_permission_resolution_uses_request_session_id(tmp_path: Path) -> 
         permission_mode="manual",
         metadata={"agent_type": "general", "write_scope": ["README.md"]},
     )
-    controller.store.create_permission_request(
+    controller.store.permissions.create_permission_request(
         request_id="perm-child",
         session_id=child.session_id,
         turn_id=None,
@@ -106,9 +106,9 @@ def test_child_permission_resolution_uses_request_session_id(tmp_path: Path) -> 
         )
     )
 
-    assert controller.store.get_permission_request("perm-child").status == "approved"
-    assert controller.store.get_permission_response_by_request("perm-child").decision == "approve_session"
-    assert controller.store.get_permission_grant(child.session_id, '{"tool":"replace_range"}') is not None
+    assert controller.store.permissions.get_permission_request("perm-child").status == "approved"
+    assert controller.store.permissions.get_permission_response_by_request("perm-child").decision == "approve_session"
+    assert controller.store.permissions.get_permission_grant(child.session_id, '{"tool":"replace_range"}') is not None
 
 
 def test_agent_lifecycle_events_are_rendered_as_status_only() -> None:
@@ -142,7 +142,7 @@ def test_scout_keeps_network_capable_policy_when_parent_is_read_only(tmp_path: P
 
 def test_abort_child_permission_routes_by_request_session_id(tmp_path: Path) -> None:
     runner, controller, parent_id = _runner(tmp_path)
-    parent_turn = controller.store.create_turn(
+    parent_turn = controller.store.turns.create_turn(
         session_id=parent_id,
         title="delegate",
         provider_snapshot="fake",
@@ -158,7 +158,7 @@ def test_abort_child_permission_routes_by_request_session_id(tmp_path: Path) -> 
         permission_mode="manual",
         metadata={"agent_type": "general", "write_scope": ["README.md"]},
     )
-    controller.store.create_permission_request(
+    controller.store.permissions.create_permission_request(
         request_id="perm-child-abort",
         session_id=child.session_id,
         turn_id=None,
@@ -173,8 +173,9 @@ def test_abort_child_permission_routes_by_request_session_id(tmp_path: Path) -> 
 
     runner.abort_pending_permission("perm-child-abort")
 
-    request = controller.store.get_permission_request("perm-child-abort")
-    response = controller.store.get_permission_response_by_request("perm-child-abort")
+    request = controller.store.permissions.get_permission_request("perm-child-abort")
+    response = controller.store.permissions.get_permission_response_by_request("perm-child-abort")
     assert request.status == "denied"
     assert response is not None
     assert response.decision == "deny"
+

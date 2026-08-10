@@ -18,7 +18,7 @@ from codepilot.session.reconcilers import (
     reconcile_replace_range,
     reconcile_run_shell,
 )
-from codepilot.session.store import SessionStore
+from codepilot.session.repositories import SessionRepositories
 
 
 @dataclass(frozen=True)
@@ -35,7 +35,7 @@ class RecoveryService:
 
     def __init__(self, database: SessionDatabase) -> None:
         self.database = database
-        self.store = SessionStore(database)
+        self.store = SessionRepositories(database)
 
     def inspect_session(self, session_id: str) -> RecoveryPlan:
         with self.database.transaction() as connection:
@@ -201,7 +201,7 @@ class RecoveryService:
                 "UPDATE sessions SET updated_at = ?, last_activity_at = ? WHERE session_id = ?",
                 (timestamp, timestamp, row["session_id"]),
             )
-        return self.store.get_attempt(new_attempt_id) if response["decision"] in {"approve_once", "approve_session"} else None
+        return self.store.attempts.get_attempt(new_attempt_id) if response["decision"] in {"approve_once", "approve_session"} else None
 
     def _normalize_in_progress_messages(self, turn_ids: tuple[str, ...]) -> None:
         if not turn_ids:
@@ -215,7 +215,7 @@ class RecoveryService:
             )
 
     def reconcile_tool_call(self, tool_call_id: str) -> ReconciliationResult:
-        call = self.store.get_tool_call(tool_call_id)
+        call = self.store.tool_executions.get_tool_call(tool_call_id)
         token = call.recovery_token
         if token is None:
             return ReconciliationResult(RecoveryDecision.UNKNOWN, "durable recovery token is missing", {})
@@ -423,7 +423,7 @@ class RecoveryService:
                     "VALUES (?, ?, (SELECT COALESCE(MAX(sequence), 0) + 1 FROM session_events WHERE session_id = ?), 'turn_recovery_attempt_created', ?, ?, ?, ?, '{}')",
                     (make_event_id(), row[0], row[0], timestamp, turn_id, attempt_id, json.dumps({"turn_id": turn_id, "attempt_id": attempt_id}, separators=(",", ":"))),
                 )
-        return self.store.get_attempt(existing_attempt_id or attempt_id)
+        return self.store.attempts.get_attempt(existing_attempt_id or attempt_id)
 
     def resolve_unknown(self, tool_call_id: str, user_decision: str) -> RunAttemptRecord | None:
         """原子记录用户对未知副作用的承担方式，不重置原 ToolCall 历史。"""
@@ -521,7 +521,7 @@ class RecoveryService:
                         (new_attempt_id, row["turn_id"], number, timestamp, timestamp),
                     )
                     connection.execute("UPDATE turns SET status = 'queued', updated_at = ?, last_activity_at = ? WHERE turn_id = ?", (timestamp, timestamp, row["turn_id"]))
-        return self.store.get_attempt(new_attempt_id) if new_attempt_id is not None else None
+        return self.store.attempts.get_attempt(new_attempt_id) if new_attempt_id is not None else None
 
     def abort_pending_approval(self, request_id: str) -> None:
         """安全取消崩溃遗留的审批及其整个 Turn，不伪造批准结果。"""

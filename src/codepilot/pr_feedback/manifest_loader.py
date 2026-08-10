@@ -12,7 +12,17 @@ from codepilot.pr_feedback.models import (
     PRRef,
 )
 from codepilot.repo.git_utils import sha256_file
-from codepilot.workflow_manifest import load_source_artifact_manifest
+from codepilot.repo.artifact_manifest import ArtifactManifestError, load_verified_manifest
+
+
+def load_source_artifact_manifest(run_dir: str | Path, pr_assist_manifest: dict[str, Any]) -> dict[str, Any]:
+    raw_path = pr_assist_manifest.get("source_artifact_manifest") or "artifact_manifest.json"
+    if not isinstance(raw_path, str):
+        raise PRFeedbackManifestInvalidError("source_artifact_manifest must be a string path")
+    try:
+        return load_verified_manifest(run_dir, raw_path, pr_assist_manifest.get("source_artifact_manifest_sha256", ""))
+    except ArtifactManifestError as exc:
+        raise PRFeedbackManifestInvalidError(str(exc)) from exc
 
 
 def _resolve_inside_run_dir(run_dir: Path, raw_path: str) -> Path:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 from uuid import uuid4
 
+from codepilot.common.best_effort import run_best_effort
 from codepilot.trace.events import TraceEvent
 
 MAX_TRACE_PREVIEW_CHARS = 1000
@@ -94,15 +95,27 @@ class TraceLogger:
         if event.event_type in {"run_end", "run_cancelled"}:
             self._terminal_recorded = True
         if self.record_hook is not None:
-            try:
-                self.record_hook(event)
-            except Exception as exc:
-                self.last_record_hook_error = (exc, event)
+            hook_errors: list[Exception] = []
+            run_best_effort(
+                lambda: self.record_hook(event),
+                operation_name="trace observer hook",
+                context={"run_id": self.run_id, "event_type": event.event_type},
+                expected_errors=(Exception,),
+                on_error=hook_errors.append,
+            )
+            if hook_errors:
+                self.last_record_hook_error = (hook_errors[0], event)
                 if self.record_hook_error is not None:
-                    try:
-                        self.record_hook_error(exc, event)
-                    except Exception as callback_exc:
-                        self.last_record_hook_error_callback_error = (callback_exc, event)
+                    callback_errors: list[Exception] = []
+                    run_best_effort(
+                        lambda: self.record_hook_error(hook_errors[0], event),
+                        operation_name="trace observer error hook",
+                        context={"run_id": self.run_id, "event_type": event.event_type},
+                        expected_errors=(Exception,),
+                        on_error=callback_errors.append,
+                    )
+                    if callback_errors:
+                        self.last_record_hook_error_callback_error = (callback_errors[0], event)
         return event
 
     def record_policy_decision(

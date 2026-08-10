@@ -6,6 +6,7 @@ from typing import Any, Literal
 MemoryKind = Literal["architecture", "convention", "command", "decision", "file_map", "known_issue", "project_preference"]
 MemoryStatus = Literal["active", "stale", "superseded", "forgotten"]
 CandidateStatus = Literal["pending", "accepted", "rejected", "superseded"]
+CHECKPOINT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -111,7 +112,7 @@ class TurnMemoryCheckpoint:
 
 @dataclass(frozen=True)
 class TurnCheckpointContent:
-    schema_version: int = 2
+    schema_version: int = CHECKPOINT_SCHEMA_VERSION
     current_goal: str = ""
     current_step: int = 0
     user_constraints: tuple[str, ...] = ()
@@ -129,13 +130,16 @@ class TurnCheckpointContent:
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> TurnCheckpointContent:
-        legacy = "schema_version" not in value and any(
-            key in value for key in ("task_goal", "step", "earlier_exchanges")
-        )
+        version = value.get("schema_version")
+        if version != CHECKPOINT_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported turn checkpoint schema: {version!r}; "
+                f"expected {CHECKPOINT_SCHEMA_VERSION}"
+            )
         return cls(
-            schema_version=1 if legacy else int(value.get("schema_version", 2)),
-            current_goal=str(value.get("current_goal", value.get("task_goal", ""))),
-            current_step=int(value.get("current_step", value.get("step", 0))),
+            schema_version=CHECKPOINT_SCHEMA_VERSION,
+            current_goal=str(value.get("current_goal", "")),
+            current_step=int(value.get("current_step", 0)),
             user_constraints=_optional_strings(value.get("user_constraints", [])),
             confirmed_decisions=_optional_strings(value.get("confirmed_decisions", [])),
             files_read=_optional_strings(value.get("files_read", [])),
@@ -147,7 +151,7 @@ class TurnCheckpointContent:
             recent_tool_facts=_dicts(value.get("recent_tool_facts", [])),
             next_step=str(value.get("next_step", "")),
             evidence=dict(value.get("evidence", {})),
-            fallback_previews=_optional_strings(value.get("fallback_previews", value.get("earlier_exchanges", []))),
+            fallback_previews=_optional_strings(value.get("fallback_previews", [])),
         )
 
     def to_dict(self) -> dict[str, Any]:

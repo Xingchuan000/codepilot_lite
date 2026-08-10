@@ -3,7 +3,8 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from codepilot.router.actions import ToolAction, ToolRouteResult
+from codepilot.router.actions import ToolRouteResult
+from codepilot.tools.actions import ToolAction
 from codepilot.tools.base import ToolResult
 
 

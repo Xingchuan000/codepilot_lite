@@ -39,7 +39,7 @@ def test_runner_setup_failure_is_recorded_in_sqlite(tmp_path: Path, monkeypatch)
         time.sleep(0.05)
 
     assert runner.is_running() is False
-    assert store.service.store.list_turns(session.session_id) == []
+    assert store.service.store.turns.list_turns(session.session_id) == []
     assert events.drain()
 
 
@@ -73,4 +73,4 @@ def test_runtime_rejects_built_model_identity_different_from_session_snapshot(tm
         runner._runtime()
 
     assert built_client.calls == []
-    assert store.service.store.list_turns(session.session_id) == []
+    assert store.service.store.turns.list_turns(session.session_id) == []

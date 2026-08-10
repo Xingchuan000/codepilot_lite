@@ -3,10 +3,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from codepilot.agent.boundary import RuntimeToolContext
 from codepilot.llm.fake import StructuredFakeLLM
 from codepilot.llm.types import LLMResponse, LLMToolCall
+from codepilot.multi_agent.boundary import MultiAgentBoundaryResolver
 from codepilot.multi_agent.profiles import EXPLORE_PROFILE, GENERAL_PROFILE
-from codepilot.multi_agent.runtime_tools import AgentControlContext, build_agent_control_registry
+from codepilot.multi_agent.runtime_tools import build_agent_control_registry
 from codepilot.multi_agent.supervisor import AgentSupervisor
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
@@ -52,7 +54,7 @@ def test_session_runtime_binds_explore_profile_to_prompt_and_router(tmp_path: Pa
             policy_context=PolicyContext(repo=repo, mode="build", approved=True),
         )
 
-    runtime = SessionRuntime(database, llm, router_factory, agent_profile=EXPLORE_PROFILE)
+    runtime = SessionRuntime(database, llm, router_factory, boundary_resolver=MultiAgentBoundaryResolver(EXPLORE_PROFILE))
     submission = runtime.submit_user_message(session_id, "inspect")
     assert isinstance(submission, TurnSubmission)
 
@@ -60,7 +62,7 @@ def test_session_runtime_binds_explore_profile_to_prompt_and_router(tmp_path: Pa
 
     assert execution.result.status == "message_complete"
     assert "- name: run_shell" not in str(llm.calls[0]["messages"][0].content)
-    assert service.store.list_tool_calls(session_id)[0].status == "denied"
+    assert service.store.tool_executions.list_tool_calls(session_id)[0].status == "denied"
 
 
 def test_session_runtime_general_writer_carries_write_scope_to_policy(tmp_path: Path) -> None:
@@ -83,15 +85,14 @@ def test_session_runtime_general_writer_carries_write_scope_to_policy(tmp_path: 
         database,
         llm,
         router_factory,
-        agent_profile=GENERAL_PROFILE,
-        write_scope=("src/**",),
+        boundary_resolver=MultiAgentBoundaryResolver(GENERAL_PROFILE, ("src/**",)),
     )
     submission = runtime.submit_user_message(session_id, "inspect")
     assert isinstance(submission, TurnSubmission)
     runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
 
-    assert service.store.list_tool_calls(session_id)[0].status == "denied"
-    assert "outside the current agent write_scope" in (service.store.list_tool_results(session_id)[0].error or "")
+    assert service.store.tool_executions.list_tool_calls(session_id)[0].status == "denied"
+    assert "outside the current agent write_scope" in (service.store.tool_executions.list_tool_results(session_id)[0].error or "")
 
 
 def test_session_runtime_general_writer_enforces_scope_without_policy_checker(tmp_path: Path) -> None:
@@ -107,14 +108,13 @@ def test_session_runtime_general_writer_enforces_scope_without_policy_checker(tm
         database,
         llm,
         lambda trace: ToolRouter(trace),
-        agent_profile=GENERAL_PROFILE,
-        write_scope=("src/**",),
+        boundary_resolver=MultiAgentBoundaryResolver(GENERAL_PROFILE, ("src/**",)),
     )
     submission = runtime.submit_user_message(session_id, "inspect")
     assert isinstance(submission, TurnSubmission)
     runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
 
-    assert service.store.list_tool_calls(session_id)[0].status == "denied"
+    assert service.store.tool_executions.list_tool_calls(session_id)[0].status == "denied"
     assert (repo / "README.md").read_text(encoding="utf-8") == "demo\n"
 
 
@@ -135,7 +135,7 @@ def test_session_runtime_injects_primary_agent_controls_as_runtime_tools(tmp_pat
             policy_context=PolicyContext(repo=repo, mode="build", approved=True),
         )
 
-    def control_registry(context: AgentControlContext):
+    def control_registry(context: RuntimeToolContext):
         return build_agent_control_registry(supervisor, context)
 
     runtime = SessionRuntime(database, llm, router_factory, runtime_tool_registry_factory=control_registry)
@@ -145,4 +145,5 @@ def test_session_runtime_injects_primary_agent_controls_as_runtime_tools(tmp_pat
 
     assert execution.result.status == "message_complete"
     assert "list_agents" in {spec.name for spec in llm.calls[0]["tools"]}
-    assert '"agents": []' in (service.store.list_tool_results(session_id)[0].content or "")
+    assert '"agents": []' in (service.store.tool_executions.list_tool_results(session_id)[0].content or "")
+

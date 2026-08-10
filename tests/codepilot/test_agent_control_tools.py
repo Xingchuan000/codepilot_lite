@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codepilot.multi_agent.runtime_tools import AgentControlContext, build_agent_control_registry
+from codepilot.agent.boundary import RuntimeToolContext
+from codepilot.multi_agent.runtime_tools import build_agent_control_registry
 from codepilot.multi_agent.supervisor import AgentSupervisor
 from codepilot.session.database import SessionDatabase
 
@@ -13,7 +14,7 @@ def test_control_registry_exposes_only_runtime_control_tools(tmp_path: Path) -> 
     supervisor = AgentSupervisor(database=database, child_runtime_factory=lambda _: None)
     registry = build_agent_control_registry(
         supervisor,
-        AgentControlContext("parent", "turn", "attempt", tmp_path),
+        RuntimeToolContext("parent", "turn", "attempt", tmp_path),
     )
 
     assert {spec.name for spec in registry.list_specs()} == {
@@ -34,7 +35,7 @@ def test_control_registry_validates_arguments_as_structured_tool_result(tmp_path
     supervisor = AgentSupervisor(database=database, child_runtime_factory=lambda _: None)
     registry = build_agent_control_registry(
         supervisor,
-        AgentControlContext("parent", "turn", "attempt", tmp_path),
+        RuntimeToolContext("parent", "turn", "attempt", tmp_path),
     )
 
     result = registry.call("spawn_agent", {"agent_type": "not-a-role", "task": "x"})
@@ -49,7 +50,7 @@ def test_control_registry_documents_exact_argument_contracts(tmp_path: Path) -> 
     supervisor = AgentSupervisor(database=database, child_runtime_factory=lambda _: None)
     registry = build_agent_control_registry(
         supervisor,
-        AgentControlContext("parent", "turn", "attempt", tmp_path),
+        RuntimeToolContext("parent", "turn", "attempt", tmp_path),
     )
 
     spawn = registry.find_spec("spawn_agent")
