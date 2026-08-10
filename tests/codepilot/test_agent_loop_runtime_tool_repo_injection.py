@@ -3,7 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from codepilot.agent.loop import MinimalAgentLoop, _inject_repo_if_required
-from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import LLMResponse, LLMToolCall
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
 from codepilot.router.runtime_tools import RuntimeToolRegistry
@@ -40,6 +41,7 @@ def test_repo_is_injected_only_when_tool_declares_repo() -> None:
         side_effect=ToolSideEffect.NONE,
         default_permission=DefaultPermission.ALLOW,
         parameters={"repo": "repo", "path": "path"},
+        inject_repo=True,
     )
 
     assert _inject_repo_if_required({"path": "README.md"}, repo, builtin) == {"path": "README.md", "repo": str(repo)}
@@ -65,10 +67,13 @@ def test_loop_passes_runtime_tool_arguments_without_forced_repo(tmp_path: Path) 
         runtime_tool_registry=registry,
     )
     loop = MinimalAgentLoop(
-        llm=FakeLLMClient(
+        llm=StructuredFakeLLM(
             [
-                '{"type":"tool_call","tool_name":"spawn_agent","arguments":{"agent_type":"explore","task":"inspect"}}',
-                "finished",
+                LLMResponse(
+                    content="",
+                    tool_calls=(LLMToolCall(provider_tool_call_id="provider-1", name="spawn_agent", arguments={"agent_type": "explore", "task": "inspect"}),),
+                ),
+                LLMResponse(content="finished"),
             ]
         ),
         router=router,

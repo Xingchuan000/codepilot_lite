@@ -10,13 +10,6 @@ from codepilot.tui_agent.preview import safe_dict_preview
 
 TRACE_METADATA_KEYS = (
     "action_type",
-    "parse_success",
-    "normalization_applied",
-    "normalized_fields",
-    "non_standard_fields",
-    "normalization_conflicts",
-    "raw_action_preview",
-    "normalized_action_preview",
     "finish_blocked_by_evidence",
     "requested_status",
     "effective_status",
@@ -106,15 +99,11 @@ def _trace_payload(trace_event: TraceEvent) -> dict[str, Any]:
         normalized["reason"] = str(normalized.get("reason") or normalized["trace_metadata"].get("reason") or "")
         normalized["responded_at"] = trace_event.timestamp
     elif trace_event.event_type == "agent_action":
-        # 工具动作只展示 arguments 的预览，避免把整块 action 结构塞进 transcript。
+        # The internal Native finish action only exposes a safe input preview.
         input_value = trace_event.input if isinstance(trace_event.input, dict) else {}
         arguments = input_value.get("arguments") if isinstance(input_value, dict) else None
         if isinstance(arguments, dict):
             normalized["input_preview"] = safe_dict_preview(arguments) or {}
-        elif isinstance(normalized["trace_metadata"].get("normalized_action_preview"), dict):
-            normalized["input_preview"] = safe_dict_preview(normalized["trace_metadata"]["normalized_action_preview"]) or {}
-        elif isinstance(normalized["trace_metadata"].get("raw_action_preview"), dict):
-            normalized["input_preview"] = safe_dict_preview(normalized["trace_metadata"]["raw_action_preview"]) or {}
         elif isinstance(input_value, dict):
             normalized["input_preview"] = safe_dict_preview(input_value) or {}
         else:

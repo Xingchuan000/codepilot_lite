@@ -7,14 +7,33 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from codepilot.tools.base import DefaultPermission, ToolIdempotency, ToolRecoveryStrategy, ToolResult, ToolRisk, ToolSideEffect, ToolSpec
+from codepilot.mcp.trace import redact_mcp_mapping, redact_mcp_text
+from codepilot.tools.base import (
+    DefaultPermission,
+    ToolIdempotency,
+    ToolRecoveryStrategy,
+    ToolResult,
+    ToolRisk,
+    ToolSideEffect,
+    ToolSpec,
+)
 from codepilot.tools.edit_tools import apply_patch, replace_range
 from codepilot.tools.file_tools import list_files, read_file
 from codepilot.tools.git_tools import git_diff, git_status
+from codepilot.tools.schemas import (
+    ApplyPatchArgs,
+    GitDiffArgs,
+    GitStatusArgs,
+    ListFilesArgs,
+    ReadFileArgs,
+    ReplaceRangeArgs,
+    RunShellArgs,
+    RunTestsArgs,
+    SearchCodeArgs,
+)
 from codepilot.tools.search_tools import search_code
 from codepilot.tools.shell_tools import run_shell
 from codepilot.tools.test_tools import run_tests
-from codepilot.mcp.trace import redact_mcp_mapping, redact_mcp_text
 from codepilot.trace.events import TraceEvent
 from codepilot.trace.logger import TraceLogger
 
@@ -33,6 +52,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ALLOW,
         idempotency=ToolIdempotency.SAFE,
         recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
+        input_schema=ListFilesArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "path": "相对于 repo 的目录路径，默认为当前目录；翻页时必须保持与上一页相同。",
@@ -50,6 +71,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ALLOW,
         idempotency=ToolIdempotency.SAFE,
         recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
+        input_schema=ReadFileArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "path": "相对于 repo 的文件路径。",
@@ -66,6 +89,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ALLOW,
         idempotency=ToolIdempotency.SAFE,
         recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
+        input_schema=SearchCodeArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "query": "搜索关键词或正则片段。",
@@ -83,6 +108,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ASK,
         idempotency=ToolIdempotency.UNKNOWN,
         recovery_strategy=ToolRecoveryStrategy.RECONCILE_OR_ASK,
+        input_schema=RunShellArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "command": "要执行的 shell 命令。",
@@ -98,6 +125,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ASK,
         idempotency=ToolIdempotency.SAFE,
         recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
+        input_schema=RunTestsArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "command": "测试命令，默认 pytest。",
@@ -114,6 +143,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ALLOW,
         idempotency=ToolIdempotency.SAFE,
         recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
+        input_schema=GitStatusArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "max_entries": "最多返回的变更条目数。",
@@ -127,6 +158,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ALLOW,
         idempotency=ToolIdempotency.SAFE,
         recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
+        input_schema=GitDiffArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "path": "可选，相对于 repo 的目标路径。include_content=True 时必须提供。",
@@ -144,6 +177,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ASK,
         idempotency=ToolIdempotency.CONDITIONAL,
         recovery_strategy=ToolRecoveryStrategy.RECONCILE_THEN_RETRY,
+        input_schema=ApplyPatchArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "patch": "unified diff patch 内容。",
@@ -159,6 +194,8 @@ TOOL_SPECS: dict[str, ToolSpec] = {
         default_permission=DefaultPermission.ASK,
         idempotency=ToolIdempotency.CONDITIONAL,
         recovery_strategy=ToolRecoveryStrategy.RECONCILE_THEN_RETRY,
+        input_schema=ReplaceRangeArgs.model_json_schema(),
+        inject_repo=True,
         parameters={
             "repo": "仓库根路径（字符串或 Path）。",
             "path": "相对于 repo 的目标文件路径。",
@@ -281,6 +318,7 @@ def call_tool_traced(
     name: str,
     trace_logger: TraceLogger,
     output_preview_chars: int = 1000,
+    trace_metadata: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> ToolResult:
     """调用工具并把结果写入 trace。"""
@@ -290,6 +328,7 @@ def call_tool_traced(
 
     output_preview, preview_truncated = _preview_output(result.output, output_preview_chars)
     metadata = dict(result.metadata)
+    metadata.update(trace_metadata or {})
     metadata["output_chars"] = len(result.output)
     metadata["output_preview_truncated"] = preview_truncated
 
@@ -317,6 +356,7 @@ def call_external_tool_traced(
     external_registry: Any,
     trace_logger: TraceLogger,
     output_preview_chars: int = 1000,
+    trace_metadata: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> ToolResult:
     spec = external_registry.find_spec(name)
@@ -324,6 +364,7 @@ def call_external_tool_traced(
     redacted_input = redact_mcp_mapping(kwargs)
     output_preview, preview_truncated = _preview_output(redact_mcp_text(result.output), output_preview_chars)
     metadata = dict(spec.metadata if spec else {})
+    metadata.update(trace_metadata or {})
     metadata["mcp_result_metadata"] = redact_mcp_mapping(result.metadata)
     metadata["output_chars"] = len(result.output)
     metadata["output_preview_truncated"] = preview_truncated

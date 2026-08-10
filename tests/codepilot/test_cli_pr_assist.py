@@ -209,7 +209,7 @@ def test_cli_issue_overwrite_removes_old_pr_assist_artifacts(tmp_path: Path) -> 
     repo = _init_repo(tmp_path)
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("# Add bug\n\nPlease fix add().\n", encoding="utf-8")
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
     run_dir = _write_run_dir(tmp_path, repo=repo)
     (run_dir / "pr_body.md").write_text("old\n", encoding="utf-8")
     (run_dir / "pr_assist_manifest.json").write_text("old\n", encoding="utf-8")
@@ -222,7 +222,7 @@ def test_cli_issue_overwrite_removes_old_pr_assist_artifacts(tmp_path: Path) -> 
             str(issue_file),
             "--repo",
             str(repo),
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--approve",
             "--runs-dir",

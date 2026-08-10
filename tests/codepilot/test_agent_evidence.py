@@ -8,6 +8,16 @@ def test_shell_command_may_write_detects_redirection() -> None:
     assert shell_command_may_write("echo x > a.txt")
 
 
+def test_shell_command_may_write_ignores_external_temp_redirection_for_repo(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    assert not shell_command_may_write("pytest -q > /tmp/pytest.out 2>&1", repo=repo)
+    assert not shell_command_may_write("pytest -q >/dev/null 2>&1", repo=repo)
+    assert shell_command_may_write(f"echo x > {repo / 'result.txt'}", repo=repo)
+    assert shell_command_may_write("echo x > result.txt", repo=repo)
+
+
 def test_shell_command_may_write_detects_sed_in_place() -> None:
     assert shell_command_may_write("sed -i 's/a/b/' file.txt")
 

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
-import os
 import json
+import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Mapping
+from typing import Any, Literal
 
+import litellm
 import yaml
 
 from codepilot.agent.loop import AgentRunResult, MinimalAgentLoop
-from codepilot.llm.fake import FakeLLMClient
-from codepilot.llm.swe_agent_adapter import SweAgentModelAdapter
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.litellm_native import LiteLLMNativeClient
+from codepilot.llm.model_capabilities import resolve_litellm_model_capabilities
 from codepilot.mcp.registry import MCPToolRegistry
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
@@ -28,29 +31,23 @@ class BuiltLLM:
 
 
 @dataclass(frozen=True)
+class ResolvedLiteLLMConfig:
+    model_name: str
+    model_kwargs: dict[str, Any]
+    model_capabilities: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class ResolvedModelIdentity:
     """只描述模型身份，不创建 Provider 客户端。"""
 
     provider: str
     model: str
-    model_class: str | None
     source: str
 
 
 class ModelConfigurationRequired(ValueError):
     """没有任何可执行模型配置时，由调用方展示的明确错误。"""
-
-
-class ModelIdentityMismatch(ValueError):
-    """配置声明的身份与实际构造出的模型身份不一致。"""
-
-
-def get_model(*args, **kwargs):
-    """延迟导入真实模型工厂，保证身份解析不会加载 Provider。"""
-
-    from minisweagent.models import get_model as model_factory
-
-    return model_factory(*args, **kwargs)
 
 
 def get_minisweagent_model_names() -> tuple[str, ...]:
@@ -127,7 +124,7 @@ def _provider_from_model(model: str) -> str:
 
 def resolve_codepilot_model_identity(
     *,
-    fake_actions: str | Path | None,
+    fake_responses: str | Path | None,
     model: str | None,
     model_config: list[str],
     environ: Mapping[str, str] | None = None,
@@ -139,8 +136,8 @@ def resolve_codepilot_model_identity(
     文件或键值规格，因此新建 Session 不会触发凭据检查、网络请求或模型导入。
     """
 
-    if fake_actions is not None:
-        return ResolvedModelIdentity("fake", "fake", "fake", "fake_actions")
+    if fake_responses is not None:
+        return ResolvedModelIdentity("fake", "fake", "fake_responses")
     merged: dict = {}
     for spec in model_config:
         merged = _merge_config(merged, _read_config_spec(spec))
@@ -163,63 +160,117 @@ def resolve_codepilot_model_identity(
         raise ModelConfigurationRequired(
             "尚未配置模型。请使用 --model、model config 或 MSWEA_MODEL_NAME 后再新建 Session。"
         )
+    if configured.get("model_class"):
+        raise ModelConfigurationRequired(
+            "model_class is no longer supported by CodePilot; configure a LiteLLM model name instead"
+        )
     provider = configured.get("provider")
     provider = str(provider).lstrip("@") if provider else _provider_from_model(resolved_model)
-    model_class = configured.get("model_class")
-    return ResolvedModelIdentity(provider, resolved_model, str(model_class) if model_class else None, source)
+    return ResolvedModelIdentity(provider, resolved_model, source)
 
 
-def build_swe_model_from_config_specs(model_config: list[str], model_name: str | None = None):
-    """复用 mini-SWE-agent 的配置拼装逻辑构造模型对象。"""
-
-    from minisweagent.config import get_config_from_spec
-    from minisweagent.utils.serialize import recursive_merge
-
-    config: dict = {}
+def resolve_litellm_config(
+    *,
+    model: str | None,
+    model_config: list[str],
+    environ: Mapping[str, str] | None = None,
+) -> ResolvedLiteLLMConfig:
+    merged: dict = {}
     for spec in model_config:
-        config = recursive_merge(config, get_config_from_spec(spec))
-    if model_name is not None:
-        config = recursive_merge(config, {"model": {"model_name": model_name}})
-    return get_model(config=config.get("model", {}))
+        merged = _merge_config(merged, _read_config_spec(spec))
+    configured = merged.get("model", {})
+    if configured.get("model_class"):
+        raise ModelConfigurationRequired(
+            "model_class is no longer supported by CodePilot; configure a LiteLLM model name instead"
+        )
+
+    environment = os.environ if environ is None else environ
+    model_name = model or configured.get("model_name") or environment.get("MSWEA_MODEL_NAME")
+    if not isinstance(model_name, str) or not model_name:
+        raise ModelConfigurationRequired(
+            "尚未配置模型。请使用 --model、model config 或 MSWEA_MODEL_NAME 后再新建 Session。"
+        )
+
+    model_kwargs = dict(configured.get("model_kwargs") or {})
+    if model_kwargs.pop("drop_params", False):
+        raise ModelConfigurationRequired("drop_params=true is incompatible with CodePilot native tool calling")
+    return ResolvedLiteLLMConfig(
+        model_name=model_name,
+        model_kwargs=model_kwargs,
+        model_capabilities=dict(merged.get("model_capabilities") or {}),
+    )
+
+
+def _configured_model_capabilities(
+    provider: str,
+    model: str,
+    values: dict[str, Any],
+) -> ModelCapabilities | None:
+    if not values:
+        return None
+    max_input = values["max_input_tokens"]
+    if not isinstance(max_input, int) or max_input <= 0:
+        raise ValueError("model_capabilities.max_input_tokens must be a positive integer")
+    max_output = values.get("max_output_tokens")
+    if not isinstance(max_output, int) or max_output <= 0:
+        max_output = min(16_384, max(4_096, max_input // 8))
+    return ModelCapabilities(
+        provider=provider,
+        model=model,
+        max_context_tokens=max_input,
+        max_output_tokens=max_output,
+        reasoning_format=values.get("reasoning_format"),
+        supports_reasoning_replay=bool(values.get("supports_reasoning_replay", False)),
+        source="config",
+    )
+
+
+def _require_function_calling(model_name: str) -> None:
+    if not litellm.supports_function_calling(model=model_name):
+        raise ModelConfigurationRequired(
+            f"Model {model_name!r} does not support native function calling through LiteLLM"
+        )
+
+
+def _load_minisweagent_config() -> None:
+    from dotenv import load_dotenv
+
+    from minisweagent import global_config_file
+
+    load_dotenv(dotenv_path=global_config_file)
 
 
 def build_codepilot_llm(
     *,
-    fake_actions: str | Path | None = None,
+    fake_responses: str | Path | None = None,
     model: str | None = None,
     model_config: list[str] | None = None,
 ):
-    """按计划要求在 FakeLLM 与真实模型 adapter 之间切换。"""
+    """构造结构化测试模型或唯一的 LiteLLM Native 模型客户端。"""
 
+    if fake_responses is not None:
+        identity = resolve_codepilot_model_identity(
+            fake_responses=fake_responses,
+            model=model,
+            model_config=model_config or [],
+        )
+        client = StructuredFakeLLM.from_jsonl(fake_responses)
+        return BuiltLLM(client, identity.provider, identity.model, resolve_model_capabilities(identity.provider, identity.model))
+    _load_minisweagent_config()
     identity = resolve_codepilot_model_identity(
-        fake_actions=fake_actions,
+        fake_responses=fake_responses,
         model=model,
         model_config=model_config or [],
     )
-    if fake_actions is not None:
-        client = FakeLLMClient.from_jsonl(fake_actions)
-        return BuiltLLM(client, identity.provider, identity.model, resolve_model_capabilities(identity.provider, identity.model))
-    built_model = build_swe_model_from_config_specs(model_config or [], model_name=identity.model)
-    client = SweAgentModelAdapter(model=built_model)
-    built_config = getattr(built_model, "config", None)
-    actual_model = str(getattr(built_config, "model_name", identity.model))
-    actual_provider = getattr(built_config, "provider", None) or _provider_from_model(actual_model)
-    actual_identity = ResolvedModelIdentity(
-        str(actual_provider).lstrip("@"),
-        actual_model,
-        identity.model_class,
-        "built",
+    config = resolve_litellm_config(model=model, model_config=model_config or [])
+    _require_function_calling(config.model_name)
+    client = LiteLLMNativeClient(model_name=config.model_name, model_kwargs=config.model_kwargs)
+    capabilities = (
+        _configured_model_capabilities(identity.provider, config.model_name, config.model_capabilities)
+        or resolve_litellm_model_capabilities(provider=identity.provider, model=config.model_name)
+        or resolve_model_capabilities(identity.provider, config.model_name)
     )
-    if (actual_identity.provider, actual_identity.model) != (identity.provider, identity.model):
-        raise ModelIdentityMismatch(
-            f"configured model identity {identity.provider}/{identity.model} does not match "
-            f"built model identity {actual_identity.provider}/{actual_identity.model}"
-        )
-    configured_capabilities = getattr(built_config, "capabilities", None)
-    capabilities = configured_capabilities if isinstance(configured_capabilities, ModelCapabilities) else resolve_model_capabilities(actual_identity.provider, actual_identity.model)
-    if (capabilities.provider, capabilities.model) != (actual_identity.provider, actual_identity.model):
-        raise ModelIdentityMismatch("model capability identity does not match built model identity")
-    return BuiltLLM(client, actual_identity.provider, actual_identity.model, capabilities)
+    return BuiltLLM(client, identity.provider, config.model_name, capabilities)
 
 
 def run_agent_task(
@@ -229,7 +280,7 @@ def run_agent_task(
     max_steps: int = 12,
     policy_mode: Literal["read_only", "build", "danger"] = "build",
     approve: bool = False,
-    fake_actions: str | Path | None = None,
+    fake_responses: str | Path | None = None,
     model: str | None = None,
     model_config: list[str] | None = None,
     mcp_config: str | Path | None = None,
@@ -239,7 +290,7 @@ def run_agent_task(
     """执行一次最小 agent 任务，并只返回 AgentRunResult。"""
 
     repo_path = Path(repo).expanduser().resolve()
-    built_llm = build_codepilot_llm(fake_actions=fake_actions, model=model, model_config=model_config)
+    built_llm = build_codepilot_llm(fake_responses=fake_responses, model=model, model_config=model_config)
     policy_context = PolicyContext(repo=repo_path, mode=policy_mode, approved=approve, interactive=False)
     mcp_registry = MCPToolRegistry.from_config(mcp_config) if mcp_config else None
     extra_specs = {spec.name: spec for spec in mcp_registry.list_specs()} if mcp_registry else {}

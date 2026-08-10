@@ -323,10 +323,10 @@ def build_run_report(
         if event_type == "agent_action":
             if _as_bool(metadata.get("finish_blocked_by_evidence")) is True:
                 _append_warning(report.warnings, f"Step {step}: finish success blocked by evidence gate.")
-            elif _as_bool(event.get("success")) is False or _as_bool(metadata.get("parse_success")) is False:
-                _append_warning(report.warnings, f"Step {step}: agent_action parse/validation failed: {_as_str(event.get('error')) or 'unknown error'}")
+            elif _as_bool(event.get("success")) is False:
+                _append_warning(report.warnings, f"Step {step}: agent_action failed: {_as_str(event.get('error')) or 'unknown error'}")
             if event.get("error") and _as_bool(metadata.get("finish_blocked_by_evidence")) is not True:
-                _append_warning(report.warnings, f"Step {step}: agent_action parse/validation failed: {_as_str(event.get('error'))}")
+                _append_warning(report.warnings, f"Step {step}: agent_action failed: {_as_str(event.get('error'))}")
             continue
 
         if event_type == "policy_decision":

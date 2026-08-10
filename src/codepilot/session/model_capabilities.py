@@ -25,7 +25,6 @@ class ModelContextProfile:
     max_input_tokens: int
     supports_reasoning_replay: bool
     max_output_tokens: int = 4_096
-    supports_native_tool_calls: bool = False
     reasoning_format: str | None = None
     capability_source: str = "registry"
     protocol_overhead_tokens: int = 64

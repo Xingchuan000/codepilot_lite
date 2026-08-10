@@ -9,7 +9,7 @@ from codepilot.memory.repository import TurnCheckpointRepository
 from codepilot.memory.retrieval import MemoryQueryBuilder
 from codepilot.memory.turn_window import render_turn_checkpoint
 from codepilot.session.artifacts import ArtifactStore
-from codepilot.session.context_adapters import PreparedContext, SessionHistory, TextActionContextAdapter
+from codepilot.session.context_adapters import PreparedContext, ProviderContextAdapter, SessionHistory
 from codepilot.session.context_budget import ContextItem, estimate_tokens
 from codepilot.session.context_fork import ForkContextPolicy
 from codepilot.session.database import SessionDatabase
@@ -19,13 +19,58 @@ from codepilot.session.store import SessionStore
 from codepilot.tools.base import ToolSpec
 
 
+def _inherited_message_content(message: ChatMessage | RichChatMessage) -> str:
+    """Flatten parent Native messages into background text for a child session.
+
+    Parent context is intentionally inherited as one system/background block rather than
+    replayed as an active provider tool exchange.  Rich messages therefore need an
+    explicit text representation instead of assuming every message has ``.content``.
+    """
+
+    if isinstance(message, ChatMessage):
+        return message.content
+
+    chunks: list[str] = []
+    for part in message.parts:
+        if not part.replayable:
+            continue
+        if part.type == "text":
+            text = str(part.content).strip()
+            if text:
+                chunks.append(text)
+            continue
+        if part.type == "tool_call":
+            if not isinstance(part.content, dict):
+                raise ValueError("tool_call content must be a dict")
+            chunks.append(
+                "[tool_call] "
+                f"{part.content['tool_name']} "
+                + json.dumps(part.content["arguments"], ensure_ascii=False, sort_keys=True)
+            )
+            continue
+        if part.type == "tool_result":
+            if not isinstance(part.content, dict):
+                raise ValueError("tool_result content must be a dict")
+            chunks.append(
+                f"[tool_result] {part.content['tool_name']}: "
+                f"{part.content['content']}"
+            )
+            continue
+        if part.type == "reasoning_replay":
+            continue
+        raise ValueError(f"Unsupported inherited rich message part: {part.type}")
+    return "\n".join(chunks)
+
+
+
+
 class ContextAssembler:
     """从 SQLite 记录恢复模型上下文，不读取 TUI Transcript。"""
 
     def __init__(self, database: SessionDatabase, store: SessionStore | None = None) -> None:
         self.store = store or SessionStore(database)
         self.artifacts = ArtifactStore(database)
-        self.adapter = TextActionContextAdapter(self.store, self.artifacts)
+        self.adapter = ProviderContextAdapter(self.store, self.artifacts)
         self.memory = MemoryContextProvider(database)
         self.memory_query = MemoryQueryBuilder(self.store)
         self.checkpoints = TurnCheckpointRepository(database)
@@ -189,7 +234,9 @@ class ContextAssembler:
                     continue
                 rendered = self.adapter.render_message_for_context(message, tuple(parts), profile)
                 if rendered is not None:
-                    blocks.append(f"{rendered.role}: {rendered.content}")
+                    content = _inherited_message_content(rendered)
+                    if content:
+                        blocks.append(f"{rendered.role}: {content}")
 
         if not blocks:
             return ()

@@ -174,7 +174,7 @@ def run_issue_workflow(
     runs_dir: str | Path = "runs",
     policy_mode: Literal["read_only", "build", "danger"] = "build",
     approve: bool = False,
-    fake_actions: str | Path | None = None,
+    fake_responses: str | Path | None = None,
     max_steps: int | None = None,
     generate_report_markdown: bool = True,
     export_json_report: bool = True,
@@ -329,7 +329,7 @@ def run_issue_workflow(
             max_steps=12 if max_steps is None else max_steps,
             policy_mode=policy_mode,
             approve=approve,
-            fake_actions=fake_actions,
+            fake_responses=fake_responses,
             runs_dir=runs_root,
             run_id=resolved_run_id,
         )

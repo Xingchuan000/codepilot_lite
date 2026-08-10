@@ -243,7 +243,13 @@ class ToolRouter:
                 specs[spec.name] = spec
         return tuple(specs.values())
 
-    def _call_runtime_tool_traced(self, name: str, arguments: dict[str, Any], spec: ToolSpec) -> ToolResult:
+    def _call_runtime_tool_traced(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        spec: ToolSpec,
+        trace_metadata: dict[str, Any] | None = None,
+    ) -> ToolResult:
         assert self.runtime_tool_registry is not None
         result = self.runtime_tool_registry.call(name, arguments)
         output = result.output or ""
@@ -257,6 +263,7 @@ class ToolRouter:
         metadata = {
             **spec.metadata,
             **result.metadata,
+            **(trace_metadata or {}),
             "runtime_tool": True,
             "output_chars": len(output),
             "output_preview_truncated": preview_truncated,
@@ -452,15 +459,24 @@ class ToolRouter:
             raise ToolPreExecutionError(tool_call_id, exc) from exc
         if tool_call_id is not None:
             self.lifecycle_observer.on_execution_started(tool_call_id, recovery_token)
+        trace_metadata = {
+            **(
+                {"provider_tool_call_id": parsed.metadata["provider_tool_call_id"]}
+                if isinstance(parsed.metadata.get("provider_tool_call_id"), str)
+                else {}
+            ),
+            **({"codepilot_tool_call_id": tool_call_id} if tool_call_id is not None else {}),
+        }
         try:
             if self.runtime_tool_registry is not None and self.runtime_tool_registry.has_tool(parsed.tool_name):
-                result = self._call_runtime_tool_traced(parsed.tool_name, parsed.arguments, spec)
+                result = self._call_runtime_tool_traced(parsed.tool_name, parsed.arguments, spec, trace_metadata)
             elif self.external_tool_registry is not None and self.external_tool_registry.has_tool(parsed.tool_name):
                 result = call_external_tool_traced(
                     parsed.tool_name,
                     external_registry=self.external_tool_registry,
                     trace_logger=self.trace_logger,
                     output_preview_chars=self.output_preview_chars,
+                    trace_metadata=trace_metadata,
                     **parsed.arguments,
                 )
             else:
@@ -468,6 +484,7 @@ class ToolRouter:
                     parsed.tool_name,
                     trace_logger=self.trace_logger,
                     output_preview_chars=self.output_preview_chars,
+                    trace_metadata=trace_metadata,
                     **parsed.arguments,
                 )
         except Exception as exc:

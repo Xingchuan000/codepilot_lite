@@ -6,7 +6,7 @@ from typing import Any
 from codepilot.memory.models import TurnCheckpointContent, TurnMemoryCheckpoint
 from codepilot.memory.test_scope import TestScope, exact_command_scope, parse_test_scope
 from codepilot.session.database import SessionDatabase
-from codepilot.session.models import MessagePartRecord, MessageRecord, ToolCallRecord, ToolResultRecord
+from codepilot.session.models import ToolCallRecord, ToolResultRecord
 from codepilot.session.store import SessionStore
 from codepilot.tools.test_tools import looks_like_pytest_command
 
@@ -100,7 +100,7 @@ class TurnCheckpointBuilder:
             }
             for call in self.store.list_unresolved_tool_calls(turn_id)[-8:]
         )
-        active_errors = [*_active_tool_errors(calls, results, evidence), *_active_synthetic_errors(messages, evidence)]
+        active_errors = _active_tool_errors(calls, results, evidence)
         safe_evidence = _bounded_evidence(evidence)
         return TurnCheckpointContent(
             current_goal=str(task)[:800],
@@ -142,37 +142,6 @@ def _active_tool_errors(
             elif scope is not None and scope.executing:
                 active.pop(key, None)
     return tuple(active.values())
-
-
-def _active_synthetic_errors(
-    messages: tuple[tuple[MessageRecord, tuple[MessagePartRecord, ...]], ...],
-    evidence: dict[str, Any],
-) -> tuple[str, ...]:
-    categories = {"parse_error", "evidence_blocked", "pre_execution_error"}
-    candidates = [
-        (index, message)
-        for index, (message, _) in enumerate(messages)
-        if message.metadata.get("synthetic") is True and message.metadata.get("category") in categories
-    ]
-    if not candidates:
-        return ()
-    index, message = candidates[-1]
-    category = message.metadata.get("category")
-    missing = _strings(evidence.get("missing", evidence.get("missing_evidence")))
-    if category == "evidence_blocked" and not missing:
-        return ()
-    later = [item for item, _ in messages[index + 1:]]
-    if category != "evidence_blocked" and any(
-        item.status == "completed"
-        and (item.role == "assistant" or item.role == "tool" and item.metadata.get("success") is True)
-        for item in later
-    ):
-        return ()
-    if category == "evidence_blocked" and any(
-        item.role == "tool" and item.metadata.get("success") is True for item in later
-    ) and not missing:
-        return ()
-    return (str(message.content)[:240],)
 
 
 def _tool_error_key(call: ToolCallRecord) -> str:

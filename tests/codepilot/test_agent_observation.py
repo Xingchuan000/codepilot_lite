@@ -1,7 +1,6 @@
 from pathlib import Path
 
-from codepilot.agent.actions import AgentActionParseError
-from codepilot.agent.observation import format_observation, format_parse_error_observation
+from codepilot.agent.observation import format_observation
 from codepilot.router.actions import ToolRouteResult
 from codepilot.tools.base import ToolResult
 from codepilot.tools.file_tools import LIST_FILES_PAGE_MAX_CHARS, list_files
@@ -138,34 +137,3 @@ def test_format_observation_keeps_only_whitelisted_metadata() -> None:
 
     assert "path: a.py" in observation
     assert "secret_field" not in observation
-
-
-def test_format_parse_error_observation() -> None:
-    observation = format_parse_error_observation(AgentActionParseError("bad json", code="no_json_object"))
-
-    assert "Action parse failed" in observation
-    assert "tool_name" in observation
-    assert "arguments" in observation
-
-
-def test_format_parse_error_observation_mentions_non_standard_fields() -> None:
-    error = AgentActionParseError(
-        "Missing required field after normalization: tool_name.",
-        code="schema_validation_error",
-        raw_action={"type": "tool_call", "tool": "list_files", "parameters": {}},
-        normalized_action={"type": "tool_call", "arguments": {}},
-        normalization_metadata={
-            "normalization_applied": True,
-            "normalized_fields": {"parameters": "arguments"},
-            "non_standard_fields": ["tool", "parameters"],
-            "conflicts": [],
-        },
-    )
-
-    observation = format_parse_error_observation(error)
-
-    assert "tool" in observation
-    assert "parameters" in observation
-    assert "tool_name" in observation
-    assert "arguments" in observation
-    assert '{"type":"tool_call"' in observation

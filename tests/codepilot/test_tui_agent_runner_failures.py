@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import LLMResponse
 from codepilot.session.database import SessionDatabase
 from codepilot.tui_agent.event_stream import MemoryEventStream
 from codepilot.tui_agent.permission_broker import NonInteractiveBroker
@@ -28,7 +29,7 @@ def test_runner_setup_failure_is_recorded_in_sqlite(tmp_path: Path, monkeypatch)
         session_controller=store,
         event_stream=events,
         permission_broker=NonInteractiveBroker(),
-        config=TUIRunnerConfig(model=None, model_config=(), permission_mode="unsafe_auto", fake_actions=None, mcp_config=None, max_steps=1),
+        config=TUIRunnerConfig(model=None, model_config=(), permission_mode="unsafe_auto", fake_responses=None, mcp_config=None, max_steps=1),
     )
     monkeypatch.setattr("codepilot.tui_agent.runner.build_codepilot_llm", lambda **_: (_ for _ in ()).throw(RuntimeError("model config invalid")))
 
@@ -57,12 +58,12 @@ def test_runtime_rejects_built_model_identity_different_from_session_snapshot(tm
             model="fake",
             model_config=(),
             permission_mode="unsafe_auto",
-            fake_actions=None,
+            fake_responses=None,
             mcp_config=None,
             max_steps=1,
         ),
     )
-    built_client = FakeLLMClient(["unused"])
+    built_client = StructuredFakeLLM([LLMResponse(content="unused")])
     monkeypatch.setattr(
         "codepilot.tui_agent.runner.build_codepilot_llm",
         lambda **_: SimpleNamespace(client=built_client, provider="anthropic", model="claude-sonnet"),

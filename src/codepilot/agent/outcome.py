@@ -21,6 +21,7 @@ class RunOutcomeSnapshot:
     evidence: EvidenceSnapshot
     changed_files: tuple[str, ...]
     last_test_status: str | None
+    tests: str | None
 
     def to_payload(self) -> dict[str, object]:
         """生成符合当前 TUI/Trace 契约的顶层字段。"""
@@ -32,6 +33,7 @@ class RunOutcomeSnapshot:
             "delivery_kind": self.delivery_kind,
             "changed_files": list(self.changed_files),
             "test_status": self.last_test_status,
+            "tests": self.tests,
             **self.evidence.to_payload(),
         }
 
@@ -47,4 +49,5 @@ def build_run_outcome(state: AgentState, *, status: str) -> RunOutcomeSnapshot:
         evidence=evidence_snapshot(state),
         changed_files=tuple(state.changed_files),
         last_test_status=state.last_test_status,
+        tests=state.final_tests,
     )

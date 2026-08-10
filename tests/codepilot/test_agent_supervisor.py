@@ -43,12 +43,15 @@ class _ChildRuntime:
         workspace = session.metadata.get("workspace_path")
         if self.mode in {"write", "write_outside"} and isinstance(workspace, str):
             Path(workspace, "README.md").write_text("after\n", encoding="utf-8")
-        if self.mode == "write_outside" and isinstance(workspace, str):
+        if self.mode in {"write_outside", "fail_write_outside"} and isinstance(workspace, str):
             Path(workspace, "OUTSIDE.md").write_text("unexpected\n", encoding="utf-8")
         while self.mode == "blocking" and not cancellation_token.is_cancelled():
             time.sleep(0.01)
-        status = "cancelled" if cancellation_token.is_cancelled() else "success"
-        return SimpleNamespace(result=SimpleNamespace(status=status, summary="child result", error=None))
+        status = "cancelled" if cancellation_token.is_cancelled() else (
+            "max_steps_exceeded" if self.mode == "fail_write_outside" else "success"
+        )
+        error = "max_steps_exceeded" if status == "max_steps_exceeded" else None
+        return SimpleNamespace(result=SimpleNamespace(status=status, summary="child result", error=error))
 
 
 def _fixture(tmp_path: Path, mode: str = "complete", config: AgentSupervisorConfig | None = None):
@@ -213,3 +216,25 @@ def test_max_children_depth_and_wait_timeout_are_enforced(tmp_path: Path) -> Non
 def test_scope_overlap_is_conservative_for_wildcards() -> None:
     assert scopes_may_overlap(("src/**",), ("tests/test.py",)) is True
     assert scopes_may_overlap(("src/a.py",), ("tests/test.py",)) is False
+
+
+def test_failed_general_still_audits_final_diff_for_scope_violation(tmp_path: Path) -> None:
+    supervisor, context, store, parent, repo, events = _fixture(tmp_path, mode="fail_write_outside")
+    spawned = supervisor.spawn(
+        context=context,
+        contract=SpawnContract(agent_type="general", task="update readme", write_scope=("README.md",)),
+    )
+
+    result = supervisor.wait(parent.session_id, str(spawned["agent_id"]), timeout=5)
+    child = store.get_session(str(spawned["agent_id"]))
+
+    assert result["status"] == "failed"
+    assert result["scope_violation_files"] == ["OUTSIDE.md"]
+    assert result["patch_artifact_id"] is not None
+    assert "max_steps_exceeded" in str(result["error"])
+    assert "outside write_scope" in str(result["error"])
+    assert child.metadata["scope_violation_files"] == ["OUTSIDE.md"]
+    assert not any(item["type"] == "agent_patch_ready" for item in events)
+    assert any(item["type"] == "agent_failed" for item in events)
+    assert (repo / "README.md").read_text(encoding="utf-8") == "before\n"
+    assert not (repo / "OUTSIDE.md").exists()

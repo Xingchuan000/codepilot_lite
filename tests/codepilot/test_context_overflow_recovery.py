@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from codepilot.agent.loop import MinimalAgentLoop
 from codepilot.llm.errors import LLMContextOverflowError
-from codepilot.llm.types import ChatMessage, LLMResponse, LLMStreamEvent
+from codepilot.llm.types import ChatMessage, LLMResponse, LLMToolCall
 from codepilot.router import ToolRouter
 from codepilot.session.context import ContextAssembler
 from codepilot.session.context_audit import ContextAuditRepository
@@ -19,11 +19,14 @@ class _OverflowThenFinish:
         self.calls = 0
         self.always = always
 
-    def complete(self, messages):
+    def complete(self, messages, *, tools=(), tool_choice="auto"):
         self.calls += 1
         if self.calls == 1 or self.always:
             raise LLMContextOverflowError("maximum context length", output_started=False)
-        return LLMResponse('{"type":"finish","status":"partial","summary":"recovered"}')
+        return LLMResponse(
+            content="",
+            tool_calls=(LLMToolCall("provider-finish", "codepilot_finish", {"status": "partial", "summary": "recovered"}),),
+        )
 
 
 class _Recovery:
@@ -64,15 +67,14 @@ def test_second_overflow_is_not_retried_a_third_time(tmp_path: Path) -> None:
     assert recovery.exhausted == 1
 
 
-class _PartialStream:
-    def stream(self, messages):
-        yield LLMStreamEvent("text_delta", '{"type":"tool_call"')
-        yield LLMStreamEvent("error", "maximum context length")
+class _PartialNativeResponse:
+    def complete(self, messages, *, tools=(), tool_choice="auto"):
+        raise LLMContextOverflowError("maximum context length", output_started=True)
 
 
 def test_partial_stream_output_disables_overflow_retry(tmp_path: Path) -> None:
     recovery = _Recovery()
-    result = MinimalAgentLoop(llm=_PartialStream(), router=ToolRouter.from_runs_dir(tmp_path / "runs"), context_recovery=recovery).run("inspect", tmp_path)
+    result = MinimalAgentLoop(llm=_PartialNativeResponse(), router=ToolRouter.from_runs_dir(tmp_path / "runs"), context_recovery=recovery).run("inspect", tmp_path)
 
     assert result.status == "llm_error"
     assert recovery.calls == 0

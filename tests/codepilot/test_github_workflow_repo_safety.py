@@ -34,7 +34,7 @@ def _write_issue(tmp_path: Path) -> Path:
 
 
 def _success_fixture() -> Path:
-    return Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    return Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
 
 def test_clean_repo_writes_manifest_restore_plan_and_summary_sections(tmp_path: Path) -> None:
@@ -44,7 +44,7 @@ def test_clean_repo_writes_manifest_restore_plan_and_summary_sections(tmp_path: 
         run_id="issue-clean",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=_success_fixture(),
+        fake_responses=_success_fixture(),
         overwrite=True,
     )
 
@@ -68,7 +68,7 @@ def test_manifest_records_pr_summary_and_manifest_as_existing_after_success(tmp_
         run_id="issue-manifest-success",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=_success_fixture(),
+        fake_responses=_success_fixture(),
         overwrite=True,
     )
 
@@ -142,7 +142,7 @@ def test_dirty_repo_warn_continues_and_records_preexisting_warning(tmp_path: Pat
         run_id="issue-dirty-warn",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=_success_fixture(),
+        fake_responses=_success_fixture(),
         dirty_policy="warn",
         overwrite=True,
     )
@@ -163,7 +163,7 @@ def test_worktree_isolation_keeps_original_repo_clean(tmp_path: Path) -> None:
         run_id="issue-worktree",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=_success_fixture(),
+        fake_responses=_success_fixture(),
         worktree=True,
         worktree_base_dir=tmp_path / "worktrees-1",
         overwrite=True,
@@ -190,7 +190,7 @@ def test_dirty_repo_worktree_does_not_include_original_dirty_file(tmp_path: Path
         run_id="issue-dirty-worktree",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=_success_fixture(),
+        fake_responses=_success_fixture(),
         worktree=True,
         dirty_policy="fail",
         worktree_base_dir=tmp_path / "worktrees-2",
@@ -255,7 +255,7 @@ def test_cleanup_worktree_records_cleanup_result(tmp_path: Path) -> None:
         run_id="issue-worktree-cleanup",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=_success_fixture(),
+        fake_responses=_success_fixture(),
         worktree=True,
         cleanup_worktree=True,
         worktree_base_dir=tmp_path / "worktrees-4",
@@ -276,12 +276,12 @@ def test_issue_workflow_does_not_modify_github_workflow_path_via_approved_edit(t
     workflow_path.write_text("name: ci\n", encoding="utf-8")
     subprocess.run(["git", "add", ".github/workflows/ci.yml"], cwd=repo, check=True)
     subprocess.run(["git", "commit", "-m", "add workflow"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    fake_actions = tmp_path / "actions.jsonl"
-    fake_actions.write_text(
+    fake_responses = tmp_path / "responses.jsonl"
+    fake_responses.write_text(
         '\n'.join(
             [
-                '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":".github/workflows/ci.yml","start_line":1,"end_line":1,"replacement":"changed\\n"}}',
-                '{"type":"finish","status":"partial","summary":"done"}',
+                '{"content":"","tool_calls":[{"provider_tool_call_id":"provider-1","name":"replace_range","arguments":{"path":".github/workflows/ci.yml","start_line":1,"end_line":1,"replacement":"changed\\n"}}]}',
+                '{"content":"","tool_calls":[{"provider_tool_call_id":"provider-2","name":"codepilot_finish","arguments":{"status":"partial","summary":"done"}}]}',
             ]
         )
         + "\n",
@@ -294,7 +294,7 @@ def test_issue_workflow_does_not_modify_github_workflow_path_via_approved_edit(t
         run_id="issue-workflow-protect",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=fake_actions,
+        fake_responses=fake_responses,
         overwrite=True,
     )
 
@@ -343,7 +343,7 @@ def test_issue_workflow_writes_failure_artifacts_when_patch_export_fails(tmp_pat
         run_id="issue-patch-fail",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=_success_fixture(),
+        fake_responses=_success_fixture(),
         overwrite=True,
     )
 
@@ -360,20 +360,19 @@ def test_issue_workflow_writes_failure_artifacts_when_patch_export_fails(tmp_pat
 
 def test_issue_workflow_marks_protected_after_path_denied_when_shell_creates_env(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fake_actions = tmp_path / "actions-shell.jsonl"
-    fake_actions.write_text(
+    fake_responses = tmp_path / "responses-shell.jsonl"
+    fake_responses.write_text(
         "\n".join(
             [
                 json.dumps(
                     {
-                        "type": "tool_call",
-                        "tool_name": "run_shell",
-                        "arguments": {
+                        "content": "",
+                        "tool_calls": [{"provider_tool_call_id": "provider-1", "name": "run_shell", "arguments": {
                             "command": 'python -c "from pathlib import Path; Path(\'.\'+\'env\').write_text(\'SECRET=1\\\\n\', encoding=\'utf-8\')"'
                         },
-                    }
+                        }]}
                 ),
-                json.dumps({"type": "finish", "status": "partial", "summary": "done"}),
+                json.dumps({"content": "", "tool_calls": [{"provider_tool_call_id": "provider-2", "name": "codepilot_finish", "arguments": {"status": "partial", "summary": "done"}}]}),
             ]
         )
         + "\n",
@@ -386,7 +385,7 @@ def test_issue_workflow_marks_protected_after_path_denied_when_shell_creates_env
         run_id="issue-protected-after",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=fake_actions,
+        fake_responses=fake_responses,
         overwrite=True,
     )
 
@@ -401,20 +400,19 @@ def test_issue_workflow_marks_protected_after_path_denied_when_shell_creates_env
 
 def test_issue_workflow_records_untracked_normal_file_in_manifest_and_summary(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fake_actions = tmp_path / "actions-untracked.jsonl"
-    fake_actions.write_text(
+    fake_responses = tmp_path / "responses-untracked.jsonl"
+    fake_responses.write_text(
         "\n".join(
             [
                 json.dumps(
                     {
-                        "type": "tool_call",
-                        "tool_name": "run_shell",
-                        "arguments": {
+                        "content": "",
+                        "tool_calls": [{"provider_tool_call_id": "provider-1", "name": "run_shell", "arguments": {
                             "command": 'python -c "from pathlib import Path; Path(\'created.py\').write_text(\'print(1)\\\\n\', encoding=\'utf-8\')"'
                         },
-                    }
+                        }]}
                 ),
-                json.dumps({"type": "finish", "status": "partial", "summary": "done"}),
+                json.dumps({"content": "", "tool_calls": [{"provider_tool_call_id": "provider-2", "name": "codepilot_finish", "arguments": {"status": "partial", "summary": "done"}}]}),
             ]
         )
         + "\n",
@@ -427,7 +425,7 @@ def test_issue_workflow_records_untracked_normal_file_in_manifest_and_summary(tm
         run_id="issue-untracked",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=fake_actions,
+        fake_responses=fake_responses,
         overwrite=True,
     )
 

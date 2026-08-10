@@ -50,6 +50,7 @@ class AgentState:
     finished: bool = False
     final_status: str | None = None
     final_summary: str | None = None
+    final_tests: str | None = None
     last_tool_name: str | None = None
     last_tool_success: bool | None = None
     last_test_status: str | None = None
@@ -155,14 +156,23 @@ def register_tool_attempt(
     side_effect: str | None,
     arguments: dict[str, object],
 ) -> None:
-    """在真正调用路由前登记“试图执行过什么工具”。"""
+    """在真正调用路由前登记“本次工具是否可能修改当前仓库”。"""
 
-    if side_effect == "local_write":
-        state.write_attempted = True
-    if tool_name == "run_shell" and isinstance(arguments.get("command"), str) and shell_command_may_write(arguments["command"]):
-        state.write_attempted = True
-    if state.write_attempted and f"write_attempted:{tool_name}" not in state.evidence_reasons:
-        state.evidence_reasons.append(f"write_attempted:{tool_name}")
+    this_attempt_may_write = side_effect == "local_write"
+    if (
+        tool_name == "run_shell"
+        and isinstance(arguments.get("command"), str)
+        and shell_command_may_write(arguments["command"], repo=state.repo)
+    ):
+        this_attempt_may_write = True
+
+    if not this_attempt_may_write:
+        return
+
+    state.write_attempted = True
+    reason = f"write_attempted:{tool_name}"
+    if reason not in state.evidence_reasons:
+        state.evidence_reasons.append(reason)
 
 
 def update_state_from_route_result(state: AgentState, route_result: ToolRouteResult) -> None:
@@ -216,7 +226,7 @@ def update_state_from_route_result(state: AgentState, route_result: ToolRouteRes
         and metadata.get("dry_run") is not True
         and route_result.tool_name not in {"replace_range", "apply_patch"}
     ):
-        if metadata.get("side_effect") == "local_write" or route_result.tool_name == "run_shell" and isinstance(metadata.get("command"), str) and shell_command_may_write(metadata["command"]):
+        if metadata.get("side_effect") == "local_write" or route_result.tool_name == "run_shell" and isinstance(metadata.get("command"), str) and shell_command_may_write(metadata["command"], repo=state.repo):
             state.write_executed = True
     if route_result.tool_name in {"replace_range", "apply_patch"} and route_result.success and metadata.get("dry_run") is not True and changed_paths:
         state.write_executed = True
@@ -229,7 +239,7 @@ def update_state_from_route_result(state: AgentState, route_result: ToolRouteRes
     ):
         _register_written_paths(state, changed_paths)
         state.write_executed = True
-    if route_result.tool_name == "run_shell" and route_result.success and isinstance(metadata.get("command"), str) and shell_command_may_write(metadata["command"]):
+    if route_result.tool_name == "run_shell" and route_result.success and isinstance(metadata.get("command"), str) and shell_command_may_write(metadata["command"], repo=state.repo):
         state.write_executed = True
 
 
@@ -274,6 +284,7 @@ def mark_finished_from_action(
     state.finished = True
     state.final_status = effective_status or action.status
     state.final_summary = action.summary
+    state.final_tests = action.tests
     state.assistant_stop_reason = "structured_finish"
     state.completion_kind = completion_kind
     if state.delivery_kind == "code_change" or delivery_kind == "code_change" or action.delivery_kind == "code_change":

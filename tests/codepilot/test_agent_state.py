@@ -238,6 +238,35 @@ def test_register_tool_attempt_marks_shell_write(tmp_path: Path) -> None:
     assert state.write_attempted is True
 
 
+def test_register_tool_attempt_does_not_pollute_later_read_only_tool_reason(tmp_path: Path) -> None:
+    state = create_initial_state("demo", tmp_path, max_steps=3)
+
+    register_tool_attempt(
+        state,
+        tool_name="run_shell",
+        side_effect="none",
+        arguments={"command": "echo x > result.txt"},
+    )
+    register_tool_attempt(state, tool_name="git_status", side_effect="none", arguments={})
+
+    assert state.write_attempted is True
+    assert state.evidence_reasons == ["write_attempted:run_shell"]
+
+
+def test_register_tool_attempt_ignores_external_temp_redirection(tmp_path: Path) -> None:
+    state = create_initial_state("demo", tmp_path, max_steps=3)
+
+    register_tool_attempt(
+        state,
+        tool_name="run_shell",
+        side_effect="none",
+        arguments={"command": "pytest -q > /tmp/pytest.out 2>&1"},
+    )
+
+    assert state.write_attempted is False
+    assert state.evidence_reasons == []
+
+
 def test_register_tool_attempt_ignores_read_only_tools(tmp_path: Path) -> None:
     state = create_initial_state("demo", tmp_path, max_steps=3)
 

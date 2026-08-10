@@ -50,7 +50,7 @@ PYTHONPATH=src python -m codepilot.cli issue \
   --issue-file examples/issues/add_bug.md \
   --repo /tmp/codepilot-issue-demo \
   --run-id issue-demo-add-bug \
-  --fake-actions tests/codepilot/fixtures/agent_actions_success.jsonl \
+  --fake-responses tests/codepilot/fixtures/agent_responses_success.jsonl \
   --approve \
   --policy-mode build \
   --report \

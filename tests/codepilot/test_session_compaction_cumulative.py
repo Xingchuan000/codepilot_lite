@@ -1,7 +1,8 @@
 import json
 from pathlib import Path
 
-from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import LLMResponse
 from codepilot.memory.models import SessionSummaryContent
 from codepilot.memory.summarizer import LLMSummaryGenerator
 from codepilot.session.compaction import CompactionService
@@ -72,7 +73,7 @@ def test_successful_cumulative_summary_replaces_resolved_work_but_keeps_facts(tm
     second_value = SessionSummaryContent(task_goal="A complete", unresolved_work=(), next_actions=()).to_dict()
     service = CompactionService(
         database,
-        LLMSummaryGenerator(FakeLLMClient([json.dumps(first_value), json.dumps(second_value)])),
+        LLMSummaryGenerator(StructuredFakeLLM([LLMResponse(content=json.dumps(first_value)), LLMResponse(content=json.dumps(second_value))])),
     )
     first = service.compact(session.session_id, force=True, current_turn_id=turns[-1].turn_id)
     later_turns = [
@@ -126,7 +127,7 @@ def test_failed_cumulative_llm_summary_preserves_previous_work_snapshot(tmp_path
     value = SessionSummaryContent(unresolved_work=("fix A",), next_actions=("test A",)).to_dict()
     service = CompactionService(
         database,
-        LLMSummaryGenerator(FakeLLMClient([json.dumps(value), "not json"])),
+        LLMSummaryGenerator(StructuredFakeLLM([LLMResponse(content=json.dumps(value)), LLMResponse(content="not json")])),
     )
     service.compact(session.session_id, force=True, current_turn_id=turns[-1].turn_id)
     later_turns = [

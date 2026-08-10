@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 from codepilot.agent.loop import MinimalAgentLoop
-from codepilot.llm.fake import FakeLLMClient
-from codepilot.llm.types import ChatMessage
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import ChatMessage, ChatMessagePart, LLMResponse, LLMToolCall, RichChatMessage
 from codepilot.memory.repository import TurnCheckpointRepository
 from codepilot.memory.turn_window import CHECKPOINT_PREFIX, TurnContextWindow
 from codepilot.router import ToolRouter
@@ -34,15 +34,52 @@ def _turn(tmp_path: Path):
     return database, store, session, turn
 
 
+def _native_exchange(tool_name: str, provider_tool_call_id: str, arguments: dict, content: str) -> tuple[RichChatMessage, RichChatMessage]:
+    return (
+        RichChatMessage(
+            role="assistant",
+            parts=(
+                ChatMessagePart(
+                    type="tool_call",
+                    content={
+                        "provider_tool_call_id": provider_tool_call_id,
+                        "tool_name": tool_name,
+                        "arguments": arguments,
+                    },
+                ),
+            ),
+        ),
+        RichChatMessage(
+            role="tool",
+            parts=(
+                ChatMessagePart(
+                    type="tool_result",
+                    content={
+                        "provider_tool_call_id": provider_tool_call_id,
+                        "tool_name": tool_name,
+                        "content": content,
+                    },
+                ),
+            ),
+        ),
+    )
+
+
+def _store_native_exchange(store: SessionStore, session_id: str, turn_id: str, exchange: tuple[RichChatMessage, RichChatMessage]) -> None:
+    assistant, tool = exchange
+    assistant_record = store.create_message(session_id=session_id, turn_id=turn_id, role="assistant", status="completed", content="")
+    store.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
+    tool_record = store.create_message(session_id=session_id, turn_id=turn_id, role="tool", status="completed", content=tool.parts[0].content["content"])
+    store.append_message_part(tool_record.message_id, type="tool_result", content=tool.parts[0].content)
+
+
 def test_turn_window_persists_checkpoint_and_keeps_raw_messages(tmp_path: Path) -> None:
     database, store, session, turn = _turn(tmp_path)
     dynamic = []
     for index in range(5):
-        assistant = ChatMessage("assistant", f'{{"type":"tool_call","tool_name":"read_file","arguments":{{"path":"{index}.py"}}}}')
-        observation = ChatMessage("user", f"Tool: read_file\nSuccess: true\nOutput preview:\n{'x' * 500}")
-        dynamic.extend((assistant, observation))
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content=assistant.content)
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content=observation.content)
+        exchange = _native_exchange("read_file", f"provider-{index}", {"path": f"{index}.py"}, "x" * 500)
+        dynamic.extend(exchange)
+        _store_native_exchange(store, session.session_id, turn.turn_id, exchange)
     messages = [ChatMessage("system", "system"), ChatMessage("user", "fix the project"), *dynamic]
     profile = ModelContextProfile("openai", "tiny", 500, False, protocol_overhead_tokens=0)
 
@@ -65,10 +102,8 @@ def test_turn_window_persists_checkpoint_and_keeps_raw_messages(tmp_path: Path) 
     assert sum(estimate_tokens(message) for message in prepared) <= profile.max_input_tokens
     assert base_count == 3
 
-    next_assistant = ChatMessage("assistant", '{"type":"tool_call","tool_name":"git_diff","arguments":{}}')
-    next_observation = ChatMessage("user", f"Tool: git_diff\nSuccess: true\nOutput preview:\n{'y' * 500}")
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content=next_assistant.content)
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content=next_observation.content)
+    next_assistant, next_observation = _native_exchange("git_diff", "provider-next", {}, "y" * 500)
+    _store_native_exchange(store, session.session_id, turn.turn_id, (next_assistant, next_observation))
     prepared, base_count = TurnContextWindow(database, profile, soft_limit=0.4, recent_group_count=2).prepare_for_llm(
         session_id=session.session_id,
         turn_id=turn.turn_id,
@@ -132,7 +167,12 @@ def test_agent_loop_checks_context_before_every_llm_call(tmp_path: Path) -> None
     router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="rolling")
     window = _RecordingWindow()
     result = MinimalAgentLoop(
-        llm=FakeLLMClient(['{"type":"tool_call"', '{"type":"finish","status":"partial","summary":"stop"}']),
+        llm=StructuredFakeLLM(
+            [
+                LLMResponse(content="", tool_calls=(LLMToolCall(provider_tool_call_id="provider-1", name="list_files", arguments={}),)),
+                LLMResponse(content="", tool_calls=(LLMToolCall(provider_tool_call_id="provider-2", name="codepilot_finish", arguments={"status": "partial", "summary": "stop"}),)),
+            ]
+        ),
         router=router,
         max_steps=2,
         context_window=window,
@@ -152,11 +192,9 @@ def test_turn_window_fits_checkpoint_with_large_pending_replacement(tmp_path: Pa
     )
     dynamic = []
     for index in range(4):
-        assistant = ChatMessage("assistant", f"call-{index}")
-        observation = ChatMessage("user", "Tool: read_file\n" + "x" * 900)
-        dynamic.extend((assistant, observation))
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content=assistant.content)
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content=observation.content)
+        exchange = _native_exchange("read_file", f"provider-{index}", {"path": f"{index}.py"}, "x" * 900)
+        dynamic.extend(exchange)
+        _store_native_exchange(store, session.session_id, turn.turn_id, exchange)
     profile = ModelContextProfile("openai", "tiny", 900, False, protocol_overhead_tokens=0)
 
     prepared, _ = TurnContextWindow(database, profile, soft_limit=0.5, recent_group_count=1).prepare_for_llm(
@@ -175,24 +213,27 @@ def test_turn_window_fits_checkpoint_with_large_pending_replacement(tmp_path: Pa
 
 def test_turn_window_covers_oversized_latest_completed_tool_group(tmp_path: Path) -> None:
     database, store, session, turn = _turn(tmp_path)
-    small_assistant = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="small")
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="small result")
+    small_assistant, small_result = _native_exchange("read_file", "provider-small", {}, "small result")
+    _store_native_exchange(store, session.session_id, turn.turn_id, (small_assistant, small_result))
     patch = "x" * 30_000
-    assistant = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="apply patch " + patch)
-    call = store.create_tool_call(turn_id=turn.turn_id, tool_name="apply_patch", arguments={"path": "src/app.py", "patch": patch}, message_id=assistant.message_id)
+    assistant, result_message = _native_exchange("apply_patch", "provider-patch", {"path": "src/app.py", "patch": patch}, "changed")
+    assistant_record = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content="")
+    store.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
+    call = store.create_tool_call(turn_id=turn.turn_id, tool_name="apply_patch", arguments={"path": "src/app.py", "patch": patch}, message_id=assistant_record.message_id)
     store.persist_tool_result(call.tool_call_id, call_status="completed", result_status="success", content="changed", success=True, metadata={"changed": True, "changed_files": ["src/app.py"]})
-    result_message = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="changed", metadata={"tool_call_id": call.tool_call_id, "success": True})
+    result_record = store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content="changed", metadata={"tool_call_id": call.tool_call_id, "success": True})
+    store.append_message_part(result_record.message_id, type="tool_result", content={**result_message.parts[0].content, "codepilot_tool_call_id": call.tool_call_id})
     profile = ModelContextProfile("openai", "tiny", 500, False, protocol_overhead_tokens=0)
 
     prepared = TurnContextWindow(database, profile, soft_limit=0.4, recent_group_count=2).prepare_for_llm(
         session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=3,
-        messages=[ChatMessage("system", "system"), ChatMessage("user", "fix"), ChatMessage("assistant", "small"), ChatMessage("user", "Tool: read_file\nsmall result"), ChatMessage("assistant", "apply patch " + patch), ChatMessage("user", "Tool: apply_patch\nchanged")],
+        messages=[ChatMessage("system", "system"), ChatMessage("user", "fix"), small_assistant, small_result, assistant, result_message],
         base_message_count=2, task="fix", evidence={},
     )
     checkpoint = TurnCheckpointRepository(database).latest(turn.turn_id)
 
     assert checkpoint is not None
-    assert result_message.message_id in checkpoint.covered_message_ids
+    assert result_record.message_id in checkpoint.covered_message_ids
     assert "src/app.py" in str(checkpoint.content)
     assert sum(estimate_tokens(message) for message in prepared.messages) <= profile.max_input_tokens
     assert store.get_tool_call(call.tool_call_id).arguments["patch"] == patch

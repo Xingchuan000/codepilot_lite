@@ -34,6 +34,28 @@ def _unified_diff_preview(path: str, old_text: str, new_text: str, max_preview_c
     return _truncate_text(diff, max_preview_chars)
 
 
+def _line_ending(text: str) -> str:
+    """Return the exact line ending used by one splitlines(keepends=True) item."""
+
+    if text.endswith("\r\n"):
+        return "\r\n"
+    if text.endswith("\n"):
+        return "\n"
+    if text.endswith("\r"):
+        return "\r"
+    return ""
+
+
+def _read_text_preserving_newlines(path: Path) -> str:
+    with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
+        return handle.read()
+
+
+def _write_text_preserving_newlines(path: Path, text: str) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
 def replace_range(
     repo: str | Path,
     path: str,
@@ -129,7 +151,7 @@ def replace_range(
             },
         )
 
-    old_text = target.read_text(encoding="utf-8", errors="replace")
+    old_text = _read_text_preserving_newlines(target)
     lines = old_text.splitlines(keepends=True)
     total_lines = len(lines)
     if total_lines == 0:
@@ -172,13 +194,23 @@ def replace_range(
             },
         )
 
-    replacement_lines = replacement.splitlines(keepends=True)
+    # ``replace_range`` operates on complete source lines. Models commonly send
+    # replacement text without a trailing newline; blindly concatenating that
+    # text with the untouched suffix glues the following source line onto the
+    # replacement. Preserve the line ending of the last replaced source line
+    # whenever the replacement is non-empty and does not already provide one.
+    normalized_replacement = replacement
+    original_eol = _line_ending(lines[end_line - 1])
+    if normalized_replacement and original_eol and not _line_ending(normalized_replacement):
+        normalized_replacement += original_eol
+
+    replacement_lines = normalized_replacement.splitlines(keepends=True)
     new_text = "".join(lines[: start_line - 1] + replacement_lines + lines[end_line:])
     changed = new_text != old_text
     diff_preview, preview_truncated = _unified_diff_preview(path, old_text, new_text, max_preview_chars)
 
     if not dry_run and changed:
-        target.write_text(new_text, encoding="utf-8")
+        _write_text_preserving_newlines(target, new_text)
 
     return ToolResult(
         success=True,

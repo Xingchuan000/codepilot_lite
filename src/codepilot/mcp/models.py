@@ -59,7 +59,7 @@ class MCPServerConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_trust(self) -> "MCPServerConfig":
+    def _validate_trust(self) -> MCPServerConfig:
         if self.trusted_annotations and self.trust_level not in {"fake", "local_trusted"}:
             raise ValueError("trusted_annotations requires trust_level fake or local_trusted")
         return self
@@ -71,7 +71,9 @@ class MCPToolInfo(BaseModel):
     server_name: str
     name: str
     description: str = ""
-    input_schema: dict[str, Any] = Field(default_factory=dict)
+    input_schema: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}, "additionalProperties": False}
+    )
     output_schema: dict[str, Any] = Field(default_factory=dict)
     side_effect_hint: MCPToolSideEffectHint = "unknown"
     annotations: dict[str, Any] = Field(default_factory=dict)

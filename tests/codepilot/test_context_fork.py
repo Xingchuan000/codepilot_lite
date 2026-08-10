@@ -118,3 +118,97 @@ def test_context_fork_policy_normalizes_unknown_mode_and_recent_turns() -> None:
     )
 
     assert (policy.mode, policy.recent_turns) == ("summary_recent", 10)
+
+
+def test_summary_recent_inherits_native_parent_tool_exchange_without_crashing(tmp_path: Path) -> None:
+    database = SessionDatabase(tmp_path / "session.sqlite3")
+    database.initialize()
+    store = SessionStore(database)
+    service = SessionService(database)
+    parent = service.create_session(tmp_path / "repo", "deepseek", "deepseek/test", "manual")
+    parent_turn = store.create_turn(
+        session_id=parent.session_id,
+        title="parent",
+        provider_snapshot="deepseek",
+        model_snapshot="deepseek/test",
+        permission_mode_snapshot="manual",
+        branch_snapshot=None,
+    )
+    store.create_message(
+        session_id=parent.session_id,
+        turn_id=parent_turn.turn_id,
+        role="user",
+        status="completed",
+        content="inspect README",
+    )
+    assistant = store.create_message(
+        session_id=parent.session_id,
+        turn_id=parent_turn.turn_id,
+        role="assistant",
+        status="completed",
+        content="",
+    )
+    store.append_message_part(
+        assistant.message_id,
+        type="tool_call",
+        content={
+            "provider_tool_call_id": "provider-call-1",
+            "tool_name": "read_file",
+            "arguments": {"path": "README.md"},
+        },
+    )
+    tool = store.create_message(
+        session_id=parent.session_id,
+        turn_id=parent_turn.turn_id,
+        role="tool",
+        status="completed",
+        content="ok",
+    )
+    store.append_message_part(
+        tool.message_id,
+        type="tool_result",
+        content={
+            "provider_tool_call_id": "provider-call-1",
+            "tool_name": "read_file",
+            "content": "README contents",
+            "codepilot_tool_call_id": "tool-call-1",
+        },
+    )
+
+    child = service.create_child_session(
+        parent_session_id=parent.session_id,
+        forked_from_turn_id=parent_turn.turn_id,
+        provider="deepseek",
+        model="deepseek/test",
+        permission_mode="manual",
+        metadata={"context_fork": {"mode": "summary_recent", "recent_turns": 3}},
+    )
+    child_turn = store.create_turn(
+        session_id=child.session_id,
+        title="child",
+        provider_snapshot="deepseek",
+        model_snapshot="deepseek/test",
+        permission_mode_snapshot="manual",
+        branch_snapshot=None,
+    )
+    store.create_message(
+        session_id=child.session_id,
+        turn_id=child_turn.turn_id,
+        role="user",
+        status="completed",
+        content="delegated-child-task",
+    )
+
+    messages = ContextAssembler(database, store).build(
+        child.session_id,
+        child_turn.turn_id,
+        "deepseek",
+        "deepseek/test",
+        profile=ModelContextProfile("deepseek", "deepseek/test", 16_384, False),
+    )
+
+    contents = _contents(messages)
+    assert '[tool_call] read_file {"path": "README.md"}' in contents
+    assert "[tool_result] read_file: README contents" in contents
+    assert messages[-1].role == "user"
+    assert "delegated-child-task\nRepository:" in messages[-1].content

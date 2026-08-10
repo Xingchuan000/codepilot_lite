@@ -7,7 +7,6 @@ from typer.testing import CliRunner
 
 from codepilot.cli import app
 
-
 runner = CliRunner()
 
 
@@ -29,9 +28,9 @@ def _write_bug_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_cli_agent_run_with_fake_actions(tmp_path: Path) -> None:
+def test_cli_agent_run_with_fake_responses(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = runner.invoke(
         app,
@@ -40,7 +39,7 @@ def test_cli_agent_run_with_fake_actions(tmp_path: Path) -> None:
             "Fix the failing add test",
             "--repo",
             str(repo),
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--approve",
             "--policy-mode",
@@ -59,40 +58,9 @@ def test_cli_agent_run_with_fake_actions(tmp_path: Path) -> None:
     assert (tmp_path / "runs" / "run-test" / "trace.jsonl").exists()
 
 
-def test_cli_agent_run_with_alias_fake_actions(tmp_path: Path) -> None:
-    repo = _write_bug_repo(tmp_path)
-    fixture = Path("tests/codepilot/fixtures/agent_actions_aliases.jsonl").resolve()
-
-    result = runner.invoke(
-        app,
-        [
-            "agent-run",
-            "Fix the failing add test",
-            "--repo",
-            str(repo),
-            "--fake-actions",
-            str(fixture),
-            "--approve",
-            "--policy-mode",
-            "build",
-            "--runs-dir",
-            str(tmp_path / "runs"),
-            "--run-id",
-            "run-test-aliases",
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert "Status: success" in result.stdout
-    assert "Steps: 6" in result.stdout
-    trace_path = tmp_path / "runs" / "run-test-aliases" / "trace.jsonl"
-    assert trace_path.exists()
-    assert "normalization_applied" in trace_path.read_text(encoding="utf-8")
-
-
 def test_cli_agent_run_read_only_does_not_modify_file(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = runner.invoke(
         app,
@@ -101,7 +69,7 @@ def test_cli_agent_run_read_only_does_not_modify_file(tmp_path: Path) -> None:
             "Fix the failing add test",
             "--repo",
             str(repo),
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--policy-mode",
             "read_only",
@@ -120,9 +88,9 @@ def test_cli_agent_run_respects_max_steps(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
     no_finish = tmp_path / "no_finish.jsonl"
     no_finish.write_text(
-        '{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}\n'
-        '{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}\n'
-        '{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}\n',
+        '{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-1","name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}]}\n'
+        '{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-2","name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}]}\n'
+        '{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-3","name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}]}\n',
         encoding="utf-8",
     )
 
@@ -133,7 +101,7 @@ def test_cli_agent_run_respects_max_steps(tmp_path: Path) -> None:
             "Inspect calc",
             "--repo",
             str(repo),
-            "--fake-actions",
+            "--fake-responses",
             str(no_finish),
             "--max-steps",
             "3",
@@ -147,37 +115,6 @@ def test_cli_agent_run_respects_max_steps(tmp_path: Path) -> None:
     assert result.exit_code == 1
     assert "Status: max_steps_exceeded" in result.stdout
 
-
-def test_cli_agent_run_uses_swe_adapter_path_when_fake_actions_missing(tmp_path: Path, monkeypatch) -> None:
-    repo = _write_bug_repo(tmp_path)
-    calls = []
-
-    class FakeModel:
-        def query_without_default_tools(self, messages):
-            calls.append(messages)
-            return {"role": "assistant", "content": '{"type":"finish","status":"partial","summary":"done"}'}
-
-    monkeypatch.setattr("codepilot.agent.runner.get_model", lambda config=None: FakeModel())
-
-    result = runner.invoke(
-        app,
-        [
-            "agent-run",
-            "Inspect calc",
-            "--repo",
-            str(repo),
-            "--model-config",
-            'model.model_class="deterministic"',
-            "--runs-dir",
-            str(tmp_path / "runs"),
-            "--run-id",
-            "run-test",
-        ],
-    )
-
-    assert result.exit_code == 1
-    assert "Status: partial" in result.stdout
-    assert len(calls) == 1
 
 
 def test_cli_agent_run_rejects_unknown_llm_flags() -> None:

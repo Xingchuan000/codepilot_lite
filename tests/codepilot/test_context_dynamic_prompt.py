@@ -24,7 +24,7 @@ def _runtime_spec() -> ToolSpec:
     )
 
 
-def test_explicit_tool_catalog_and_role_instructions_are_rendered() -> None:
+def test_native_prompt_keeps_role_instructions_without_tool_catalog() -> None:
     prompt = build_system_prompt(
         tool_specs=(_runtime_spec(),),
         agent_instructions="You are a read-only delegated explorer.",
@@ -32,11 +32,11 @@ def test_explicit_tool_catalog_and_role_instructions_are_rendered() -> None:
 
     assert "Current agent role" in prompt
     assert "read-only delegated explorer" in prompt
-    assert "spawn_agent" in prompt
+    assert "Do not write tool calls as JSON" in prompt
     assert "- name: read_file" not in prompt
 
 
-def test_context_assembler_passes_dynamic_catalog_without_changing_current_task_order(tmp_path: Path) -> None:
+def test_context_assembler_keeps_native_prompt_and_current_task_order(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "session.sqlite3")
     database.initialize()
     store = SessionStore(database)
@@ -73,13 +73,13 @@ def test_context_assembler_passes_dynamic_catalog_without_changing_current_task_
     )
 
     assert isinstance(messages[0], ChatMessage)
-    assert "spawn_agent" in str(messages[0].content)
+    assert "Do not write tool calls as JSON" in str(messages[0].content)
     assert "delegated role" in str(messages[0].content)
     assert messages[-1].role == "user"
     assert "delegated task" in str(messages[-1].content)
 
 
-def test_primary_prompt_explains_agent_control_argument_bounds(tmp_path: Path) -> None:
+def test_primary_prompt_adds_delegated_result_consumption_guidance(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "agent-control.sqlite3")
     database.initialize()
     supervisor = AgentSupervisor(database=database, child_runtime_factory=lambda _: None)
@@ -90,15 +90,13 @@ def test_primary_prompt_explains_agent_control_argument_bounds(tmp_path: Path) -
 
     prompt = build_system_prompt(tool_specs=registry.list_specs())
 
-    assert "Agent control tool argument rules" in prompt
-    assert "write_scope must be a JSON array" in prompt
-    assert "never use an empty string or null" in prompt
-    assert 'defaults to "summary_recent"' in prompt
-    assert 'Never use labels such as "fork mode"' in prompt
-    assert "at most 30" in prompt
-    assert "never request a timeout above 30" in prompt
-    assert '"tool_name":"spawn_agent"' in prompt
-    assert '"write_scope":[]' in prompt
+    assert "Delegated-agent result handling" in prompt
+    assert "test_status=passed" in prompt
+    assert "do not enter the child worktree or rerun the same tests" in prompt
+    assert "Treat list_agents as authoritative runtime state" in prompt
+    assert "multiple children with status=running" in prompt
+    assert "do not inspect worktree timestamps" in prompt
+    assert "Spawn one delegated child agent" not in prompt
 
 
 def test_child_prompt_without_spawn_agent_omits_primary_agent_control_guidance() -> None:
@@ -107,7 +105,7 @@ def test_child_prompt_without_spawn_agent_omits_primary_agent_control_guidance()
         agent_instructions="delegated role",
     )
 
-    # This fixture happens to be named spawn_agent, so verify the real guard with a read-only spec.
+    # Tool visibility is passed through the native tools request, not system-prompt text.
     read_only = ToolSpec(
         name="read_file",
         description="Read a file.",
@@ -117,4 +115,4 @@ def test_child_prompt_without_spawn_agent_omits_primary_agent_control_guidance()
         parameters={"path": "relative file path"},
     )
     prompt = build_system_prompt(tool_specs=(read_only,), agent_instructions="delegated role")
-    assert "Agent control tool argument rules" not in prompt
+    assert prompt == build_system_prompt(agent_instructions="delegated role")

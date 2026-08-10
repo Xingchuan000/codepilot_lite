@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -245,9 +246,26 @@ class AgentSupervisor:
                 "completed" if execution.result.status in {"success", "message_complete"} else "failed"
             )
             handle.error = execution.result.error
-            status_metadata: dict[str, object] = {"result": execution.result.summary}
+            outcome = getattr(execution.result, "outcome", None)
+            evidence = getattr(outcome, "evidence", None)
+            status_metadata: dict[str, object] = {
+                "result": execution.result.summary,
+                "result_status": execution.result.status,
+                "completion_kind": getattr(outcome, "completion_kind", None),
+                "delivery_kind": getattr(outcome, "delivery_kind", None),
+                "tests": getattr(outcome, "tests", None),
+                "test_status": getattr(outcome, "last_test_status", None),
+                "diff_checked": bool(getattr(evidence, "diff_checked", False)),
+                "missing_evidence": list(getattr(evidence, "missing", ()) or ()),
+            }
             changed_files: list[str] = []
-            if status == "completed" and handle.workspace_path is not None:
+            # A writable General owns an isolated worktree. Audit its final diff
+            # for every terminal runtime outcome, not only successful runs. This
+            # keeps max_steps/tool/test failures from hiding an independent
+            # write_scope violation. Failed/cancelled patches are diagnostic only:
+            # only a completed, scope-clean child may emit ``agent_patch_ready``
+            # or later pass ``apply_agent_patch``.
+            if handle.workspace_path is not None:
                 handle.patch_artifact_id = persist_agent_patch(
                     self.artifacts,
                     child_session_id,
@@ -264,11 +282,16 @@ class AgentSupervisor:
                     path for path in changed_files if not path_allowed(path, handle.write_scope)
                 ]
                 if scope_violations:
-                    status = "failed"
-                    handle.error = (
+                    violation_error = (
                         "General agent changed files outside write_scope: "
                         + ", ".join(scope_violations)
                     )
+                    if handle.error:
+                        handle.error = f"{handle.error}; {violation_error}"
+                    else:
+                        handle.error = violation_error
+                    if status == "completed":
+                        status = "failed"
                     status_metadata.update(
                         {
                             "error": handle.error,
@@ -368,8 +391,22 @@ class AgentSupervisor:
         wait_for = self.config.wait_timeout_seconds if timeout is None else min(timeout, self.config.wait_timeout_seconds)
         with self._lock:
             running = self._running.get(child_session_id)
-        if running is not None:
-            running.thread.join(wait_for)
+        if running is not None and wait_for > 0:
+            # A child can block inside its own permission broker while the TUI waits
+            # for a human decision. Human approval time must not consume the
+            # bounded child-execution wait or wake the Primary every 30 seconds.
+            deadline = time.monotonic() + wait_for
+            while running.thread.is_alive():
+                snapshot = self.snapshot(child_session_id)
+                if snapshot["status"] == "waiting_permission":
+                    running.thread.join(0.1)
+                    # Resume with a fresh execution-time budget after approval.
+                    deadline = time.monotonic() + wait_for
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                running.thread.join(min(remaining, 0.1))
         return self.snapshot(child_session_id)
 
     def list_agents(self, parent_session_id: str) -> list[dict[str, object]]:
@@ -391,7 +428,9 @@ class AgentSupervisor:
             status = "cancelled"
         elif latest.status == "recovery_required":
             status = "recovery_required"
-        elif latest.status in {"running", "queued", "waiting_permission"}:
+        elif latest.status == "waiting_permission":
+            status = "waiting_permission" if child_session_id in self._running else "recovery_required"
+        elif latest.status in {"running", "queued"}:
             status = "running" if child_session_id in self._running else "recovery_required"
         else:
             status = "failed"
@@ -402,10 +441,14 @@ class AgentSupervisor:
             )
             session = self.store.get_session(child_session_id)
         artifact_id = session.metadata.get("patch_artifact_id")
-        result = self._latest_completed_assistant_text(child_session_id)
+        # ``execution.result.summary`` is the authoritative semantic result of a
+        # child run. For structured ``codepilot_finish`` it contains the verified
+        # summary, whereas the assistant text emitted alongside the native tool call
+        # may be only a terse preamble such as "Task complete."
+        metadata_result = session.metadata.get("result")
+        result = metadata_result if isinstance(metadata_result, str) and metadata_result.strip() else None
         if not result:
-            metadata_result = session.metadata.get("result")
-            result = metadata_result if isinstance(metadata_result, str) and metadata_result.strip() else None
+            result = self._latest_completed_assistant_text(child_session_id)
         changed_files: list[str] = []
         if isinstance(artifact_id, str):
             changed_files = extract_paths_from_patch(self.artifacts.read_text(artifact_id))
@@ -422,6 +465,13 @@ class AgentSupervisor:
             "changed_files": changed_files,
             "workspace_path": session.metadata.get("workspace_path"),
             "workspace_retained": bool(session.metadata.get("workspace_path")),
+            "tests": session.metadata.get("tests"),
+            "test_status": session.metadata.get("test_status"),
+            "diff_checked": bool(session.metadata.get("diff_checked", False)),
+            "missing_evidence": list(session.metadata.get("missing_evidence", [])),
+            "scope_violation_files": list(session.metadata.get("scope_violation_files", [])),
+            "completion_kind": session.metadata.get("completion_kind"),
+            "delivery_kind": session.metadata.get("delivery_kind"),
         }
 
 
@@ -554,7 +604,7 @@ class AgentSupervisor:
             running.thread.join(min(self.config.wait_timeout_seconds, 1.0))
         else:
             snapshot = self.snapshot(child_session_id)
-            if snapshot["status"] in {"queued", "running", "recovery_required"}:
+            if snapshot["status"] in {"queued", "running", "waiting_permission", "recovery_required"}:
                 child = self.store.get_session(child_session_id)
                 self._set_status(child_session_id, "cancelled", error="cancelled by Primary")
                 self._emit(

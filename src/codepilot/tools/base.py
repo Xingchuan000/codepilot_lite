@@ -93,7 +93,11 @@ class ToolSpec(BaseModel):
     default_permission: DefaultPermission
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
     recovery_strategy: ToolRecoveryStrategy = ToolRecoveryStrategy.ASK_USER
+    input_schema: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}, "additionalProperties": False}
+    )
     parameters: dict[str, Any] = Field(default_factory=dict)
+    inject_repo: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 

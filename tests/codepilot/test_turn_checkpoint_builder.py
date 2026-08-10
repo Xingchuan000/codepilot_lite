@@ -75,29 +75,6 @@ def test_recent_tool_facts_only_include_covered_tool_exchange(tmp_path: Path) ->
     assert retained_call.tool_call_id not in str(content.recent_tool_facts)
 
 
-def test_unconsumed_parse_error_is_current_until_later_assistant_progress(tmp_path: Path) -> None:
-    database, store, session, turn = _facts(tmp_path)
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="Action parse failed. bad JSON", metadata={"synthetic": True, "category": "parse_error"})
-
-    active = TurnCheckpointBuilder(database).build(session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=2, task="inspect", evidence={}, covered_message_ids=(), previous=None)
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content='{"type":"finish"}')
-    resolved = TurnCheckpointBuilder(database).build(session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=3, task="inspect", evidence={}, covered_message_ids=(), previous=None)
-
-    assert "Action parse failed" in active.current_errors[0]
-    assert resolved.current_errors == ()
-
-
-def test_evidence_block_remains_active_until_missing_evidence_is_cleared(tmp_path: Path) -> None:
-    database, store, session, turn = _facts(tmp_path)
-    store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="Finish blocked. missing tests", metadata={"synthetic": True, "category": "evidence_blocked"})
-
-    active = TurnCheckpointBuilder(database).build(session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=2, task="fix", evidence={"missing_evidence": ["missing_passed_tests"]}, covered_message_ids=(), previous=None)
-    resolved = TurnCheckpointBuilder(database).build(session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=3, task="fix", evidence={"missing_evidence": []}, covered_message_ids=(), previous=None)
-
-    assert "Finish blocked" in active.current_errors[0]
-    assert resolved.current_errors == ()
-
-
 def test_full_tests_directory_pass_clears_specific_pytest_failure(tmp_path: Path) -> None:
     database, store, session, turn = _facts(tmp_path)
     _persist_test(store, turn.turn_id, "python -m pytest tests/foo.py", False, "1 failed")

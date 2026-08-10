@@ -1,0 +1,2 @@
+{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-1","name":"run_shell","arguments":{"command":"python -c \"raise SystemExit(1)\"","timeout":30}}]}
+{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-2","name":"codepilot_finish","arguments":{"status":"failed","summary":"命令失败，无法继续。","tests":"not run","changed_files":[]}}]}

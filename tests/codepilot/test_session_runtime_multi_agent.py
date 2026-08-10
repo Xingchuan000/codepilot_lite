@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import LLMResponse
 from codepilot.multi_agent.profiles import EXPLORE_PROFILE
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
@@ -40,7 +41,7 @@ def test_child_runtime_does_not_extract_memory_candidates(tmp_path: Path) -> Non
 
     runtime = SessionRuntime(
         database,
-        FakeLLMClient(["read-only result"]),
+        StructuredFakeLLM([LLMResponse(content="read-only result")]),
         lambda trace: ToolRouter(
             trace,
             policy_checker=PolicyChecker.default(),

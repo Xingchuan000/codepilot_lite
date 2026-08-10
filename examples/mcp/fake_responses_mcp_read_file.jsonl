@@ -1,0 +1,3 @@
+{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-1","name":"mcp.filesystem.read_file","arguments":{"path":"README.md"}}]}
+{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-2","name":"run_tests","arguments":{"command":"python -m pytest tests/codepilot/test_mcp_models.py","timeout":30}}]}
+{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-3","name":"codepilot_finish","arguments":{"status":"success","summary":"MCP read completed.","tests":"python -m pytest tests/codepilot/test_mcp_models.py","changed_files":[]}}]}

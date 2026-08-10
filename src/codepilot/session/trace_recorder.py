@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from codepilot.llm.types import LLMReasoningReplay
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
 from codepilot.session.ids import now_iso
@@ -47,9 +48,17 @@ class SessionTraceRecorder:
         message = self.store.create_message(session_id=self.session_id, turn_id=self.turn_id or "", attempt_id=self.attempt_id, role="assistant", status="in_progress", content="")
         self._last_message_id = message.message_id
 
-    def assistant_message_completed(self, *, content: str, **_: Any) -> None:
+    def assistant_message_completed(self, *, content: str, reasoning_replay: LLMReasoningReplay | None = None, **_: Any) -> None:
         if self._last_message_id is None:
             self.assistant_message_started()
+        if reasoning_replay is not None:
+            self.store.append_message_part(
+                self._last_message_id,
+                type="reasoning_replay",
+                content={"blocks": list(reasoning_replay.blocks)},
+                provider_format=reasoning_replay.provider_format,
+                replayable=True,
+            )
         if not self._streaming_message:
             # 流式消息已经逐段关联 MessagePart；只有非流式消息才持久化完整正文，避免
             # 创建一条没有任何 MessagePart 引用的孤儿 Artifact。
@@ -88,20 +97,56 @@ class SessionTraceRecorder:
         # ToolCall 业务表只允许 Router Lifecycle 写入；此入口保留给 Loop/UI 事件协议。
         return None
 
-    def attach_tool_call(self, tool_call_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
-        """把 Router 创建的 ToolCall 投影到产生该调用的 Assistant Message。"""
+    def record_native_tool_call(self, *, provider_tool_call_id: str, tool_name: str, arguments: dict[str, Any]) -> None:
+        """Persist an internal native call that does not pass through ToolRouter."""
 
         if self._last_message_id is None:
             raise RuntimeError("tool call requires an assistant message")
         self.store.append_message_part(
             self._last_message_id,
             type="tool_call",
-            content={"tool_name": tool_name, "arguments": arguments},
-            metadata={"tool_call_id": tool_call_id, "tool_name": tool_name},
+            content={
+                "provider_tool_call_id": provider_tool_call_id,
+                "tool_name": tool_name,
+                "arguments": arguments,
+            },
+            metadata={"provider_tool_call_id": provider_tool_call_id, "tool_name": tool_name},
+        )
+
+    def attach_tool_call(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        provider_tool_call_id: str | None = None,
+    ) -> None:
+        """把 Router 创建的 ToolCall 投影到产生该调用的 Assistant Message。"""
+
+        if self._last_message_id is None:
+            raise RuntimeError("tool call requires an assistant message")
+        if provider_tool_call_id is None:
+            return
+        self.store.append_message_part(
+            self._last_message_id,
+            type="tool_call",
+            content={
+                "provider_tool_call_id": provider_tool_call_id,
+                "tool_name": tool_name,
+                "arguments": arguments,
+            },
+            metadata={
+                "tool_call_id": tool_call_id,
+                "provider_tool_call_id": provider_tool_call_id,
+                "tool_name": tool_name,
+            },
         )
 
     def tool_result_created(self, *, tool_name: str, success: bool, content: Any, **_: Any) -> None:
         tool_call_id = _.get("tool_call_id")
+        provider_tool_call_id = _.get("provider_tool_call_id")
+        if not isinstance(provider_tool_call_id, str) or not provider_tool_call_id:
+            raise ValueError("Native tool results require provider_tool_call_id")
         result = self.store.get_tool_result_by_call(str(tool_call_id)) if tool_call_id else None
         observation = _.get("observation")
         artifact_id = result.artifact_id if result is not None else None
@@ -126,9 +171,20 @@ class SessionTraceRecorder:
             type="tool_result",
             # replayable 正文保存 Loop 实际看到的规范 observation；Artifact 仅引用业务
             # ToolResult 已持久化的原始大输出，不在消息层重复创建第二份内容。
-            content=message_content,
+            content={
+                "provider_tool_call_id": provider_tool_call_id,
+                "tool_name": tool_name,
+                "content": message_content,
+                "codepilot_tool_call_id": tool_call_id,
+            },
             artifact_id=artifact_id,
-            metadata={"tool_call_id": tool_call_id, "tool_name": tool_name, "success": success, **prune_metadata},
+            metadata={
+                "tool_call_id": tool_call_id,
+                "provider_tool_call_id": provider_tool_call_id,
+                "tool_name": tool_name,
+                "success": success,
+                **prune_metadata,
+            },
         )
 
     def loop_observation_created(self, *, content: str, category: str, **_: Any) -> None:
@@ -209,17 +265,35 @@ class SessionTraceRecorder:
     def record_policy_decision(self, **kwargs: Any) -> TraceEvent:
         return self._record("policy_decision", **kwargs)
 
-    def record_permission_request(self, **kwargs: Any) -> TraceEvent:
-        return self._record("permission_request", **kwargs)
+    def record_permission_request(self, *, request_id: str, **kwargs: Any) -> TraceEvent:
+        return self._record("permission_request", permission_request_id=request_id, **kwargs)
 
-    def record_permission_response(self, **kwargs: Any) -> TraceEvent:
-        return self._record("permission_response", **kwargs)
+    def record_permission_response(self, *, request_id: str, decision: str, **kwargs: Any) -> TraceEvent:
+        return self._record(
+            "permission_response",
+            permission_request_id=request_id,
+            permission_decision=decision,
+            **kwargs,
+        )
 
 
 def _trace_fields(data: dict[str, Any]) -> dict[str, Any]:
     """只把 TraceEvent 已知字段传给 Pydantic，其他内容放入 metadata。"""
 
-    known = {"success", "error", "tool_name", "input", "output_preview", "policy_decision", "policy_reason", "policy_rule", "policy_mode", "metadata"}
+    known = {
+        "success",
+        "error",
+        "tool_name",
+        "input",
+        "output_preview",
+        "policy_decision",
+        "policy_reason",
+        "policy_rule",
+        "policy_mode",
+        "permission_request_id",
+        "permission_decision",
+        "metadata",
+    }
     fields = {key: value for key, value in data.items() if key in known}
     extras = {key: value for key, value in data.items() if key not in known and key != "metadata"}
     fields["metadata"] = {**(data.get("metadata") or {}), **extras}

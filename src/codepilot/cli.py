@@ -140,7 +140,7 @@ def tui(
     model_config: list[str] = typer.Option([], "--model-config"),
     permission_mode: Literal["manual", "read_only", "accept_edits", "unsafe_auto"] | None = typer.Option(None, "--permission-mode"),
     mcp_config: str | None = typer.Option(None, "--mcp-config"),
-    fake_actions: str | None = typer.Option(None, "--fake-actions"),
+    fake_responses: str | None = typer.Option(None, "--fake-responses"),
     max_steps: int | None = typer.Option(None, "--max-steps"),
 ) -> None:
     """启动交互式 Agent TUI。"""
@@ -153,7 +153,7 @@ def tui(
             model_config=model_config,
             permission_mode=permission_mode,
             mcp_config=mcp_config,
-            fake_actions=fake_actions,
+            fake_responses=fake_responses,
             max_steps=max_steps,
         ).run()
     except RuntimeError as exc:
@@ -525,7 +525,7 @@ def agent_run(
     max_steps: int = typer.Option(12, "--max-steps", help="Maximum LLM loop steps."),
     policy_mode: Literal["read_only", "build", "danger"] = typer.Option("build", "--policy-mode"),
     approve: bool = typer.Option(False, "--approve", help="Approve ask tools."),
-    fake_actions: str | None = typer.Option(None, "--fake-actions", help="JSONL fake LLM action responses."),
+    fake_responses: str | None = typer.Option(None, "--fake-responses", help="JSONL structured LLM responses."),
     model: str | None = typer.Option(
         None,
         "--model",
@@ -548,7 +548,7 @@ def agent_run(
         max_steps=max_steps,
         policy_mode=policy_mode,
         approve=approve,
-        fake_actions=fake_actions,
+        fake_responses=fake_responses,
         model=model,
         model_config=model_config,
         mcp_config=mcp_config,
@@ -579,7 +579,7 @@ def issue_command(
     runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory for run artifacts."),
     policy_mode: Literal["read_only", "build", "danger"] = typer.Option("build", "--policy-mode"),
     approve: bool = typer.Option(False, "--approve", help="Approve ask tools."),
-    fake_actions: str | None = typer.Option(None, "--fake-actions", help="JSONL fake LLM action responses."),
+    fake_responses: str | None = typer.Option(None, "--fake-responses", help="JSONL structured LLM responses."),
     max_steps: int | None = typer.Option(None, "--max-steps", help="Maximum LLM loop steps."),
     report: bool = typer.Option(True, "--report/--no-report", help="Generate report.md."),
     json_report: bool = typer.Option(True, "--json-report/--no-json-report", help="Generate report.json."),
@@ -631,7 +631,7 @@ def issue_command(
             runs_dir=runs_dir,
             policy_mode=policy_mode,
             approve=approve,
-            fake_actions=fake_actions,
+            fake_responses=fake_responses,
             max_steps=max_steps,
             generate_report_markdown=report,
             export_json_report=json_report,

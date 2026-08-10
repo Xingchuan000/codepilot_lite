@@ -22,6 +22,7 @@ def test_build_run_outcome_contains_status_and_evidence_payload(tmp_path: Path) 
     state.missing_evidence = []
     state.changed_files = ["src/calc.py", "tests/test_calc.py"]
     state.last_test_status = "passed"
+    state.final_tests = "python -m pytest -q tests/test_calc.py -> passed"
 
     outcome = build_run_outcome(state, status="success")
 
@@ -32,6 +33,7 @@ def test_build_run_outcome_contains_status_and_evidence_payload(tmp_path: Path) 
         "delivery_kind": "code_change",
         "changed_files": ["src/calc.py", "tests/test_calc.py"],
         "test_status": "passed",
+        "tests": "python -m pytest -q tests/test_calc.py -> passed",
         "requires_evidence": True,
         "evidence_reasons": ["write_executed", "written_files"],
         "write_attempted": True,

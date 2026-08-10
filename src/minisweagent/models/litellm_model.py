@@ -111,35 +111,6 @@ class LitellmModel:
         }
         return message
 
-    def query_without_default_tools(self, messages: list[dict[str, str]], **kwargs) -> dict:
-        """查询模型但不注入默认 BASH_TOOL，也不解析 tool calls。"""
-
-        for attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):
-            with attempt:
-                response = self._query(self._prepare_messages_for_api(messages), tools=None, **kwargs)
-        cost_output = self._calculate_cost(response)
-        GLOBAL_MODEL_STATS.add(cost_output["cost"])
-        usage = {}
-        try:
-            if getattr(response, "usage", None) is not None:
-                usage = response.usage.model_dump()
-        except Exception:
-            usage = {}
-        try:
-            raw_response = response.model_dump()
-        except Exception:
-            raw_response = repr(response)
-        return {
-            "role": "assistant",
-            "content": response.choices[0].message.content or "",
-            "extra": {
-                "response": raw_response,
-                "cost": cost_output["cost"],
-                "timestamp": time.time(),
-                "usage": usage,
-            },
-        }
-
     def _calculate_cost(self, response) -> dict[str, float]:
         try:
             cost = litellm.cost_calculator.completion_cost(response, model=self.config.model_name)

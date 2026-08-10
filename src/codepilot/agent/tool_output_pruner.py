@@ -17,6 +17,13 @@ VISIBLE_METADATA_KEYS = {
     "timed_out",
     "path",
     "changed_files",
+    "test_status",
+    "tests",
+    "diff_checked",
+    "missing_evidence",
+    "scope_violation_files",
+    "error",
+    "patch_artifact_id",
     "changed_count",
     "staged",
     "clean",
@@ -57,6 +64,9 @@ class ToolOutputPruner:
             "replace_range": ("write", _write),
             "apply_patch": ("write", _write),
             "write_file": ("write", _write),
+            "wait_agent": ("agent_control", _agent_control),
+            "list_agents": ("agent_list", _agent_list),
+            "inspect_agent_patch": ("agent_patch", _agent_patch),
         }
         strategy, function = strategies.get(
             route_result.tool_name,
@@ -179,11 +189,41 @@ def _shrink_line_list(content: str, token_budget: int) -> str:
     return "\n".join(lines)
 
 
+def _pytest_diagnostic_lines(output: str) -> list[str]:
+    """Keep high-signal pytest failure evidence, especially actual/expected values.
+
+    ``run_tests`` already preserves pytest ``E ...`` assertion lines in its formatted
+    output.  The observation pruner must not throw those lines away just because they
+    do not contain the literal word ``error``.  Prefer assertion/value evidence first,
+    then traceback/location/failure markers.
+    """
+
+    assertion_lines: list[str] = []
+    context_lines: list[str] = []
+    for line in output.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(r"^E\s+", stripped) or re.match(r"^>\s*(?:assert|raise)\b", stripped):
+            assertion_lines.append(line)
+            continue
+        if (
+            "AssertionError" in line
+            or "Traceback" in line
+            or line.startswith("FAILED ")
+            or line.startswith("ERROR ")
+            or re.search(r"(?:^|\s)[^:\s]+\.py:\d+(?::|$)", stripped)
+        ):
+            context_lines.append(line)
+
+    return _deduplicate([*assertion_lines, *context_lines])
+
+
 def _tests(route: ToolRouteResult, budget: int) -> tuple[str, dict[str, Any]]:
     metadata = route.result.metadata
     output = route.result.output
     failed = _values(metadata.get("failed_tests"))
-    error_lines = [line for line in output.splitlines() if re.search(r"(error|failed|failure|assertionerror|traceback)", line, re.I)]
+    diagnostics = _pytest_diagnostic_lines(output)
     summaries = [line for line in output.splitlines()[-80:] if re.search(r"\b(\d+ (failed|passed|error|skipped)|failed in|passed in)\b", line, re.I)]
     lines = _base(route)
     _field(lines, "Command", metadata.get("command"))
@@ -191,8 +231,8 @@ def _tests(route: ToolRouteResult, budget: int) -> tuple[str, dict[str, Any]]:
     _field(lines, "Return code", metadata.get("returncode"))
     if failed:
         lines.extend(("Failed tests:", *(f"- {item}" for item in failed)))
-    if error_lines:
-        lines.extend(("Key error:", *_bounded_lines(error_lines[:12], budget // 3)))
+    if diagnostics:
+        lines.extend(("Failure diagnostics:", *_bounded_lines(diagnostics[:24], max(160, budget // 2))))
     if summaries:
         lines.extend(("Final summary:", summaries[-1]))
     elif route.result.output_summary:
@@ -301,6 +341,126 @@ def _write(route: ToolRouteResult, budget: int) -> tuple[str, dict[str, Any]]:
     for key in ("changed", "changed_files", "touched_paths", "path", "patch_hash"):
         _field(lines, key, metadata.get(key))
     return _limit("\n".join(lines), budget), {key: metadata.get(key) for key in ("changed", "changed_files", "touched_paths", "path", "patch_hash")}
+
+
+def _agent_control(route: ToolRouteResult, budget: int) -> tuple[str, dict[str, Any]]:
+    metadata = route.result.metadata
+    lines = _base(route)
+    for key, label in (
+        ("agent_id", "Agent id"),
+        ("agent_type", "Agent type"),
+        ("status", "Status"),
+        ("test_status", "Test status"),
+        ("tests", "Tests"),
+        ("diff_checked", "Diff checked"),
+        ("changed_files", "Changed files"),
+        ("patch_artifact_id", "Patch artifact"),
+        ("missing_evidence", "Missing evidence"),
+        ("scope_violation_files", "Scope violation files"),
+        ("error", "Error"),
+    ):
+        _field(lines, label, metadata.get(key))
+    result = metadata.get("result")
+    if isinstance(result, str) and result.strip():
+        lines.extend(("Child result:", result.strip()))
+    return _limit("\n".join(lines), budget), {
+        key: metadata.get(key)
+        for key in (
+            "agent_id",
+            "agent_type",
+            "status",
+            "test_status",
+            "tests",
+            "diff_checked",
+            "changed_files",
+            "patch_artifact_id",
+            "missing_evidence",
+            "scope_violation_files",
+            "error",
+        )
+    }
+
+
+def _agent_list(route: ToolRouteResult, budget: int) -> tuple[str, dict[str, Any]]:
+    metadata = route.result.metadata
+    raw_agents = metadata.get("agents")
+    agents = [item for item in raw_agents if isinstance(item, dict)] if isinstance(raw_agents, list) else []
+
+    lines = _base(route)
+    running_count = sum(1 for item in agents if item.get("status") == "running")
+    waiting_count = sum(1 for item in agents if item.get("status") == "waiting_permission")
+    lines.append(f"Agent count: {len(agents)}")
+    lines.append(f"Running agents: {running_count}")
+    if waiting_count:
+        lines.append(f"Waiting-permission agents: {waiting_count}")
+
+    if agents:
+        lines.append("Agents:")
+        for item in agents:
+            agent_id = item.get("agent_id") or item.get("child_session_id") or "unknown"
+            agent_type = item.get("agent_type") or "unknown"
+            status = item.get("status") or "unknown"
+            write_scope = item.get("write_scope")
+            parts = [f"{agent_id}", f"type={agent_type}", f"status={status}"]
+            if isinstance(write_scope, list):
+                parts.append(f"write_scope={write_scope}")
+            test_status = item.get("test_status")
+            if test_status:
+                parts.append(f"test_status={test_status}")
+            changed_files = item.get("changed_files")
+            if isinstance(changed_files, list) and changed_files:
+                parts.append(f"changed_files={changed_files}")
+            patch_artifact_id = item.get("patch_artifact_id")
+            if patch_artifact_id:
+                parts.append(f"patch_artifact={patch_artifact_id}")
+            error = item.get("error")
+            if error:
+                parts.append(f"error={error}")
+            lines.append("- " + " | ".join(parts))
+
+    compact_agents = [
+        {
+            key: item.get(key)
+            for key in (
+                "agent_id",
+                "agent_type",
+                "status",
+                "write_scope",
+                "test_status",
+                "changed_files",
+                "patch_artifact_id",
+                "scope_violation_files",
+                "error",
+            )
+            if item.get(key) not in (None, [], "")
+        }
+        for item in agents
+    ]
+    return _limit("\n".join(lines), budget), {
+        "agent_count": len(agents),
+        "running_count": running_count,
+        "waiting_permission_count": waiting_count,
+        "agents": compact_agents,
+    }
+
+
+def _agent_patch(route: ToolRouteResult, budget: int) -> tuple[str, dict[str, Any]]:
+    metadata = route.result.metadata
+    lines = _base(route)
+    for key, label in (
+        ("agent_id", "Agent id"),
+        ("artifact_id", "Artifact id"),
+        ("changed_files", "Changed files"),
+        ("patch_truncated", "Patch truncated"),
+    ):
+        _field(lines, label, metadata.get(key))
+    preview = metadata.get("patch_preview")
+    if isinstance(preview, str) and preview:
+        lines.extend(("Patch preview:", preview))
+    return _limit("\n".join(lines), budget), {
+        key: metadata.get(key)
+        for key in ("agent_id", "artifact_id", "changed_files", "patch_truncated")
+    }
 
 
 def _mcp(route: ToolRouteResult, budget: int) -> tuple[str, dict[str, Any]]:

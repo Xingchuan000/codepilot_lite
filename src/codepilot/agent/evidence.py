@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import shlex
+from pathlib import Path
 from dataclasses import dataclass
 from typing import Literal
 
@@ -66,12 +68,55 @@ class EvidenceSnapshot:
         }
 
 
-def shell_command_may_write(command: str) -> bool:
+def _shell_redirection_targets(command: str) -> tuple[str, ...]:
+    """Extract simple shell output-redirection targets.
+
+    File-descriptor duplication such as ``2>&1`` is intentionally ignored because
+    it does not create a new filesystem target by itself. Unknown/relative targets
+    remain conservative and are treated as possible repository writes.
+    """
+
+    targets: list[str] = []
+    for match in re.finditer(r"(?:^|\s)\d*>>?\s*([^\s;|]+)", command):
+        target = match.group(1).strip()
+        if not target or target.startswith("&"):
+            continue
+        targets.append(target)
+    return tuple(targets)
+
+
+def _redirection_may_write_repo(target: str, repo: str | Path | None) -> bool:
+    if target == "/dev/null":
+        return False
+    # Shell variables, command substitutions and relative paths cannot be proven
+    # outside the repository, so keep the historical conservative behavior.
+    if target.startswith(("$", "`", "$(")) or not Path(target).is_absolute():
+        return True
+    if repo is None:
+        return True
+    repo_root = Path(repo).expanduser().resolve()
+    try:
+        Path(target).expanduser().resolve().relative_to(repo_root)
+    except ValueError:
+        return False
+    return True
+
+
+def shell_command_may_write(command: str, *, repo: str | Path | None = None) -> bool:
+    """Return whether a shell command may modify the current repository.
+
+    The evidence gate cares about repository delivery, not arbitrary process-local
+    side effects. Redirecting pytest output to ``/tmp`` or ``/dev/null`` therefore
+    must not turn a read-only Primary verification step into a code-write task.
+    """
+
     text = command.strip()
     if not text:
         return False
-    if ">>" in text or ">" in text:
+
+    if any(_redirection_may_write_repo(target, repo) for target in _shell_redirection_targets(text)):
         return True
+
     try:
         tokens = shlex.split(text)
     except ValueError:

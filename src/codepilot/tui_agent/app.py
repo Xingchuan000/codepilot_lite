@@ -60,7 +60,7 @@ def create_tui_agent_app(
     model_config: list[str] | None = None,
     permission_mode: PermissionMode | None = None,
     mcp_config: str | Path | None = None,
-    fake_actions: str | Path | None = None,
+    fake_responses: str | Path | None = None,
     max_steps: int | None = None,
     session_database: SessionDatabase | None = None,
 ):
@@ -98,7 +98,7 @@ def create_tui_agent_app(
             model=merged.model,
             model_config=tuple(model_config or []),
             permission_mode=merged.permission_mode,
-            fake_actions=fake_actions,
+            fake_responses=fake_responses,
             mcp_config=merged.mcp_config,
             max_steps=merged.max_steps,
         ),
@@ -150,6 +150,7 @@ def create_tui_agent_app(
             self._shown_branch_confirmations: set[tuple[str, str | None, str | None, str]] = set()
             self._recovery_scan_pending = False
             self._rendered_transcript_ids: set[str] = set()
+            self._transcript_dom_reset_pending = False
             self._session_generation = 0
             self._auto_scroll = True
             self._last_top_status_text: str | None = None
@@ -211,7 +212,7 @@ def create_tui_agent_app(
             if self.session is None:
                 raise ValueError("请先在 Session Picker 中打开或新建 Session")
             identity = resolve_codepilot_model_identity(
-                fake_actions=None,
+                fake_responses=None,
                 model=model_name,
                 model_config=list(self.runner.config.model_config),
             )
@@ -441,12 +442,20 @@ def create_tui_agent_app(
 
             transcript_panel = self.query_one("#transcript", VerticalScroll)
             if hasattr(transcript_panel, "remove_children"):
+                self._transcript_dom_reset_pending = True
                 transcript_panel.remove_children()
             elif hasattr(transcript_panel, "clear"):
                 transcript_panel.clear()
             elif hasattr(transcript_panel, "mounted"):
                 transcript_panel.mounted.clear()
             self._rendered_transcript_ids.clear()
+
+        def _complete_transcript_dom_reset(self, generation: int) -> None:
+            if generation != self._session_generation:
+                return
+            self._transcript_dom_reset_pending = False
+            self._rendered_transcript_ids.clear()
+            self._append_new_transcript_items(generation)
 
         def _bind_session(self, selected_session, *, read_only: bool) -> None:
             """让 App、Runner 和输入状态同时切换到同一个 SQLite Session。"""
@@ -467,10 +476,11 @@ def create_tui_agent_app(
             hydrated = hydrate_session_view(self._session_controller.store, selected_session.session_id)
             self._reset_session_view(hydrated)
             if hasattr(self, "call_after_refresh"):
-                self.call_after_refresh(lambda: self._append_new_transcript_items(generation))
+                self.call_after_refresh(self._complete_transcript_dom_reset, generation)
                 self._refresh_top_status()
                 self._refresh_side_status()
             else:
+                self._transcript_dom_reset_pending = False
                 self._append_new_transcript_items(generation)
                 self._refresh_top_status()
                 self._refresh_side_status()
@@ -494,6 +504,8 @@ def create_tui_agent_app(
 
         def _append_new_transcript_items(self, generation: int | None = None) -> None:
             if generation is not None and generation != self._session_generation:
+                return
+            if self._transcript_dom_reset_pending:
                 return
             panel = self.query_one("#transcript", VerticalScroll)
             should_auto_scroll = self._auto_scroll and getattr(panel, "is_vertical_scroll_end", True)

@@ -1,12 +1,51 @@
 from pathlib import Path
 
-from codepilot.llm.types import ChatMessage
+from codepilot.llm.types import ChatMessage, ChatMessagePart, RichChatMessage
 from codepilot.memory.turn_window import TurnContextWindow
 from codepilot.session.context_audit import ContextAuditRepository
 from codepilot.session.context_budget import ContextItem, estimate_tokens
 from codepilot.session.database import SCHEMA_VERSION, SessionDatabase
 from codepilot.session.model_capabilities import ModelContextProfile
 from codepilot.session.store import SessionStore
+
+
+def _native_exchange(tool_name: str, provider_tool_call_id: str, arguments: dict, content: str) -> tuple[RichChatMessage, RichChatMessage]:
+    return (
+        RichChatMessage(
+            role="assistant",
+            parts=(
+                ChatMessagePart(
+                    type="tool_call",
+                    content={
+                        "provider_tool_call_id": provider_tool_call_id,
+                        "tool_name": tool_name,
+                        "arguments": arguments,
+                    },
+                ),
+            ),
+        ),
+        RichChatMessage(
+            role="tool",
+            parts=(
+                ChatMessagePart(
+                    type="tool_result",
+                    content={
+                        "provider_tool_call_id": provider_tool_call_id,
+                        "tool_name": tool_name,
+                        "content": content,
+                    },
+                ),
+            ),
+        ),
+    )
+
+
+def _store_native_exchange(store: SessionStore, session_id: str, turn_id: str, exchange: tuple[RichChatMessage, RichChatMessage]) -> None:
+    assistant, tool = exchange
+    assistant_record = store.create_message(session_id=session_id, turn_id=turn_id, role="assistant", status="completed", content="")
+    store.append_message_part(assistant_record.message_id, type="tool_call", content=assistant.parts[0].content)
+    tool_record = store.create_message(session_id=session_id, turn_id=turn_id, role="tool", status="completed", content=tool.parts[0].content["content"])
+    store.append_message_part(tool_record.message_id, type="tool_result", content=tool.parts[0].content)
 
 
 def test_turn_compaction_records_small_redacted_audit_snapshot(tmp_path: Path) -> None:
@@ -18,11 +57,9 @@ def test_turn_compaction_records_small_redacted_audit_snapshot(tmp_path: Path) -
     store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="user", status="completed", content="inspect")
     dynamic = []
     for index in range(4):
-        assistant = ChatMessage("assistant", f'{{"type":"tool_call","tool_name":"read_file","arguments":{{"path":"{index}.py"}}}}')
-        observation = ChatMessage("user", f"Tool: read_file\nOutput: token=secret-value-{index}\n" + "x" * 1200)
-        dynamic.extend((assistant, observation))
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content=assistant.content)
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content=observation.content)
+        exchange = _native_exchange("read_file", f"provider-{index}", {"path": f"{index}.py"}, f"token=secret-value-{index}\n" + "x" * 1200)
+        dynamic.extend(exchange)
+        _store_native_exchange(store, session.session_id, turn.turn_id, exchange)
     TurnContextWindow(database, ModelContextProfile("openai", "tiny", 700, False, protocol_overhead_tokens=0), soft_limit=0.4, recent_group_count=1).prepare_for_llm(
         session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=5,
         messages=[ChatMessage("system", "system"), ChatMessage("user", "inspect"), *dynamic], base_message_count=2, task="inspect", evidence={},
@@ -61,11 +98,9 @@ def test_turn_snapshot_preserves_selected_memory_instruction_and_summary_sources
     )
     dynamic = []
     for index in range(4):
-        assistant = ChatMessage("assistant", f"call-{index}")
-        observation = ChatMessage("user", "Tool: read_file\n" + "x" * 1000)
-        dynamic.extend((assistant, observation))
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="assistant", status="completed", content=assistant.content)
-        store.create_message(session_id=session.session_id, turn_id=turn.turn_id, role="tool", status="completed", content=observation.content)
+        exchange = _native_exchange("read_file", f"provider-{index}", {"path": f"{index}.py"}, "x" * 1000)
+        dynamic.extend(exchange)
+        _store_native_exchange(store, session.session_id, turn.turn_id, exchange)
 
     TurnContextWindow(database, ModelContextProfile("openai", "tiny", 1000, False, protocol_overhead_tokens=0), soft_limit=0.5, recent_group_count=1).prepare_for_llm(
         session_id=session.session_id, turn_id=turn.turn_id, attempt_id=None, step=5,

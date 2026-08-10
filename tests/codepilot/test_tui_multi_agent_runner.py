@@ -30,7 +30,7 @@ def _runner(tmp_path: Path) -> tuple[TUIAgentRunner, SessionController, str]:
             model=None,
             model_config=(),
             permission_mode="manual",
-            fake_actions=Path("tests/codepilot/fixtures/agent_actions_success.jsonl"),
+            fake_responses=Path("tests/codepilot/fixtures/agent_responses_success.jsonl"),
             mcp_config=None,
             max_steps=1,
         ),

@@ -6,13 +6,12 @@ from typing import Any, Literal
 
 from codepilot.common.serialization import to_jsonable
 
-
 SessionStatus = Literal["active", "archived"]
 TurnStatus = Literal["queued", "running", "waiting_permission", "recovery_required", "completed", "failed", "cancelled", "interrupted"]
 AttemptStatus = Literal["created", "running", "completed", "failed", "cancelled", "interrupted"]
 MessageStatus = Literal["in_progress", "completed", "interrupted", "failed"]
 MessageRole = Literal["system", "user", "assistant", "tool"]
-MessagePartType = Literal["text", "reasoning", "tool_call", "tool_result", "approval", "summary", "system_event", "error"]
+MessagePartType = Literal["text", "reasoning", "reasoning_replay", "tool_call", "tool_result", "approval", "summary", "system_event", "error"]
 ToolCallStatus = Literal[
     "created",
     "approval_pending",

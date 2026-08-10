@@ -3,7 +3,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import LLMResponse, LLMToolCall
 from codepilot.multi_agent.profiles import EXPLORE_PROFILE, GENERAL_PROFILE
 from codepilot.multi_agent.runtime_tools import AgentControlContext, build_agent_control_registry
 from codepilot.multi_agent.supervisor import AgentSupervisor
@@ -37,10 +38,10 @@ def _session(tmp_path: Path) -> tuple[SessionDatabase, SessionService, str, Path
 
 def test_session_runtime_binds_explore_profile_to_prompt_and_router(tmp_path: Path) -> None:
     database, service, session_id, repo = _session(tmp_path)
-    llm = FakeLLMClient(
+    llm = StructuredFakeLLM(
         [
-            '{"type":"tool_call","tool_name":"run_shell","arguments":{"command":"echo hidden"}}',
-            "done",
+            LLMResponse(content="", tool_calls=(LLMToolCall(provider_tool_call_id="provider-1", name="run_shell", arguments={"command": "echo hidden"}),)),
+            LLMResponse(content="done"),
         ]
     )
 
@@ -58,16 +59,16 @@ def test_session_runtime_binds_explore_profile_to_prompt_and_router(tmp_path: Pa
     execution = runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
 
     assert execution.result.status == "message_complete"
-    assert "- name: run_shell" not in str(llm.calls[0][0].content)
+    assert "- name: run_shell" not in str(llm.calls[0]["messages"][0].content)
     assert service.store.list_tool_calls(session_id)[0].status == "denied"
 
 
 def test_session_runtime_general_writer_carries_write_scope_to_policy(tmp_path: Path) -> None:
     database, service, session_id, repo = _session(tmp_path)
-    llm = FakeLLMClient(
+    llm = StructuredFakeLLM(
         [
-            '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"README.md","start_line":1,"end_line":1,"replacement":"unsafe\\n"}}',
-            "done",
+            LLMResponse(content="", tool_calls=(LLMToolCall(provider_tool_call_id="provider-2", name="replace_range", arguments={"path": "README.md", "start_line": 1, "end_line": 1, "replacement": "unsafe\n"}),)),
+            LLMResponse(content="done"),
         ]
     )
 
@@ -95,10 +96,10 @@ def test_session_runtime_general_writer_carries_write_scope_to_policy(tmp_path: 
 
 def test_session_runtime_general_writer_enforces_scope_without_policy_checker(tmp_path: Path) -> None:
     database, service, session_id, repo = _session(tmp_path)
-    llm = FakeLLMClient(
+    llm = StructuredFakeLLM(
         [
-            '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"README.md","start_line":1,"end_line":1,"replacement":"unsafe\\n"}}',
-            "done",
+            LLMResponse(content="", tool_calls=(LLMToolCall(provider_tool_call_id="provider-3", name="replace_range", arguments={"path": "README.md", "start_line": 1, "end_line": 1, "replacement": "unsafe\n"}),)),
+            LLMResponse(content="done"),
         ]
     )
 
@@ -120,10 +121,10 @@ def test_session_runtime_general_writer_enforces_scope_without_policy_checker(tm
 def test_session_runtime_injects_primary_agent_controls_as_runtime_tools(tmp_path: Path) -> None:
     database, service, session_id, repo = _session(tmp_path)
     supervisor = AgentSupervisor(database=database, child_runtime_factory=lambda _: None)
-    llm = FakeLLMClient(
+    llm = StructuredFakeLLM(
         [
-            '{"type":"tool_call","tool_name":"list_agents","arguments":{}}',
-            "done",
+            LLMResponse(content="", tool_calls=(LLMToolCall(provider_tool_call_id="provider-4", name="list_agents", arguments={}),)),
+            LLMResponse(content="done"),
         ]
     )
 
@@ -143,5 +144,5 @@ def test_session_runtime_injects_primary_agent_controls_as_runtime_tools(tmp_pat
     execution = runtime.run_turn(submission.turn.turn_id, submission.attempt.attempt_id)
 
     assert execution.result.status == "message_complete"
-    assert "list_agents" in str(llm.calls[0][0].content)
+    assert "list_agents" in {spec.name for spec in llm.calls[0]["tools"]}
     assert '"agents": []' in (service.store.list_tool_results(session_id)[0].content or "")

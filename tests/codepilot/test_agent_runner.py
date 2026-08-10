@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
-from codepilot.agent.runner import run_agent_task
+import pytest
+
+from codepilot.agent.runner import (
+    ModelConfigurationRequired,
+    build_codepilot_llm,
+    resolve_litellm_config,
+    run_agent_task,
+)
 
 
 def _write_bug_repo(tmp_path: Path) -> Path:
@@ -24,14 +32,14 @@ def _write_bug_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def test_run_agent_task_with_fake_actions_fixes_demo_repo(tmp_path: Path) -> None:
+def test_run_agent_task_with_fake_responses_fixes_demo_repo(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = run_agent_task(
         task="Fix the failing add test",
         repo=repo,
-        fake_actions=fixture,
+        fake_responses=fixture,
         approve=True,
         policy_mode="build",
         runs_dir=tmp_path / "runs",
@@ -46,12 +54,12 @@ def test_run_agent_task_with_fake_actions_fixes_demo_repo(tmp_path: Path) -> Non
 
 def test_run_agent_task_read_only_does_not_modify_file(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = run_agent_task(
         task="Fix the failing add test",
         repo=repo,
-        fake_actions=fixture,
+        fake_responses=fixture,
         policy_mode="read_only",
         runs_dir=tmp_path / "runs",
         run_id="run-test",
@@ -61,25 +69,58 @@ def test_run_agent_task_read_only_does_not_modify_file(tmp_path: Path) -> None:
     assert (repo / "src" / "calc.py").read_text(encoding="utf-8") == "def add(a, b):\n    return a - b\n"
 
 
-def test_run_agent_task_uses_swe_adapter_when_fake_actions_missing(tmp_path: Path, monkeypatch) -> None:
-    repo = _write_bug_repo(tmp_path)
-    calls = []
+def test_native_model_rejects_drop_params(monkeypatch) -> None:
+    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
 
-    class FakeModel:
-        def query_without_default_tools(self, messages):
-            calls.append(messages)
-            return {"role": "assistant", "content": '{"type":"finish","status":"partial","summary":"done"}'}
+    with pytest.raises(ModelConfigurationRequired, match="drop_params=true"):
+        build_codepilot_llm(
+            model="openai/gpt-4o-mini",
+            model_config=["model.model_kwargs.drop_params=true"],
+        )
 
-    monkeypatch.setattr("codepilot.agent.runner.get_model", lambda config=None: FakeModel())
 
-    result = run_agent_task(
-        task="Inspect calc",
-        repo=repo,
-        model_config=['model.model_class="deterministic"'],
-        runs_dir=tmp_path / "runs",
-        run_id="run-test",
+def test_native_model_fails_fast_when_function_calling_is_unsupported(monkeypatch) -> None:
+    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: False)
+
+    with pytest.raises(ModelConfigurationRequired, match="does not support native function calling"):
+        build_codepilot_llm(model="unsupported/model")
+
+
+def test_native_model_is_constructed_from_litellm_config(monkeypatch) -> None:
+    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
+    config = resolve_litellm_config(
+        model=None,
+        model_config=["model.model_name=openai/gpt-4o-mini", "model.model_kwargs.temperature=0.2"],
+        environ={},
     )
 
-    assert result.status == "partial"
-    assert result.success is False
-    assert len(calls) == 1
+    built = build_codepilot_llm(model="openai/gpt-4o-mini", model_config=["model.model_kwargs.temperature=0.2"])
+
+    assert config.model_name == "openai/gpt-4o-mini"
+    assert config.model_kwargs == {"temperature": 0.2}
+    assert built.client.__class__.__name__ == "LiteLLMNativeClient"
+
+
+def test_native_model_loads_minisweagent_global_config(monkeypatch, tmp_path: Path) -> None:
+    config_file = tmp_path / ".env"
+    config_file.write_text("CODEPILOT_TEST_API_KEY=from-minisweagent\n", encoding="utf-8")
+    monkeypatch.delenv("CODEPILOT_TEST_API_KEY", raising=False)
+    monkeypatch.setattr("minisweagent.global_config_file", config_file)
+    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
+
+    build_codepilot_llm(model="openai/gpt-4o-mini")
+
+    assert os.getenv("CODEPILOT_TEST_API_KEY") == "from-minisweagent"
+
+
+@pytest.mark.parametrize(
+    ("model_name",),
+    [("openai/test-model",), ("anthropic/test-model",), ("gemini/test-model",), ("deepseek/test-model",)],
+)
+def test_provider_matrix_builds_the_same_native_client(monkeypatch, model_name: str) -> None:
+    monkeypatch.setattr("codepilot.agent.runner.litellm.supports_function_calling", lambda model: True)
+
+    built = build_codepilot_llm(model=model_name)
+
+    assert built.client.__class__.__name__ == "LiteLLMNativeClient"
+    assert built.model == model_name

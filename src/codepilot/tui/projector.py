@@ -96,8 +96,6 @@ def event_to_timeline_row(event: dict[str, Any], *, max_text_chars: int = 500) -
     elif event_type == "agent_action":
         metadata_out = {
             "action_type": metadata.get("action_type"),
-            "parse_success": metadata.get("parse_success"),
-            "normalization_applied": metadata.get("normalization_applied"),
         }
     else:
         metadata_out = redact_value({key: value for key, value in metadata.items() if key != "input"}, max_string_chars=max_text_chars)

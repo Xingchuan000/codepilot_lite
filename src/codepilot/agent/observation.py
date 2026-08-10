@@ -115,33 +115,6 @@ def format_pruned_observation(route_result: ToolRouteResult, pruned: PrunedToolO
     return pruned.content
 
 
-def format_parse_error_observation(error: Exception) -> str:
-    """把动作解析错误转成更具体的修正提示。"""
-
-    norm_meta = getattr(error, "normalization_metadata", {}) or {}
-    non_standard_fields = norm_meta.get("non_standard_fields", [])
-    normalized_fields = norm_meta.get("normalized_fields", {})
-    lines = [
-        "Action parse failed.",
-        f"Reason: {error}",
-    ]
-    if non_standard_fields:
-        lines.append("Your previous action used non-standard fields: " + ", ".join(str(item) for item in non_standard_fields) + ".")
-    if normalized_fields:
-        lines.append(f"I attempted to normalize these fields: {normalized_fields}.")
-    lines.extend(
-        [
-            "普通回复可以直接用自然文本。",
-            "只有调用工具或提交结构化 finish 时，才需要输出单个 JSON 对象。",
-            "Use exactly this format for tool calls:",
-            '{"type":"tool_call","tool_name":"list_files","arguments":{"path":"."}}',
-            'For finish, use exactly: {"type":"finish","status":"success","summary":"...","tests":"...","changed_files":[]}',
-            "Return one JSON object only. Do not use Markdown.",
-        ]
-    )
-    return "\n".join(lines)
-
-
 def format_finish_blocked_observation(
     *,
     missing_evidence: list[str],
@@ -168,9 +141,16 @@ def format_finish_blocked_observation(
         [
             "Before finishing successfully:",
             '1. Make sure the real file changes have been executed, not just declared in finish.changed_files.',
-            '2. Call run_tests with a passing command, for example {"type":"tool_call","tool_name":"run_tests","arguments":{"command":"python -m pytest tests/","timeout":30}}',
+            "2. Call run_tests with a passing command.",
             "3. Call git_diff to confirm the final diff.",
-            '4. Then return finish with status=success.',
+            "4. Then call codepilot_finish with status=success.",
         ]
     )
     return "\n".join(lines)
+
+
+def format_finish_required_observation() -> str:
+    return (
+        "The repository task has made or attempted a write. "
+        "Do not end with natural text; call codepilot_finish after completing the required validation."
+    )

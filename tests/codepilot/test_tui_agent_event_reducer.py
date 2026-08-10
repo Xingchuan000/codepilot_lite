@@ -51,55 +51,38 @@ def test_user_message_is_not_deduplicated_across_rounds() -> None:
     assert view.transcript[1].kind == "user_message"
 
 
-def test_llm_call_finished_json_creates_plan_only_until_real_tool_action_arrives() -> None:
+def test_llm_call_finished_natural_reply_creates_plan_only() -> None:
     reducer = EventReducer()
 
-    planned = reducer.reduce(
+    view = reducer.reduce(
         TUIEvent(
             type="llm_call_finished",
             timestamp="2024-01-01T00:00:01Z",
             run_id="run-1",
             payload={
-                "output_preview": '{"short_rationale":"先检查结构","tool_name":"list_files","arguments":{"path":".","max_depth":2}}'
-            },
-        )
-    )
-    view = reducer.reduce(
-        TUIEvent(
-            type="agent_action",
-            timestamp="2024-01-01T00:00:02Z",
-            run_id="run-1",
-            payload={
-                "tool_name": "list_files",
-                "input_preview": {"path": ".", "max_depth": 2},
-                "action_type": "tool_call",
-                "parse_success": True,
-                "step": 2,
+                "output_preview": "先检查结构，再继续处理。"
             },
         )
     )
 
-    assert _transcript_kinds(planned) == ("assistant_plan",)
-    assert _transcript_kinds(view) == ("assistant_plan", "assistant_action")
-    assert view.transcript[1].body == 'list_files {"max_depth": 2, "path": "."}'
-    assert len(view.timeline) == 1
-    assert view.current_tool == "list_files"
-    assert view.active_tool == "list_files"
+    assert _transcript_kinds(view) == ()
+    assert view.last_assistant_message == "先检查结构，再继续处理。"
+    assert view.timeline == ()
 
 
-def test_llm_call_finished_non_json_waits_for_agent_finish() -> None:
+def test_llm_call_finished_keeps_natural_reply_until_agent_finish() -> None:
     reducer = EventReducer()
 
     view = reducer.reduce(
         TUIEvent(
             type="llm_call_finished",
             timestamp="2024-01-01T00:00:00Z",
-            payload={"output_preview": "not json"},
+            payload={"output_preview": "普通回复"},
         )
     )
 
     assert _transcript_kinds(view) == ()
-    assert view.last_assistant_message == "not json"
+    assert view.last_assistant_message == "普通回复"
 
 
 def test_long_natural_reply_is_not_truncated_in_transcript_body() -> None:
@@ -118,28 +101,28 @@ def test_long_natural_reply_is_not_truncated_in_transcript_body() -> None:
     assert view.last_assistant_message == text
 
 
-def test_llm_call_finished_finish_json_does_not_prematurely_create_final_summary() -> None:
+def test_llm_call_finished_does_not_prematurely_create_final_summary() -> None:
     reducer = EventReducer()
 
     view = reducer.reduce(
         TUIEvent(
             type="llm_call_finished",
             timestamp="2024-01-01T00:00:00Z",
-            payload={"output_preview": '{"type":"finish","status":"success","summary":"done"}'},
+            payload={"output_preview": "完成"},
         )
     )
 
     assert _transcript_kinds(view) == ()
 
 
-def test_llm_call_finished_json_without_short_rationale_skips_empty_plan() -> None:
+def test_llm_call_finished_does_not_create_plan_from_text() -> None:
     reducer = EventReducer()
 
     view = reducer.reduce(
         TUIEvent(
             type="llm_call_finished",
             timestamp="2024-01-01T00:00:00Z",
-            payload={"output_preview": '{"tool_name":"list_files","arguments":{"path":".","max_depth":2}}'},
+            payload={"output_preview": "检查文件"},
         )
     )
 
@@ -476,14 +459,7 @@ def test_complete_event_sequence_has_no_duplicate_lifecycle_messages() -> None:
     reducer = EventReducer()
 
     view = reducer.reduce(TUIEvent(type="run_started", timestamp="2024-01-01T00:00:00Z", payload={"task": "修复问题", "trace_path": "runs/run-1/trace.jsonl"}))
-    view = reducer.reduce(TUIEvent(type="llm_call_finished", timestamp="2024-01-01T00:00:01Z", payload={"output_preview": '{"short_rationale":"先检查结构"}'}))
-    view = reducer.reduce(
-        TUIEvent(
-            type="agent_action",
-            timestamp="2024-01-01T00:00:02Z",
-            payload={"tool_name": "list_files", "input_preview": {"path": ".", "max_depth": 2}, "action_type": "tool_call", "parse_success": True, "step": 2},
-        )
-    )
+    view = reducer.reduce(TUIEvent(type="llm_call_finished", timestamp="2024-01-01T00:00:01Z", payload={"output_preview": "开始检查结构"}))
     view = reducer.reduce(
         TUIEvent(
             type="tool_finished",
@@ -498,3 +474,36 @@ def test_complete_event_sequence_has_no_duplicate_lifecycle_messages() -> None:
     assert _transcript_kinds(view).count("system_status") <= 1
     assert _transcript_kinds(view).count("final_summary") == 1
     assert _transcript_kinds(view).count("assistant_raw") <= 1
+
+
+def test_approve_session_permission_is_rendered_as_approved_and_resumes_view() -> None:
+    reducer = EventReducer()
+    reducer.reduce(
+        TUIEvent(
+            type="permission_requested",
+            timestamp="2026-08-09T00:00:00+00:00",
+            payload={
+                "request_id": "perm-session",
+                "tool_name": "replace_range",
+                "reason": "child write",
+                "arguments_preview": {"path": "README.md"},
+            },
+        )
+    )
+
+    view = reducer.reduce(
+        TUIEvent(
+            type="permission_resolved",
+            timestamp="2026-08-09T00:00:01+00:00",
+            payload={
+                "request_id": "perm-session",
+                "decision": "approve_session",
+                "reason": "approved for session",
+            },
+        )
+    )
+
+    assert view.permission_requests[0].status == "approved"
+    assert view.status == "running"
+    assert view.transcript[-1].title == "Permission approved for session"
+    assert view.transcript[-1].status == "approved"

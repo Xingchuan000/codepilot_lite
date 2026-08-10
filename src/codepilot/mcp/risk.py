@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from typing import Any
 
 from codepilot.mcp.models import MCPServerConfig, MCPToolInfo, MCPToolSideEffectHint
 from codepilot.mcp.trace import build_codepilot_mcp_tool_name, build_mcp_config_hash, build_mcp_descriptor_hash
@@ -75,11 +74,6 @@ def _risk_and_permission(hint: MCPToolSideEffectHint) -> tuple[ToolRisk, ToolSid
     return mapping[hint]
 
 
-def _summarize_schema(schema: dict[str, Any], max_chars: int) -> str:
-    text = str(schema)
-    return text if len(text) <= max_chars else f"{text[: max(0, max_chars - len('... truncated'))]}... truncated"
-
-
 def classify_mcp_tool(tool: MCPToolInfo, *, server: MCPServerConfig) -> ToolSpec:
     descriptor_hash = tool.descriptor_hash or build_mcp_descriptor_hash(tool)
     config_hash = build_mcp_config_hash(server)
@@ -87,15 +81,16 @@ def classify_mcp_tool(tool: MCPToolInfo, *, server: MCPServerConfig) -> ToolSpec
     risk, side_effect, default_permission = _risk_and_permission(hint)
     codepilot_tool_name = build_codepilot_mcp_tool_name(server.name, tool.name)
     description = tool.description[: server.max_description_chars]
+    if tool.input_schema.get("type") != "object":
+        raise ValueError(f"MCP tool {tool.name!r} input_schema must have type 'object'")
     return ToolSpec(
         name=codepilot_tool_name,
         description=description,
         risk=risk,
         side_effect=side_effect,
         default_permission=default_permission,
-        parameters={
-            "mcp_input_schema": _summarize_schema(tool.input_schema, server.max_description_chars),
-        },
+        input_schema=dict(tool.input_schema),
+        parameters={},
         metadata={
             "source": "mcp",
             "mcp": True,

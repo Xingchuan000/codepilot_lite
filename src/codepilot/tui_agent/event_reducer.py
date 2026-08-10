@@ -40,15 +40,6 @@ def _make_item_id(event: TUIEvent, suffix: str) -> str:
     )
 
 
-def _make_action_item_id(event: TUIEvent, signature: str) -> str:
-    run_id = event.run_id or event.payload.get("run_id") or "run"
-    digest = hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
-    return "-".join(
-        _sanitize_identifier_segment(part)
-        for part in (run_id, "assistant_action", digest)
-    )
-
-
 def _make_user_message_item_id(event: TUIEvent, text: str) -> str:
     run_id = event.run_id or event.payload.get("run_id") or "run"
     signature = f"{event.timestamp}\n{text}"
@@ -139,23 +130,7 @@ def _reduce_user_message(view: AgentRunView, event: TUIEvent) -> AgentRunView:
 
 def _reduce_llm_call_finished(view: AgentRunView, event: TUIEvent) -> AgentRunView:
     text = str(event.payload.get("output_preview") or event.payload.get("output_summary") or "")
-    parsed = _parse_json_output(text)
-    if parsed is None:
-        # 这里只保留模型原始预览，真正的自然回复正文要等 agent_finished 再落到 transcript。
-        return replace(view, last_assistant_message=text or view.last_assistant_message)
-    if parsed.get("type") == "finish" or "summary" in parsed:
-        return replace(view, last_assistant_message=text or view.last_assistant_message)
-    if isinstance(parsed.get("short_rationale"), str) and parsed["short_rationale"].strip():
-        item = TranscriptItem(
-            id=_make_item_id(event, "assistant_plan"),
-            kind="assistant_plan",
-            timestamp=event.timestamp,
-            run_id=event.run_id or view.run_id,
-            title="+ Plan",
-            body=truncate_text(parsed["short_rationale"]),
-            copy_text=f"+ Plan: {parsed['short_rationale']}",
-        )
-        view = _append_transcript(replace(view, last_assistant_message=parsed["short_rationale"]), item)
+    # Native tool calls are represented by tool events; the LLM text itself stays raw here.
     return replace(view, last_assistant_message=text or view.last_assistant_message)
 
 
@@ -208,50 +183,6 @@ def _reduce_tool_finished(view: AgentRunView, event: TUIEvent) -> AgentRunView:
             test_status=test_status,
             active_tool=None,
             last_tool_output=str(body),
-            timeline=view.timeline + (item,),
-        ),
-        transcript_item,
-    )
-
-
-def _is_tool_call_action(payload: dict[str, Any]) -> bool:
-    if payload.get("action_type") != "tool_call":
-        return False
-    if payload.get("parse_success") is False:
-        return False
-    if payload.get("finish_blocked_by_evidence") is True:
-        return False
-    return isinstance(payload.get("tool_name"), str) and bool(str(payload["tool_name"]).strip())
-
-
-def _reduce_agent_action(view: AgentRunView, event: TUIEvent) -> AgentRunView:
-    payload = event.payload
-    if not _is_tool_call_action(payload):
-        return view
-    item = trace_payload_to_timeline_item(payload)
-    preview = payload.get("input_preview")
-    if not isinstance(preview, dict):
-        preview = {}
-    tool_name = str(payload.get("tool_name") or item.tool_name or "")
-    signature = json.dumps({"tool_name": tool_name, "arguments": preview}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    transcript_item = TranscriptItem(
-        id=_make_action_item_id(event, signature),
-        kind="assistant_action",
-        timestamp=event.timestamp,
-        run_id=event.run_id or view.run_id,
-        step=item.step,
-        title="→",
-        body=truncate_text(f"{tool_name} {json.dumps(preview, ensure_ascii=False, sort_keys=True)}"),
-        tool_name=tool_name,
-        input_preview=preview,
-        copy_text=f"→ {tool_name} {json.dumps(preview, ensure_ascii=False, sort_keys=True)}",
-    )
-    return _append_transcript(
-        replace(
-            view,
-            current_step=item.step,
-            current_tool=item.tool_name,
-            active_tool=item.tool_name,
             timeline=view.timeline + (item,),
         ),
         transcript_item,
@@ -317,13 +248,19 @@ def _reduce_permission_resolved(view: AgentRunView, event: TUIEvent) -> AgentRun
     if not request_id:
         return replace(view, warnings=view.warnings + ("permission_response_missing_id",))
     decision = event.payload.get("decision")
+    approved = decision in {"approve_once", "approve_session"}
     updated_requests = []
     for request in view.permission_requests:
         if request.request_id != request_id:
             updated_requests.append(request)
             continue
-        updated_requests.append(replace(request, status="approved" if decision == "approve_once" else "denied"))
-    title = "Permission approved once" if decision == "approve_once" else "Permission denied"
+        updated_requests.append(replace(request, status="approved" if approved else "denied"))
+    if decision == "approve_session":
+        title = "Permission approved for session"
+    elif decision == "approve_once":
+        title = "Permission approved once"
+    else:
+        title = "Permission denied"
     item = TranscriptItem(
         id=_make_item_id(event, f"permission_response:{request_id}"),
         kind="permission_response",
@@ -331,13 +268,19 @@ def _reduce_permission_resolved(view: AgentRunView, event: TUIEvent) -> AgentRun
         run_id=event.run_id or view.run_id,
         title=title,
         body=str(event.payload.get("reason") or ""),
-        status="approved" if decision == "approve_once" else "denied",
-        copy_text="✓ Approved once" if decision == "approve_once" else "✗ Denied",
+        status="approved" if approved else "denied",
+        copy_text=(
+            "✓ Approved for session"
+            if decision == "approve_session"
+            else "✓ Approved once"
+            if decision == "approve_once"
+            else "✗ Denied"
+        ),
     )
     return _append_transcript(
         replace(
             view,
-            status="running" if decision == "approve_once" else view.status,
+            status="running" if approved else view.status,
             permission_requests=tuple(updated_requests),
         ),
         item,
@@ -547,7 +490,7 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
     if event.type == "tool_finished":
         return _reduce_tool_finished(view, event)
     if event.type == "agent_action":
-        return _reduce_agent_action(view, event)
+        return view
     if event.type == "policy_decision":
         return _reduce_policy_decision(view, event)
     if event.type == "permission_requested":
@@ -584,17 +527,6 @@ def reduce_event(view: AgentRunView, event: TUIEvent) -> AgentRunView:
     }:
         return _reduce_agent_event(view, event)
     return view
-
-
-def _parse_json_output(text: str) -> dict[str, Any] | None:
-    stripped = text.strip()
-    if not stripped.startswith("{") or not stripped.endswith("}"):
-        return None
-    try:
-        parsed = json.loads(stripped)
-    except json.JSONDecodeError:
-        return None
-    return parsed if isinstance(parsed, dict) else None
 
 
 class EventReducer:

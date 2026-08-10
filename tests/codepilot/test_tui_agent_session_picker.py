@@ -15,13 +15,13 @@ from codepilot.tui_agent.model_picker import ModelPickerScreen
 from tests.codepilot.test_tui_agent_app_state import _install_fake_textual, _widgets
 
 
-FAKE_ACTIONS = Path(__file__).parent / "fixtures" / "tui_agent_actions_success.jsonl"
+FAKE_RESPONSES = Path(__file__).parent / "fixtures" / "tui_agent_responses_success.jsonl"
 
 
-def _app(tmp_path: Path, monkeypatch, *, fake_actions: Path | None = FAKE_ACTIONS):
+def _app(tmp_path: Path, monkeypatch, *, fake_responses: Path | None = FAKE_RESPONSES):
     _install_fake_textual(monkeypatch)
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=fake_actions, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=fake_responses, session_database=database)
     widgets = _widgets()
     app.query_one = lambda selector, _type=None: widgets[selector]  # type: ignore[method-assign]
     return app, database, widgets
@@ -54,7 +54,7 @@ def test_new_session_is_created_only_after_picker_result(tmp_path: Path, monkeyp
 
 def test_new_session_uses_minisweagent_default_model(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MSWEA_MODEL_NAME", "deepseek/deepseek-v4-flash")
-    app, database, _ = _app(tmp_path, monkeypatch, fake_actions=None)
+    app, database, _ = _app(tmp_path, monkeypatch, fake_responses=None)
 
     app._handle_session_picker_result(SessionPickerResult("new"))
 
@@ -74,7 +74,7 @@ def test_model_command_opens_read_only_model_picker(tmp_path: Path, monkeypatch)
 
 def test_new_session_without_model_keeps_picker_and_writes_no_session(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MSWEA_MODEL_NAME", "")
-    app, database, widgets = _app(tmp_path, monkeypatch, fake_actions=None)
+    app, database, widgets = _app(tmp_path, monkeypatch, fake_responses=None)
 
     app._handle_session_picker_result(SessionPickerResult("new"))
 
@@ -115,7 +115,7 @@ def test_missing_project_session_is_opened_read_only(tmp_path: Path, monkeypatch
 
 def test_real_textual_app_mounts_session_picker_before_creating_session(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=FAKE_ACTIONS, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -129,7 +129,7 @@ def test_real_textual_app_mounts_session_picker_before_creating_session(tmp_path
 
 def test_real_textual_picker_new_action_creates_one_session(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=FAKE_ACTIONS, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -146,7 +146,7 @@ def test_real_textual_picker_enter_opens_selected_session(tmp_path: Path) -> Non
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     database.initialize()
     session = SessionService(database).create_session(tmp_path, "fake", "fake", "manual")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=FAKE_ACTIONS, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -163,7 +163,7 @@ def test_real_textual_model_command_opens_model_picker(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     database.initialize()
     session = SessionService(database).create_session(tmp_path, "fake", "fake", "manual")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=FAKE_ACTIONS, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -205,7 +205,7 @@ def _seed_message(database: SessionDatabase, project: Path, text: str):
 def test_real_textual_missing_model_does_not_exit_or_create_session(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("MSWEA_MODEL_NAME", "")
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=None, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=None, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -224,7 +224,7 @@ def test_real_textual_missing_model_does_not_exit_or_create_session(tmp_path: Pa
 def test_real_textual_hydrates_history_and_does_not_duplicate_on_refresh(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     session = _seed_message(database, tmp_path, "历史消息 A")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=FAKE_ACTIONS, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -247,7 +247,7 @@ def test_real_textual_session_switch_replaces_transcript_without_cross_session_m
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     session_a = _seed_message(database, tmp_path, "消息 A")
     session_b = _seed_message(database, tmp_path, "消息 B")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=FAKE_ACTIONS, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -269,7 +269,7 @@ def test_real_textual_fast_session_switch_discards_delayed_old_render(tmp_path: 
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     session_a = _seed_message(database, tmp_path, "快速切换 A")
     session_b = _seed_message(database, tmp_path, "快速切换 B")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=FAKE_ACTIONS, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:
@@ -285,10 +285,40 @@ def test_real_textual_fast_session_switch_discards_delayed_old_render(tmp_path: 
     asyncio.run(check())
 
 
+def test_real_textual_archive_with_history_does_not_duplicate_transcript_widgets(tmp_path: Path) -> None:
+    database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
+    database.initialize()
+    first = SessionService(database).create_session(tmp_path, "fake", "fake", "manual")
+    second = _seed_message(database, tmp_path, "待归档历史消息")
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
+
+    async def check() -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.pop_screen()
+            app._activate_session(first.session_id)
+            await pilot.pause()
+            await pilot.click("#task-input")
+            await pilot.press(*"/archive")
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.session is not None
+            assert app.session.session_id == second.session_id
+            await pilot.click("#task-input")
+            await pilot.press(*"/archive")
+            await pilot.press("enter")
+            await pilot.pause()
+            assert isinstance(app.screen, SessionPickerScreen)
+
+    asyncio.run(check())
+
+
 def test_real_textual_new_event_is_mounted_once(tmp_path: Path) -> None:
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     session = _seed_message(database, tmp_path, "历史消息")
-    app = create_tui_agent_app(project=tmp_path, fake_actions=FAKE_ACTIONS, session_database=database)
+    app = create_tui_agent_app(project=tmp_path, fake_responses=FAKE_RESPONSES, session_database=database)
 
     async def check() -> None:
         async with app.run_test() as pilot:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+from codepilot.tools.base import ToolSpec
 
 
 @dataclass(frozen=True)
@@ -35,13 +38,29 @@ class RichChatMessage:
 
 
 @dataclass(frozen=True)
+class LLMToolCall:
+    provider_tool_call_id: str
+    name: str
+    arguments: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class LLMReasoningReplay:
+    provider_format: str
+    blocks: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class LLMResponse:
     """CodePilot 最小模型响应结构。"""
 
     content: str
+    tool_calls: tuple[LLMToolCall, ...] = ()
+    reasoning_replay: LLMReasoningReplay | None = None
     raw: dict[str, Any] = field(default_factory=dict)
     model: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
+    finish_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,5 +77,11 @@ class LLMStreamEvent:
 class CodePilotLLMClient(Protocol):
     """MinimalAgentLoop 依赖的最小 LLM 协议。"""
 
-    def complete(self, messages: list[ChatMessage | RichChatMessage]) -> LLMResponse:
+    def complete(
+        self,
+        messages: list[ChatMessage | RichChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        tool_choice: str = "auto",
+    ) -> LLMResponse:
         ...

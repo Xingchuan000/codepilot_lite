@@ -1,64 +1,64 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
-from codepilot.llm.types import ChatMessage, LLMResponse, RichChatMessage
+from codepilot.llm.types import ChatMessage, LLMResponse, LLMToolCall, RichChatMessage
+from codepilot.tools.base import ToolSpec
 
 
 class FakeLLMExhaustedError(RuntimeError):
     """Fake LLM 响应被消费完时抛出的异常。"""
 
 
-class FakeLLMClient:
-    """按固定脚本顺序返回响应的最小假模型。
+class StructuredFakeLLM:
+    """按固定顺序返回结构化 LLMResponse。"""
 
-    这个类只做计划要求的几件事：
-    1. 记录每次调用时收到的 messages。
-    2. 依次返回预先给定的文本。
-    3. 响应耗尽时抛出明确异常，方便 loop 测试覆盖。
-    """
-
-    def __init__(self, responses: list[str], *, model: str = "fake") -> None:
+    def __init__(self, responses: list[LLMResponse], *, model: str = "fake") -> None:
         self.responses = responses
         self.model = model
         self.index = 0
-        self.calls: list[list[ChatMessage | RichChatMessage]] = []
+        self.calls: list[dict[str, Any]] = []
 
     @classmethod
-    def from_jsonl(cls, path: str | Path) -> "FakeLLMClient":
-        """从 JSONL 文件加载假响应。
-
-        每一行既可以是原始文本，也可以是 JSON object。
-        如果 object 中带有字符串字段 content，则提取 content；
-        否则保留整行原样，这样可以直接把 action JSON object 当响应文本喂给 loop。
-        """
-
-        responses: list[str] = []
+    def from_jsonl(cls, path: str | Path) -> StructuredFakeLLM:
+        responses: list[LLMResponse] = []
         for line in Path(path).read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                responses.append(line)
-                continue
-            if isinstance(data, dict) and isinstance(data.get("content"), str):
-                responses.append(data["content"])
-                continue
-            responses.append(line)
+            data = json.loads(line)
+            if not isinstance(data, dict) or not isinstance(data.get("content"), str) or not isinstance(data.get("tool_calls"), list):
+                raise ValueError("StructuredFakeLLM JSONL requires content and tool_calls fields")
+            responses.append(
+                LLMResponse(
+                    content=data["content"],
+                    tool_calls=tuple(
+                        LLMToolCall(
+                            provider_tool_call_id=call["provider_tool_call_id"],
+                            name=call["name"],
+                            arguments=call["arguments"],
+                        )
+                        for call in data["tool_calls"]
+                    ),
+                    model=data.get("model") if isinstance(data.get("model"), str) else None,
+                    usage=data.get("usage") if isinstance(data.get("usage"), dict) else {},
+                    finish_reason=data.get("finish_reason") if isinstance(data.get("finish_reason"), str) else None,
+                )
+            )
         return cls(responses)
 
-    def complete(self, messages: list[ChatMessage | RichChatMessage]) -> LLMResponse:
-        """返回下一个固定响应，并记录这次调用的消息快照。"""
-
-        self.calls.append(list(messages))
+    def complete(
+        self,
+        messages: list[ChatMessage | RichChatMessage],
+        *,
+        tools: Sequence[ToolSpec] = (),
+        tool_choice: str = "auto",
+    ) -> LLMResponse:
+        self.calls.append({"messages": list(messages), "tools": tuple(tools), "tool_choice": tool_choice})
         if self.index >= len(self.responses):
-            raise FakeLLMExhaustedError("FakeLLMClient responses exhausted")
-        current_index = self.index
+            raise FakeLLMExhaustedError("StructuredFakeLLM responses exhausted")
+        response = self.responses[self.index]
         self.index += 1
-        return LLMResponse(
-            content=self.responses[current_index],
-            raw={"index": current_index, "model": self.model},
-            model=self.model,
-        )
+        return response

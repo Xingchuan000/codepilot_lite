@@ -112,3 +112,20 @@ def test_call_tool_invalid_arguments_returns_error(tmp_path: Path) -> None:
 
     assert result.success is False
     assert "Invalid arguments" in result.error
+
+
+def test_builtin_repo_binding_is_explicit_and_not_exposed_in_native_schema() -> None:
+    for name in (
+        "list_files",
+        "read_file",
+        "search_code",
+        "run_shell",
+        "run_tests",
+        "git_status",
+        "git_diff",
+        "apply_patch",
+        "replace_range",
+    ):
+        spec = get_tool_spec(name)
+        assert spec.inject_repo is True
+        assert "repo" not in spec.input_schema.get("properties", {})

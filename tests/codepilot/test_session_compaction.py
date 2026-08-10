@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import LLMResponse
 from codepilot.memory.models import SessionSummaryContent
 from codepilot.memory.summarizer import LLMSummaryGenerator, SessionSummaryEvidence, merge_llm_summary
 from codepilot.session.compaction import CompactionService
@@ -94,7 +95,7 @@ def test_deterministic_summary_contains_sqlite_tool_facts(tmp_path: Path) -> Non
 def test_invalid_llm_summary_uses_deterministic_fallback_and_keeps_messages(tmp_path: Path) -> None:
     database, store, session, turns, messages = _history_with_tool_facts(tmp_path)
 
-    result = CompactionService(database, LLMSummaryGenerator(FakeLLMClient(["not json"]))).compact(
+    result = CompactionService(database, LLMSummaryGenerator(StructuredFakeLLM([LLMResponse(content="not json")]))).compact(
         session.session_id,
         force=True,
         current_turn_id=turns[-1].turn_id,
@@ -117,7 +118,7 @@ def test_llm_cannot_add_unobserved_tool_facts(tmp_path: Path) -> None:
 
     summary = CompactionService(
         database,
-        LLMSummaryGenerator(FakeLLMClient([json.dumps(hallucinated)])),
+        LLMSummaryGenerator(StructuredFakeLLM([LLMResponse(content=json.dumps(hallucinated))])),
     ).compact(session.session_id, force=True, current_turn_id=turns[-1].turn_id).summary.content
 
     assert summary["files_modified"] == ["src/a.py"]
@@ -135,7 +136,7 @@ def test_deterministic_summary_redacts_secret_without_changing_original_message(
         content=f"API_KEY={secret}",
     )
 
-    summary = CompactionService(database, LLMSummaryGenerator(FakeLLMClient(["not json"]))).compact(
+    summary = CompactionService(database, LLMSummaryGenerator(StructuredFakeLLM([LLMResponse(content="not json")]))).compact(
         session.session_id,
         force=True,
         current_turn_id=turns[-1].turn_id,
@@ -195,7 +196,7 @@ def test_llm_summary_receives_only_redacted_evidence(tmp_path: Path) -> None:
         status="completed",
         content="password: provider-secret",
     )
-    llm = FakeLLMClient([json.dumps(SessionSummaryContent(task_goal="Continue").to_dict())])
+    llm = StructuredFakeLLM([LLMResponse(content=json.dumps(SessionSummaryContent(task_goal="Continue").to_dict()))])
 
     CompactionService(database, LLMSummaryGenerator(llm)).compact(
         session.session_id,
@@ -223,7 +224,7 @@ def test_cumulative_compaction_scrubs_unsafe_previous_summary_and_audits_counts(
         metadata={"covered_message_ids": [messages[0].message_id]},
         event_payload={},
     )
-    llm = FakeLLMClient([json.dumps(SessionSummaryContent(task_goal="Continue").to_dict())])
+    llm = StructuredFakeLLM([LLMResponse(content=json.dumps(SessionSummaryContent(task_goal="Continue").to_dict()))])
 
     result = CompactionService(database, LLMSummaryGenerator(llm)).compact(
         session.session_id,

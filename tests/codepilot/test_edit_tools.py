@@ -263,3 +263,30 @@ def test_apply_patch_metadata_contains_required_fields(tmp_path: Path) -> None:
     assert result.metadata["check_returncode"] == 0
     assert result.metadata["apply_returncode"] is None
     assert result.metadata["risk"] == "local_write"
+
+
+def test_replace_range_without_trailing_newline_preserves_following_line_boundary(tmp_path: Path) -> None:
+    (tmp_path / "sample.py").write_text("a\nb\nc\n", encoding="utf-8")
+
+    result = replace_range(tmp_path, "sample.py", 2, 2, "x")
+
+    assert result.success is True
+    assert (tmp_path / "sample.py").read_text(encoding="utf-8") == "a\nx\nc\n"
+
+
+def test_replace_range_without_trailing_newline_preserves_eof_newline(tmp_path: Path) -> None:
+    (tmp_path / "sample.py").write_text("a\nb\n", encoding="utf-8")
+
+    result = replace_range(tmp_path, "sample.py", 2, 2, "x")
+
+    assert result.success is True
+    assert (tmp_path / "sample.py").read_bytes() == b"a\nx\n"
+
+
+def test_replace_range_preserves_crlf_line_boundary(tmp_path: Path) -> None:
+    (tmp_path / "sample.py").write_bytes(b"a\r\nb\r\nc\r\n")
+
+    result = replace_range(tmp_path, "sample.py", 2, 2, "x")
+
+    assert result.success is True
+    assert (tmp_path / "sample.py").read_bytes() == b"a\r\nx\r\nc\r\n"

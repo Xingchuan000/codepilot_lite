@@ -9,7 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from codepilot.llm.fake import FakeLLMClient
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import LLMResponse
 from codepilot.router import ToolRouter
 from codepilot.session.database import SessionDatabase
 from codepilot.session.git_context import GitContext
@@ -185,13 +186,13 @@ class _Cancelled:
 
 
 class _RaisingLLM:
-    def complete(self, messages):  # noqa: ANN001
+    def complete(self, messages, *, tools=(), tool_choice="auto"):  # noqa: ANN001
         raise RuntimeError("provider failed")
 
 
 def test_run_turn_sets_precise_attempt_times_and_terminal_status(tmp_path: Path) -> None:
     _, service, session_id, repo = _runtime(tmp_path)
-    runtime = SessionRuntime(service.database, FakeLLMClient(["hello"]), lambda trace: ToolRouter(trace))
+    runtime = SessionRuntime(service.database, StructuredFakeLLM([LLMResponse(content="hello")]), lambda trace: ToolRouter(trace))
     submission = runtime.submit_user_message(session_id, "say hello")
     assert isinstance(submission, TurnSubmission)
 
@@ -238,7 +239,7 @@ def test_memory_candidate_postprocessing_does_not_change_completed_turn(
     payload: dict,
 ) -> None:
     _, service, session_id, _ = _runtime(tmp_path)
-    runtime = SessionRuntime(service.database, FakeLLMClient(["hello"]), lambda trace: ToolRouter(trace))
+    runtime = SessionRuntime(service.database, StructuredFakeLLM([LLMResponse(content="hello")]), lambda trace: ToolRouter(trace))
     runtime.memory_candidates = extractor
     submission = runtime.submit_user_message(session_id, "say hello")
     assert isinstance(submission, TurnSubmission)
@@ -263,7 +264,7 @@ def test_submit_user_message_blocks_recovery_required_turns(tmp_path: Path) -> N
         branch_snapshot="main",
     )
     service.store.update_turn_status(turn.turn_id, "recovery_required")
-    runtime = SessionRuntime(service.database, FakeLLMClient(["hello"]), lambda trace: ToolRouter(trace))
+    runtime = SessionRuntime(service.database, StructuredFakeLLM([LLMResponse(content="hello")]), lambda trace: ToolRouter(trace))
 
     with pytest.raises(RuntimeError, match="running turn"):
         runtime.submit_user_message(session_id, "new task")
@@ -271,7 +272,7 @@ def test_submit_user_message_blocks_recovery_required_turns(tmp_path: Path) -> N
 
 def test_run_turn_maps_cancelled_and_llm_error_explicitly(tmp_path: Path) -> None:
     _, service, session_id, _ = _runtime(tmp_path)
-    cancelled_runtime = SessionRuntime(service.database, FakeLLMClient(["unused"]), lambda trace: ToolRouter(trace))
+    cancelled_runtime = SessionRuntime(service.database, StructuredFakeLLM([LLMResponse(content="unused")]), lambda trace: ToolRouter(trace))
     cancelled = cancelled_runtime.submit_user_message(session_id, "cancel")
     assert isinstance(cancelled, TurnSubmission)
     result = cancelled_runtime.run_turn(cancelled.turn.turn_id, cancelled.attempt.attempt_id, _Cancelled())
@@ -294,7 +295,7 @@ def test_run_turn_setup_exception_is_interrupted(tmp_path: Path) -> None:
     def broken_router(trace):  # noqa: ANN001
         raise RuntimeError("router setup failed")
 
-    runtime = SessionRuntime(service.database, FakeLLMClient(["unused"]), broken_router)
+    runtime = SessionRuntime(service.database, StructuredFakeLLM([LLMResponse(content="unused")]), broken_router)
     submission = runtime.submit_user_message(session_id, "fail setup")
     assert isinstance(submission, TurnSubmission)
 

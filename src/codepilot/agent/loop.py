@@ -1,23 +1,18 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Sequence
 from typing import Any, Protocol
 
-from codepilot.agent.actions import (
-    AgentActionParseError,
-    AgentFinishAction,
-    AgentToolCallAction,
-    ParsedAgentAction,
-    agent_action_dict_to_trace_preview,
-    agent_action_to_trace_input,
-    parse_agent_turn,
-)
+from pydantic import ValidationError
+
+from codepilot.agent.actions import AgentFinishAction, AgentFinishArgs, agent_action_to_trace_input
 from codepilot.agent.evidence import AssistantStopReason, CompletionKind, EvidenceDecision
+from codepilot.agent.internal_tools import CODEPILOT_FINISH_TOOL_NAME, CODEPILOT_FINISH_TOOL_SPEC
 from codepilot.agent.observation import (
     format_finish_blocked_observation,
-    format_parse_error_observation,
+    format_finish_required_observation,
     format_pruned_observation,
 )
 from codepilot.agent.outcome import RunOutcomeSnapshot, build_run_outcome
@@ -32,11 +27,19 @@ from codepilot.agent.state import (
     register_tool_attempt,
     update_state_from_route_result,
 )
-from codepilot.agent.tool_output_pruner import ToolOutputPruner
 from codepilot.agent.tool_observation_budget import ToolObservationBudgetPolicy
+from codepilot.agent.tool_output_pruner import ToolOutputPruner
 from codepilot.llm.errors import LLMContextOverflowError, normalize_llm_exception
 from codepilot.llm.fake import FakeLLMExhaustedError
-from codepilot.llm.types import ChatMessage, CodePilotLLMClient, LLMResponse, RichChatMessage
+from codepilot.llm.types import (
+    ChatMessage,
+    ChatMessagePart,
+    CodePilotLLMClient,
+    LLMReasoningReplay,
+    LLMResponse,
+    LLMToolCall,
+    RichChatMessage,
+)
 from codepilot.memory.policy import redact_memory_value
 from codepilot.router import ToolAction, ToolRouter
 from codepilot.router.errors import ToolExecutionUncertainError, ToolPreExecutionError
@@ -187,7 +190,7 @@ def _inject_repo_if_required(
     """确保模型不能借 repo 参数切换到当前仓库之外。"""
 
     injected = dict(arguments or {})
-    if spec is None or "repo" not in spec.parameters:
+    if spec is None or not spec.inject_repo:
         return injected
     if "repo" not in injected:
         injected["repo"] = str(repo)
@@ -237,21 +240,6 @@ class FinishResolution:
     blocked_by_evidence: bool = False
 
 
-def _parsed_action_metadata(parsed_action: ParsedAgentAction) -> dict[str, Any]:
-    """集中生成成功解析动作的 Trace 元数据，确保工具和 finish 使用同一契约。"""
-
-    metadata = parsed_action.normalization_metadata
-    return {
-        "parse_success": True,
-        "normalization_applied": metadata.get("normalization_applied", False),
-        "normalized_fields": metadata.get("normalized_fields", {}),
-        "non_standard_fields": metadata.get("non_standard_fields", []),
-        "normalization_conflicts": metadata.get("conflicts", []),
-        "raw_action_preview": agent_action_dict_to_trace_preview(parsed_action.raw_action),
-        "normalized_action_preview": agent_action_dict_to_trace_preview(parsed_action.normalized_action),
-    }
-
-
 def _resolve_finish(
     action: AgentFinishAction,
     *,
@@ -272,7 +260,7 @@ def _resolve_finish(
 
 
 class MinimalAgentLoop:
-    """按“模型输出一个 JSON action，loop 执行一次”工作的最小闭环。"""
+    """按模型原生 tool_calls 执行一次工具闭环。"""
 
     def __init__(
         self,
@@ -330,42 +318,19 @@ class MinimalAgentLoop:
     def _cancel_requested(self) -> bool:
         return bool(self.cancellation_token and self.cancellation_token.is_cancelled())
 
-    def _complete_llm(self, messages: list[ChatMessage | RichChatMessage], context: TurnExecutionContext) -> LLMResponse:
-        """优先消费可选流式接口；旧客户端仍走 complete。"""
+    def _llm_tool_specs(self) -> tuple[ToolSpec, ...]:
+        return (*self.tool_specs_by_name.values(), CODEPILOT_FINISH_TOOL_SPEC)
 
-        stream = getattr(self.llm, "stream", None)
-        if stream is None:
-            if self.event_sink is not None:
-                self.event_sink.assistant_message_started(turn_id=context.turn_id, attempt_id=context.attempt_id, streaming=False)
-            try:
-                return self.llm.complete(messages)  # type: ignore[arg-type]
-            except FakeLLMExhaustedError:
-                raise
-            except Exception as exc:
-                raise normalize_llm_exception(exc, output_started=False) from exc
-        content: list[str] = []
-        usage: dict[str, Any] = {}
+    def _complete_llm(self, messages: list[ChatMessage | RichChatMessage], context: TurnExecutionContext) -> LLMResponse:
+        """Call the LLM with the Native tool contract."""
         if self.event_sink is not None:
-            self.event_sink.assistant_message_started(turn_id=context.turn_id, attempt_id=context.attempt_id, streaming=True)
-        output_started = False
+            self.event_sink.assistant_message_started(turn_id=context.turn_id, attempt_id=context.attempt_id, streaming=False)
         try:
-            for event in stream(messages):
-                if event.type == "text_delta":
-                    output_started = output_started or bool(event.content)
-                    content.append(event.content)
-                    if self.event_sink is not None:
-                        self.event_sink.assistant_text_delta(content=event.content, type="text", provider_format=event.provider_format, replayable=event.replayable)
-                elif event.type == "reasoning_delta":
-                    output_started = output_started or bool(event.content)
-                    if self.event_sink is not None:
-                        self.event_sink.assistant_text_delta(content=event.content, type="reasoning", provider_format=event.provider_format, replayable=event.replayable)
-                elif event.type == "usage":
-                    usage = event.usage
-                elif event.type == "error":
-                    raise RuntimeError(event.content or "streaming LLM error")
+            return self.llm.complete(messages, tools=self._llm_tool_specs(), tool_choice="auto")  # type: ignore[arg-type]
+        except FakeLLMExhaustedError:
+            raise
         except Exception as exc:
-            raise normalize_llm_exception(exc, output_started=output_started) from exc
-        return LLMResponse(content="".join(content), usage=usage)
+            raise normalize_llm_exception(exc, output_started=False) from exc
 
     def _cancelled_result(self, state: AgentState) -> AgentRunResult:
         """在一个位置完成取消状态、Trace 和返回值构造。"""
@@ -438,7 +403,6 @@ class MinimalAgentLoop:
     ) -> AgentRunResult:
         """保持自然文本结束的现有状态和 Trace 行为。"""
 
-        # messages 保留模型原始正文，最终 summary 仍使用 parse_agent_turn 规范化后的文本。
         state.messages.append(ChatMessage(role="assistant", content=response_content))
         state.assistant_stop_reason = "natural_reply"
         decision = refresh_evidence_state(state)
@@ -501,19 +465,19 @@ class MinimalAgentLoop:
         *,
         state: AgentState,
         action: AgentFinishAction,
-        parsed_action: ParsedAgentAction,
         resolution: FinishResolution,
         delivery_kind: str,
+        provider_tool_call_id: str | None = None,
     ) -> AgentRunResult:
         """统一完成结构化 finish 的动作、状态、Trace 和结果收尾。"""
 
         self.trace_logger.record_agent_action(
             action_type=action.type,
-            tool_name=None,
+            tool_name=CODEPILOT_FINISH_TOOL_NAME,
             input=agent_action_to_trace_input(action),
             success=True,
             metadata={
-                **_parsed_action_metadata(parsed_action),
+                **({"provider_tool_call_id": provider_tool_call_id} if provider_tool_call_id else {}),
                 "requested_status": action.status,
                 "effective_status": resolution.status,
                 "status_normalized": resolution.status_normalized,
@@ -559,86 +523,294 @@ class MinimalAgentLoop:
             success=resolution.success,
         )
 
-    def _handle_evidence_block(
+    def _append_native_tool_result(
         self,
         *,
         state: AgentState,
-        action: AgentFinishAction,
-        parsed_action: ParsedAgentAction,
-        response_content: str,
-        delivery_kind: str,
+        call: LLMToolCall,
+        content: str,
+        tool_call_id: str | None = None,
+        success: bool = False,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
-        """记录 Evidence Gate 拒绝并把可执行的下一步反馈给模型。"""
-
-        if delivery_kind == "code_change":
-            state.delivery_kind = "code_change"
-        self.trace_logger.record_agent_action(
-            action_type=action.type,
-            tool_name=None,
-            input=agent_action_to_trace_input(action),
-            success=False,
-            error="finish success blocked by evidence gate",
-            metadata={
-                **_parsed_action_metadata(parsed_action),
-                "finish_blocked_by_evidence": True,
-                "requested_status": action.status,
-                "delivery_kind": delivery_kind,
-                **evidence_snapshot(state).to_payload(),
-                "last_test_status": state.last_test_status,
-            },
+        state.messages.append(
+            RichChatMessage(
+                role="tool",
+                parts=(
+                    ChatMessagePart(
+                        type="tool_result",
+                        content={
+                            "provider_tool_call_id": call.provider_tool_call_id,
+                            "tool_name": call.name,
+                            "content": content,
+                            **({"codepilot_tool_call_id": tool_call_id} if tool_call_id is not None else {}),
+                        },
+                    ),
+                ),
+            )
         )
-        state.messages.append(ChatMessage(role="assistant", content=response_content))
-        observation = format_finish_blocked_observation(
-            missing_evidence=list(state.missing_evidence),
-            last_test_status=state.last_test_status,
-            last_test_command=state.last_test_command,
-            diff_checked=state.diff_checked,
-            written_files=list(state.written_files),
-        )
-        state.messages.append(ChatMessage(role="user", content=observation))
         if self.event_sink is not None:
-            self.event_sink.loop_observation_created(
-                content=observation,
-                category="evidence_blocked",
+            self.event_sink.tool_result_created(
+                tool_name=call.name,
+                success=success,
+                content=content,
+                provider_tool_call_id=call.provider_tool_call_id,
+                tool_call_id=tool_call_id,
                 turn_id=self._context_turn_id,
                 attempt_id=self._context_attempt_id,
+                **(metadata or {}),
             )
         self.trace_logger.record_agent_observation(
-            tool_name=None,
-            observation=observation,
-            metadata={
-                "finish_blocked_by_evidence": True,
-                "delivery_kind": delivery_kind,
-                **evidence_snapshot(state).to_payload(),
-                "last_test_status": state.last_test_status,
-            },
+            tool_name=call.name,
+            observation=content,
+            metadata={"provider_tool_call_id": call.provider_tool_call_id, "tool_call_id": tool_call_id, **(metadata or {})},
         )
 
-    def _record_tool_error(
+    def _handle_finish_tool_call(
         self,
         *,
         state: AgentState,
-        response_content: str,
-        tool_name: str,
-        error: Exception,
-    ) -> None:
-        """把预期的工具准备或执行异常反馈给模型，不吞掉其他阶段的编程错误。"""
-
-        observation = (
-            "Your previous tool_call could not be executed.\n"
-            f"Error: {error}\n"
-            'Use natural text for normal replies, or return one JSON object for tool_call / finish.'
-        )
-        state.messages.append(ChatMessage(role="assistant", content=response_content))
-        state.messages.append(ChatMessage(role="user", content=observation))
-        if self.event_sink is not None:
-            self.event_sink.loop_observation_created(
-                content=observation,
-                category="pre_execution_error",
-                turn_id=self._context_turn_id,
-                attempt_id=self._context_attempt_id,
+        context: TurnExecutionContext,
+        call: LLMToolCall,
+    ) -> AgentRunResult | None:
+        try:
+            args = AgentFinishArgs.model_validate(call.arguments)
+        except ValidationError as exc:
+            self._append_native_tool_result(
+                state=state,
+                call=call,
+                content=f"Validation error for {CODEPILOT_FINISH_TOOL_NAME}: {exc}",
             )
-        self.trace_logger.record_agent_observation(tool_name=tool_name, observation=observation)
+            return None
+
+        action = AgentFinishAction(**args.model_dump())
+        register_finish_claim(state, action)
+        delivery_kind = _infer_finish_delivery_kind(state, action)
+        if delivery_kind == "code_change":
+            state.task_requires_code_delivery = True
+        decision = refresh_evidence_state(state)
+        resolution = _resolve_finish(action, delivery_kind=delivery_kind, evidence=decision)
+        if resolution.blocked_by_evidence:
+            if delivery_kind == "code_change":
+                state.delivery_kind = "code_change"
+            self.trace_logger.record_agent_action(
+                action_type=action.type,
+                tool_name=call.name,
+                input=agent_action_to_trace_input(action),
+                success=False,
+                error="finish success blocked by evidence gate",
+                metadata={
+                    "provider_tool_call_id": call.provider_tool_call_id,
+                    "finish_blocked_by_evidence": True,
+                    "requested_status": action.status,
+                    "delivery_kind": delivery_kind,
+                    **evidence_snapshot(state).to_payload(),
+                },
+            )
+            self._append_native_tool_result(
+                state=state,
+                call=call,
+                content=format_finish_blocked_observation(
+                    missing_evidence=list(state.missing_evidence),
+                    last_test_status=state.last_test_status,
+                    last_test_command=state.last_test_command,
+                    diff_checked=state.diff_checked,
+                    written_files=list(state.written_files),
+                ),
+                success=False,
+                metadata={"finish_blocked_by_evidence": True},
+            )
+            return None
+        return self._finish_from_action(
+            state=state,
+            action=action,
+            resolution=resolution,
+            delivery_kind=delivery_kind,
+            provider_tool_call_id=call.provider_tool_call_id,
+        )
+
+    def _execute_native_tool_call(
+        self,
+        *,
+        state: AgentState,
+        context: TurnExecutionContext,
+        call: LLMToolCall,
+    ) -> None:
+        try:
+            injected_args = _inject_repo_if_required(
+                call.arguments,
+                state.repo,
+                self.tool_specs_by_name.get(call.name),
+            )
+            register_tool_attempt(
+                state,
+                tool_name=call.name,
+                side_effect=self._tool_side_effect(call.name),
+                arguments=injected_args,
+            )
+        except Exception as exc:
+            self._append_native_tool_result(
+                state=state,
+                call=call,
+                content=f"Tool preparation error: {exc}",
+            )
+            return
+
+        refresh_evidence_state(state)
+        tool_action = ToolAction(
+            tool_name=call.name,
+            arguments=injected_args,
+            reason=None,
+            metadata={"provider_tool_call_id": call.provider_tool_call_id},
+        )
+        if self.event_sink is not None:
+            self.event_sink.tool_call_created(
+                tool_name=call.name,
+                arguments=injected_args,
+                provider_tool_call_id=call.provider_tool_call_id,
+                turn_id=context.turn_id,
+                attempt_id=context.attempt_id,
+            )
+        if self._cancel_requested():
+            return
+        try:
+            route_result = self.router.route(tool_action)
+        except ToolPreExecutionError as exc:
+            if self._cancel_requested():
+                return
+            self._append_native_tool_result(
+                state=state,
+                call=call,
+                content=f"Tool execution error: {exc}",
+                tool_call_id=exc.tool_call_id,
+            )
+            return
+        except ToolExecutionUncertainError:
+            raise
+
+        token_budget = self.tool_observation_token_budget
+        if token_budget is None:
+            if self.tool_observation_budget_policy is None or self.model_context_profile is None:
+                token_budget = 2000
+            else:
+                token_budget = self.tool_observation_budget_policy.resolve(
+                    tool_name=route_result.tool_name,
+                    profile=self.model_context_profile,
+                    estimated_result_tokens=estimate_tokens(route_result.result.output or route_result.result.error or ""),
+                ).token_limit
+        pruned = self.tool_output_pruner.prune(route_result, token_budget=token_budget)
+        observation = format_pruned_observation(route_result, pruned)
+        update_state_from_route_result(state, route_result)
+        refresh_evidence_state(state)
+        if self._cancel_requested():
+            return
+        self._append_native_tool_result(
+            state=state,
+            call=call,
+            content=observation,
+            tool_call_id=route_result.metadata.get("tool_call_id"),
+            success=route_result.success,
+            metadata={
+                "prune_metadata": {
+                    "pruned": pruned.truncated,
+                    "prune_strategy": pruned.strategy,
+                    "original_chars": pruned.original_chars,
+                    "retained_chars": pruned.retained_chars,
+                    "transformed": pruned.transformed,
+                    "length_truncated": pruned.length_truncated,
+                },
+            },
+        )
+
+    def _handle_tool_calls(
+        self,
+        *,
+        state: AgentState,
+        context: TurnExecutionContext,
+        response: LLMResponse,
+    ) -> AgentRunResult | None:
+        assistant_parts: list[ChatMessagePart] = []
+        if response.reasoning_replay is not None:
+            assistant_parts.append(
+                ChatMessagePart(
+                    type="reasoning_replay",
+                    content={"blocks": list(response.reasoning_replay.blocks)},
+                    provider_format=response.reasoning_replay.provider_format,
+                    replayable=True,
+                )
+            )
+        if response.content:
+            assistant_parts.append(ChatMessagePart(type="text", content=response.content))
+        for call in response.tool_calls:
+            assistant_parts.append(
+                ChatMessagePart(
+                    type="tool_call",
+                    content={
+                        "provider_tool_call_id": call.provider_tool_call_id,
+                        "tool_name": call.name,
+                        "arguments": call.arguments,
+                    },
+                )
+            )
+        state.messages.append(RichChatMessage(role="assistant", parts=tuple(assistant_parts)))
+        for call in response.tool_calls:
+            if call.name == CODEPILOT_FINISH_TOOL_NAME:
+                recorder = getattr(self.event_sink, "record_native_tool_call", None)
+                if callable(recorder):
+                    recorder(
+                        provider_tool_call_id=call.provider_tool_call_id,
+                        tool_name=call.name,
+                        arguments=call.arguments,
+                    )
+                result = self._handle_finish_tool_call(state=state, context=context, call=call)
+                if result is not None:
+                    return result
+                continue
+            self._execute_native_tool_call(state=state, context=context, call=call)
+        return None
+
+    def _handle_natural_reply(
+        self,
+        state: AgentState,
+        *,
+        response_content: str,
+        reasoning_replay: LLMReasoningReplay | None = None,
+    ) -> AgentRunResult | None:
+        decision = refresh_evidence_state(state)
+        if decision.requires_evidence:
+            if reasoning_replay is None:
+                state.messages.append(ChatMessage(role="assistant", content=response_content))
+            else:
+                state.messages.append(
+                    RichChatMessage(
+                        role="assistant",
+                        parts=(
+                            ChatMessagePart(
+                                type="reasoning_replay",
+                                content={"blocks": list(reasoning_replay.blocks)},
+                                provider_format=reasoning_replay.provider_format,
+                                replayable=True,
+                            ),
+                            ChatMessagePart(type="text", content=response_content),
+                        ),
+                    )
+                )
+            observation = format_finish_required_observation()
+            state.messages.append(ChatMessage(role="user", content=observation))
+            if self.event_sink is not None:
+                self.event_sink.loop_observation_created(
+                    content=observation,
+                    category="finish_required",
+                    turn_id=self._context_turn_id,
+                    attempt_id=self._context_attempt_id,
+                )
+            self.trace_logger.record_agent_observation(
+                tool_name=CODEPILOT_FINISH_TOOL_NAME,
+                observation=observation,
+                metadata={"finish_required": True, **evidence_snapshot(state).to_payload()},
+            )
+            return None
+        return self._natural_reply_result(state, response_content=response_content, text=response_content)
 
     def run_turn(self, context: TurnExecutionContext) -> AgentRunResult:
         """执行一个 Turn；不会重新生成或查询历史消息。"""
@@ -727,7 +899,12 @@ class MinimalAgentLoop:
                             self.event_sink.assistant_message_interrupted(error=_safe_error(exc), turn_id=context.turn_id, attempt_id=context.attempt_id)
                         return self._runtime_failure_result(state, status="llm_error", stop_reason="llm_error", error=_safe_error(exc))
                 if self.event_sink is not None:
-                    self.event_sink.assistant_message_completed(content=response.content, turn_id=context.turn_id, attempt_id=context.attempt_id)
+                    self.event_sink.assistant_message_completed(
+                        content=response.content,
+                        reasoning_replay=response.reasoning_replay,
+                        turn_id=context.turn_id,
+                        attempt_id=context.attempt_id,
+                    )
                 # 模型调用可能耗时，返回后必须再次检查，取消时不再处理这次响应。
                 if self._cancel_requested():
                     return self._cancelled_result(state)
@@ -736,181 +913,25 @@ class MinimalAgentLoop:
                     message_count=len(state.messages),
                     response_text=response.content,
                     usage=response.usage,
-                )
-                try:
-                    turn = parse_agent_turn(response.content)
-                except AgentActionParseError as exc:
-                    normalization_metadata = exc.normalization_metadata
-                    self.trace_logger.record_agent_action(
-                        action_type=None,
-                        input={},
-                        success=False,
-                        error=str(exc),
-                        metadata={
-                            "parse_success": False,
-                            "normalization_applied": normalization_metadata.get("normalization_applied", False),
-                            "normalized_fields": normalization_metadata.get("normalized_fields", {}),
-                            "non_standard_fields": normalization_metadata.get("non_standard_fields", []),
-                            "raw_action_preview": agent_action_dict_to_trace_preview(exc.raw_action or {}),
-                            "normalized_action_preview": agent_action_dict_to_trace_preview(
-                                exc.normalized_action or {}
-                            ),
-                        },
-                    )
-                    state.messages.append(ChatMessage(role="assistant", content=response.content))
-                    observation = format_parse_error_observation(exc)
-                    state.messages.append(ChatMessage(role="user", content=observation))
-                    if self.event_sink is not None:
-                        self.event_sink.loop_observation_created(
-                            content=observation,
-                            category="parse_error",
-                            turn_id=context.turn_id,
-                            attempt_id=context.attempt_id,
-                        )
-                    self.trace_logger.record_agent_observation(tool_name=None, observation=observation)
-                    continue
-                if turn.kind == "natural_reply":
-                    return self._natural_reply_result(
-                        state,
-                        response_content=response.content,
-                        text=turn.text,
-                    )
-                action = turn.action
-                assert action is not None
-                parsed_action = turn.parsed_action
-                assert parsed_action is not None
-                if isinstance(action, AgentFinishAction):
-                    register_finish_claim(state, action)
-                    delivery_kind = _infer_finish_delivery_kind(state, action)
-                    if delivery_kind == "code_change":
-                        state.task_requires_code_delivery = True
-                    decision = refresh_evidence_state(state)
-                    resolution = _resolve_finish(action, delivery_kind=delivery_kind, evidence=decision)
-                    if resolution.blocked_by_evidence:
-                        self._handle_evidence_block(
-                            state=state,
-                            action=action,
-                            parsed_action=parsed_action,
-                            response_content=response.content,
-                            delivery_kind=delivery_kind,
-                        )
-                        continue
-                    return self._finish_from_action(
-                        state=state,
-                        action=action,
-                        parsed_action=parsed_action,
-                        resolution=resolution,
-                        delivery_kind=delivery_kind,
-                    )
-                self.trace_logger.record_agent_action(
-                    action_type=action.type,
-                    tool_name=action.tool_name if isinstance(action, AgentToolCallAction) else None,
-                    input=agent_action_to_trace_input(action),
-                    success=True,
-                    metadata=_parsed_action_metadata(parsed_action),
-                )
-                try:
-                    injected_args = _inject_repo_if_required(
-                        action.arguments,
-                        state.repo,
-                        self.tool_specs_by_name.get(action.tool_name),
-                    )
-                    register_tool_attempt(
-                        state,
-                        tool_name=action.tool_name,
-                        side_effect=self._tool_side_effect(action.tool_name),
-                        arguments=injected_args,
-                    )
-                except Exception as exc:
-                    self._record_tool_error(
-                        state=state,
-                        response_content=response.content,
-                        tool_name=action.tool_name,
-                        error=exc,
-                    )
-                    continue
-                refresh_evidence_state(state)
-                tool_action = ToolAction(
-                    tool_name=action.tool_name,
-                    arguments=injected_args,
-                    reason=action.short_rationale,
                     metadata={
-                        "normalization_applied": parsed_action.normalization_metadata.get("normalization_applied", False),
-                        "normalized_fields": parsed_action.normalization_metadata.get("normalized_fields", {}),
+                        "native_tool_count": len(response.tool_calls),
+                        "provider_tool_call_ids": [call.provider_tool_call_id for call in response.tool_calls],
+                        "tool_names": [call.name for call in response.tool_calls],
                     },
                 )
-                if self.event_sink is not None:
-                    self.event_sink.tool_call_created(
-                        tool_name=action.tool_name,
-                        arguments=injected_args,
-                        turn_id=context.turn_id,
-                        attempt_id=context.attempt_id,
-                    )
-                # Router 可能等待权限审批，进入前检查可避免取消后继续阻塞。
-                if self._cancel_requested():
-                    return self._cancelled_result(state)
-                try:
-                    route_result = self.router.route(tool_action)
-                except ToolPreExecutionError as exc:
-                    # Router 可能因权限等待被取消而抛错；此时取消状态优先，不生成误导性的工具错误。
-                    if self._cancel_requested():
-                        return self._cancelled_result(state)
-                    self._record_tool_error(
-                        state=state,
-                        response_content=response.content,
-                        tool_name=action.tool_name,
-                        error=exc,
-                    )
+                if response.tool_calls:
+                    result = self._handle_tool_calls(state=state, context=context, response=response)
+                    if result is not None:
+                        return result
                     continue
-                except ToolExecutionUncertainError:
-                    # execution_started 之后副作用未知，绝不能把异常伪装成普通
-                    # observation；Runtime 会把当前 Attempt 标为 recovery_required。
-                    raise
-                token_budget = self.tool_observation_token_budget
-                if token_budget is None:
-                    if self.tool_observation_budget_policy is None or self.model_context_profile is None:
-                        token_budget = 2000
-                    else:
-                        token_budget = self.tool_observation_budget_policy.resolve(
-                            tool_name=route_result.tool_name,
-                            profile=self.model_context_profile,
-                            estimated_result_tokens=estimate_tokens(route_result.result.output or route_result.result.error or ""),
-                        ).token_limit
-                pruned = self.tool_output_pruner.prune(
-                    route_result,
-                    token_budget=token_budget,
+                result = self._handle_natural_reply(
+                    state,
+                    response_content=response.content,
+                    reasoning_replay=response.reasoning_replay,
                 )
-                observation = format_pruned_observation(route_result, pruned)
-                if self.event_sink is not None:
-                    self.event_sink.tool_result_created(
-                        tool_name=route_result.tool_name,
-                        success=route_result.success,
-                        content=route_result.result.output or route_result.result.error or "",
-                        turn_id=context.turn_id,
-                        attempt_id=context.attempt_id,
-                        tool_call_id=route_result.metadata.get("tool_call_id"),
-                        observation=observation,
-                        prune_metadata={
-                            "pruned": pruned.truncated,
-                            "prune_strategy": pruned.strategy,
-                            "original_chars": pruned.original_chars,
-                            "retained_chars": pruned.retained_chars,
-                            "transformed": pruned.transformed,
-                            "length_truncated": pruned.length_truncated,
-                        },
-                    )
-                update_state_from_route_result(state, route_result)
-                refresh_evidence_state(state)
-                # 权限等待或工具执行结束后再次检查，取消结果优先于工具 observation。
-                if self._cancel_requested():
-                    return self._cancelled_result(state)
-                state.messages.append(ChatMessage(role="assistant", content=response.content))
-                state.messages.append(ChatMessage(role="user", content=observation))
-                self.trace_logger.record_agent_observation(
-                    tool_name=route_result.tool_name,
-                    observation=observation,
-                    metadata={"success": route_result.success},
-                )
+                if result is not None:
+                    return result
+                continue
         except KeyboardInterrupt:
             raise
         return self._runtime_failure_result(
@@ -920,7 +941,7 @@ class MinimalAgentLoop:
         )
 
     def run(self, task: str, repo: str | Path) -> AgentRunResult:
-        """兼容旧 CLI：单次运行仍使用旧的首轮 Prompt。"""
+        """Run one Native tool-calling turn for the CLI entry point."""
 
         repository = Path(repo).resolve()
         return self.run_turn(

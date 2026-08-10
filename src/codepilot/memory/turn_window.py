@@ -43,7 +43,7 @@ class ContextPreparationResult:
 @dataclass(frozen=True)
 class TurnMessageGroup:
     messages: tuple[ChatMessage | RichChatMessage, ...]
-    kind: Literal["tool_exchange", "parse_recovery", "evidence_recovery", "assistant_reply", "other"]
+    kind: Literal["tool_exchange", "assistant_reply", "other"]
     estimated_tokens: int
 
 
@@ -322,16 +322,11 @@ def _message_groups(messages: list[ChatMessage | RichChatMessage]) -> list[TurnM
     while index < len(messages):
         message = messages[index]
         paired: tuple[ChatMessage | RichChatMessage, ...] = (message,)
-        kind: Literal["tool_exchange", "parse_recovery", "evidence_recovery", "assistant_reply", "other"] = "assistant_reply" if message.role == "assistant" else "other"
+        kind: Literal["tool_exchange", "assistant_reply", "other"] = "assistant_reply" if message.role == "assistant" else "other"
         if message.role == "assistant" and index + 1 < len(messages):
             following = messages[index + 1]
-            text = following.content if isinstance(following, ChatMessage) else ""
-            if following.role == "user" and text.startswith("Tool:"):
+            if isinstance(message, RichChatMessage) and message.parts and following.role == "tool" and isinstance(following, RichChatMessage):
                 paired, kind = (message, following), "tool_exchange"
-            elif following.role == "user" and text.startswith("Action parse failed."):
-                paired, kind = (message, following), "parse_recovery"
-            elif following.role == "user" and text.startswith("Finish blocked."):
-                paired, kind = (message, following), "evidence_recovery"
         groups.append(TurnMessageGroup(paired, kind, _tokens(list(paired))))
         index += len(paired)
     return groups

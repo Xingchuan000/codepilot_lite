@@ -33,7 +33,7 @@ def test_cli_issue_success_outputs_artifact_paths(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("# Add bug\n\nPlease fix add().\n", encoding="utf-8")
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = runner.invoke(
         app,
@@ -43,7 +43,7 @@ def test_cli_issue_success_outputs_artifact_paths(tmp_path: Path) -> None:
             str(issue_file),
             "--repo",
             str(repo),
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--approve",
             "--runs-dir",
@@ -67,8 +67,8 @@ def test_cli_issue_unsuccessful_run_still_prints_artifacts_and_exits_non_zero(tm
     repo = _write_bug_repo(tmp_path)
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("# Add bug\n\nPlease investigate.\n", encoding="utf-8")
-    fake_actions = tmp_path / "partial.jsonl"
-    fake_actions.write_text('{"type":"finish","status":"partial","summary":"not fixed"}\n', encoding="utf-8")
+    fake_responses = tmp_path / "partial.jsonl"
+    fake_responses.write_text('{"content":"","tool_calls":[{"provider_tool_call_id":"provider-1","name":"codepilot_finish","arguments":{"status":"partial","summary":"not fixed"}}]}\n', encoding="utf-8")
 
     result = runner.invoke(
         app,
@@ -78,8 +78,8 @@ def test_cli_issue_unsuccessful_run_still_prints_artifacts_and_exits_non_zero(tm
             str(issue_file),
             "--repo",
             str(repo),
-            "--fake-actions",
-            str(fake_actions),
+            "--fake-responses",
+            str(fake_responses),
             "--runs-dir",
             str(tmp_path / "runs"),
             "--run-id",
@@ -125,7 +125,7 @@ def test_cli_issue_read_only_still_generates_artifacts_and_exits_non_zero(tmp_pa
     repo = _write_bug_repo(tmp_path)
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("# Add bug\n\nPlease fix add().\n", encoding="utf-8")
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = runner.invoke(
         app,
@@ -135,7 +135,7 @@ def test_cli_issue_read_only_still_generates_artifacts_and_exits_non_zero(tmp_pa
             str(issue_file),
             "--repo",
             str(repo),
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--policy-mode",
             "read_only",
@@ -158,7 +158,7 @@ def test_cli_issue_local_workflow_artifacts_do_not_contain_github_token(tmp_path
     repo = _write_bug_repo(tmp_path)
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("# Add bug\n\nPlease fix add().\n", encoding="utf-8")
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_secret")
 
     result = runner.invoke(
@@ -169,7 +169,7 @@ def test_cli_issue_local_workflow_artifacts_do_not_contain_github_token(tmp_path
             str(issue_file),
             "--repo",
             str(repo),
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--approve",
             "--runs-dir",

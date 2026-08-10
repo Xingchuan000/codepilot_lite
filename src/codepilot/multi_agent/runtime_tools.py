@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from codepilot.multi_agent.models import SpawnContract
 from codepilot.multi_agent.supervisor import AgentSupervisor
@@ -22,6 +22,8 @@ from codepilot.tools.base import (
 
 
 class SpawnAgentArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     agent_type: Literal["general", "explore", "scout"]
     task: str = Field(min_length=1)
     write_scope: list[str] = Field(default_factory=list)
@@ -30,11 +32,17 @@ class SpawnAgentArgs(BaseModel):
 
 
 class AgentIdArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     agent_id: str = Field(min_length=1)
 
 
 class WaitAgentArgs(AgentIdArgs):
     timeout_seconds: float | None = Field(default=None, gt=0, le=30)
+
+
+class _EmptyArgs(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 @dataclass(frozen=True)
@@ -55,6 +63,14 @@ def _spec(
     *,
     recovery: ToolRecoveryStrategy = ToolRecoveryStrategy.ASK_USER,
 ) -> ToolSpec:
+    argument_models: dict[str, type[BaseModel]] = {
+        "spawn_agent": SpawnAgentArgs,
+        "wait_agent": WaitAgentArgs,
+        "list_agents": _EmptyArgs,
+        "close_agent": AgentIdArgs,
+        "inspect_agent_patch": AgentIdArgs,
+        "apply_agent_patch": AgentIdArgs,
+    }
     return ToolSpec(
         name=name,
         description=description,
@@ -63,6 +79,7 @@ def _spec(
         default_permission=permission,
         idempotency=ToolIdempotency.CONDITIONAL,
         recovery_strategy=recovery,
+        input_schema=argument_models[name].model_json_schema(),
         parameters=parameters,
         metadata={"source": "runtime_agent_control"},
     )
@@ -97,8 +114,10 @@ def _tool_specs() -> tuple[ToolSpec, ...]:
         _spec(
             "wait_agent",
             (
-                "Wait for one delegated child agent for at most 30 seconds. If it is still running, "
-                "use another bounded wait later instead of requesting a longer timeout."
+                "Wait for one delegated child agent for at most 30 seconds of child execution time. "
+                "Time spent waiting for a user permission decision does not consume this timeout; "
+                "the wait remains blocked until that decision is resolved. If the child is still "
+                "running afterward, use another bounded wait later."
             ),
             ToolRisk.READ_ONLY,
             ToolSideEffect.NONE,

@@ -54,7 +54,7 @@ def test_cli_dirty_fail_returns_non_zero_and_writes_core_artifacts(tmp_path: Pat
 def test_cli_warn_can_continue_and_prints_manifest_and_restore_plan(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
     (repo / "README.md").write_text("dirty\n", encoding="utf-8")
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = runner.invoke(
         app,
@@ -70,7 +70,7 @@ def test_cli_warn_can_continue_and_prints_manifest_and_restore_plan(tmp_path: Pa
             "issue-warn",
             "--dirty-policy",
             "warn",
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--approve",
             "--overwrite",
@@ -85,7 +85,7 @@ def test_cli_warn_can_continue_and_prints_manifest_and_restore_plan(tmp_path: Pa
 
 def test_cli_worktree_outputs_enabled_and_preserves_original_repo(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = runner.invoke(
         app,
@@ -102,7 +102,7 @@ def test_cli_worktree_outputs_enabled_and_preserves_original_repo(tmp_path: Path
             "--worktree",
             "--worktree-base-dir",
             str(tmp_path / "worktrees"),
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--approve",
             "--overwrite",
@@ -135,8 +135,8 @@ def test_cli_worktree_base_dir_inside_repo_fails(tmp_path: Path) -> None:
 
 def test_cli_no_manifest_and_no_restore_plan_warn(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fake_actions = tmp_path / "partial.jsonl"
-    fake_actions.write_text('{"type":"finish","status":"partial","summary":"done"}\n', encoding="utf-8")
+    fake_responses = tmp_path / "partial.jsonl"
+    fake_responses.write_text('{"content":"","tool_calls":[{"provider_tool_call_id":"provider-1","name":"codepilot_finish","arguments":{"status":"partial","summary":"done"}}]}\n', encoding="utf-8")
 
     result = runner.invoke(
         app,
@@ -148,8 +148,8 @@ def test_cli_no_manifest_and_no_restore_plan_warn(tmp_path: Path) -> None:
             str(repo),
             "--no-manifest",
             "--no-restore-plan",
-            "--fake-actions",
-            str(fake_actions),
+            "--fake-responses",
+            str(fake_responses),
         ],
     )
 
@@ -171,7 +171,7 @@ def test_cli_protected_env_dirty_returns_non_zero(tmp_path: Path) -> None:
 
 def test_cli_artifacts_do_not_contain_secret_token(tmp_path: Path, monkeypatch) -> None:
     repo = _write_bug_repo(tmp_path)
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_test_secret")
 
     result = runner.invoke(
@@ -186,7 +186,7 @@ def test_cli_artifacts_do_not_contain_secret_token(tmp_path: Path, monkeypatch) 
             str(tmp_path / "runs"),
             "--run-id",
             "issue-secret",
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--approve",
             "--overwrite",
@@ -201,7 +201,7 @@ def test_cli_artifacts_do_not_contain_secret_token(tmp_path: Path, monkeypatch) 
 
 def test_cli_redact_absolute_paths_hides_paths_in_summary_and_restore_plan(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = runner.invoke(
         app,
@@ -215,7 +215,7 @@ def test_cli_redact_absolute_paths_hides_paths_in_summary_and_restore_plan(tmp_p
             str(tmp_path / "runs"),
             "--run-id",
             "issue-redacted",
-            "--fake-actions",
+            "--fake-responses",
             str(fixture),
             "--approve",
             "--redact-absolute-paths",
@@ -231,20 +231,19 @@ def test_cli_redact_absolute_paths_hides_paths_in_summary_and_restore_plan(tmp_p
 
 def test_cli_protected_after_path_denied_exits_non_zero(tmp_path: Path) -> None:
     repo = _write_bug_repo(tmp_path)
-    fake_actions = tmp_path / "actions-shell.jsonl"
-    fake_actions.write_text(
+    fake_responses = tmp_path / "responses-shell.jsonl"
+    fake_responses.write_text(
         "\n".join(
             [
                 json.dumps(
                     {
-                        "type": "tool_call",
-                        "tool_name": "run_shell",
-                        "arguments": {
+                        "content": "",
+                        "tool_calls": [{"provider_tool_call_id": "provider-1", "name": "run_shell", "arguments": {
                             "command": 'python -c "from pathlib import Path; Path(\'.\'+\'env\').write_text(\'SECRET=1\\\\n\', encoding=\'utf-8\')"'
                         },
-                    }
+                        }]}
                 ),
-                json.dumps({"type": "finish", "status": "partial", "summary": "done"}),
+                json.dumps({"content": "", "tool_calls": [{"provider_tool_call_id": "provider-2", "name": "codepilot_finish", "arguments": {"status": "partial", "summary": "done"}}]}),
             ]
         )
         + "\n",
@@ -263,8 +262,8 @@ def test_cli_protected_after_path_denied_exits_non_zero(tmp_path: Path) -> None:
             str(tmp_path / "runs"),
             "--run-id",
             "issue-protected-after",
-            "--fake-actions",
-            str(fake_actions),
+            "--fake-responses",
+            str(fake_responses),
             "--approve",
             "--overwrite",
         ],

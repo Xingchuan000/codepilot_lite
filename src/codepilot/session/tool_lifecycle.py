@@ -41,12 +41,24 @@ class SQLiteToolLifecycleObserver:
             side_effect=spec.side_effect.value if spec is not None else None,
             idempotency=spec.idempotency.value if spec is not None else None,
             recovery_strategy=spec.recovery_strategy.value if spec is not None else None,
-            metadata={"action_id": action.action_id},
+            metadata={
+                "action_id": action.action_id,
+                **(
+                    {"provider_tool_call_id": action.metadata["provider_tool_call_id"]}
+                    if isinstance(action.metadata.get("provider_tool_call_id"), str)
+                    else {}
+                ),
+            },
         )
         if self.message_recorder is not None:
             # ToolCall 业务表与 Assistant MessagePart 使用同一个稳定 ID，禁止按工具名
             # 或“最后一条调用”进行模糊配对。
-            self.message_recorder.attach_tool_call(record.tool_call_id, action.tool_name, to_jsonable(action.arguments))
+            self.message_recorder.attach_tool_call(
+                record.tool_call_id,
+                action.tool_name,
+                to_jsonable(action.arguments),
+                provider_tool_call_id=action.metadata.get("provider_tool_call_id"),
+            )
         return record.tool_call_id
 
     def on_policy_denied(self, tool_call_id: str, result: ToolResult) -> None:

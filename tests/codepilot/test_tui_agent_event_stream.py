@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from codepilot.tui_agent.event_reducer import EventReducer
+from codepilot.session.database import SessionDatabase
+from codepilot.session.store import SessionStore
+from codepilot.session.trace_recorder import SessionTraceRecorder
 from codepilot.trace.events import TraceEvent
 from codepilot.trace.logger import TraceLogger
+from codepilot.tui_agent.event_reducer import EventReducer
 from codepilot.tui_agent.event_stream import trace_event_to_tui_event
 
 
@@ -56,6 +59,31 @@ def test_permission_response_trace_event_is_normalized() -> None:
     assert tui_event.payload["reason"] == "approved"
 
 
+def test_session_trace_recorder_keeps_permission_ids_structured(tmp_path: Path) -> None:
+    database = SessionDatabase(tmp_path / "sessions.sqlite3")
+    database.initialize()
+    store = SessionStore(database)
+    session = store.create_session(project_path=tmp_path, provider="openai", current_model="fake", permission_mode="manual")
+    turn = store.create_turn(
+        session_id=session.session_id,
+        title="Turn 1",
+        provider_snapshot="openai",
+        model_snapshot="fake",
+        permission_mode_snapshot="manual",
+        branch_snapshot=None,
+    )
+    recorder = SessionTraceRecorder(database, session.session_id, turn.turn_id)
+
+    event = recorder.record_permission_request(
+        request_id="perm-1",
+        tool_name="replace_range",
+        reason="need approval",
+    )
+
+    assert event.permission_request_id == "perm-1"
+    assert trace_event_to_tui_event(event).payload["request_id"] == "perm-1"
+
+
 def test_llm_call_trace_event_maps_to_finished_event() -> None:
     event = TraceEvent(run_id="run-1", step=3, event_type="llm_call", output_preview='{"short_rationale":"inspect"}')
 
@@ -100,25 +128,22 @@ def test_tool_call_trace_event_maps_to_tool_finished_event() -> None:
     assert tui_event.type == "tool_finished"
 
 
-def test_agent_action_trace_event_uses_input_preview() -> None:
+def test_native_finish_action_trace_event_uses_input_preview() -> None:
     event = TraceEvent(
         run_id="run-1",
         step=7,
         event_type="agent_action",
-        tool_name="list_files",
         input={
-            "type": "tool_call",
-            "tool_name": "list_files",
-            "arguments": {"path": ".", "max_depth": 2},
-            "short_rationale": "先检查结构",
+            "status": "success",
+            "summary": "完成",
         },
-        metadata={"action_type": "tool_call", "parse_success": True},
+        metadata={"action_type": "finish"},
     )
 
     tui_event = trace_event_to_tui_event(event)
 
     assert tui_event is not None
-    assert tui_event.payload["input_preview"] == {"max_depth": 2, "path": "."}
+    assert tui_event.payload["input_preview"] == {"status": "success", "summary": "完成"}
 
 
 def test_unknown_trace_event_stays_trace_event() -> None:

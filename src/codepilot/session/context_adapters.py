@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from codepilot.agent.prompts import build_system_prompt
-from codepilot.llm.types import ChatMessage, RichChatMessage
+from codepilot.llm.types import ChatMessage, ChatMessagePart, RichChatMessage
 from codepilot.memory.rendering import render_session_summary
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.context_budget import ContextBudgetAllocator, ContextItem, ContextPlan, estimate_tokens
+from codepilot.session.errors import SessionProtocolMismatch
 from codepilot.session.model_capabilities import ModelContextProfile
 from codepilot.session.models import ContextSummaryRecord, MessagePartRecord, MessageRecord
 from codepilot.session.store import SessionStore
@@ -40,8 +40,8 @@ class PreparedContext:
     metadata: dict[str, object]
 
 
-class TextActionContextAdapter:
-    """把 SQLite 历史按完整消息组装成文本上下文。"""
+class ProviderContextAdapter:
+    """把 SQLite 历史恢复为 Provider 可重放的 Native 消息。"""
 
     def __init__(self, store: SessionStore, artifacts: ArtifactStore | None = None) -> None:
         self.store = store
@@ -108,7 +108,7 @@ class TextActionContextAdapter:
                 )
         summary_items.extend(history.turn_checkpoint_items)
 
-        grouped: dict[str, list[ChatMessage]] = {}
+        grouped: dict[str, list[ChatMessage | RichChatMessage]] = {}
         group_metadata: dict[str, tuple[bool, int, str | None]] = {}
         call_message_ids = {
             call.message_id: call.tool_call_id
@@ -120,12 +120,11 @@ class TextActionContextAdapter:
                 continue
             if message.status in {"failed", "in_progress"}:
                 continue
-            content = _message_content(self.artifacts, message, parts, profile)
-            if not content:
+            rendered = self.render_message_for_context(message, tuple(parts), profile)
+            if rendered is None:
                 continue
             if message.turn_id == history.current_turn_id and message.role == "user":
-                content += f"\nRepository: {history.project_path}"
-            rendered = ChatMessage(_context_role(message.role), content)
+                rendered = ChatMessage("user", f"{rendered.content}\nRepository: {history.project_path}")
             tool_call_ids = _tool_call_ids(message, parts)
             if message.message_id in call_message_ids:
                 tool_call_ids.add(call_message_ids[message.message_id])
@@ -239,17 +238,8 @@ class TextActionContextAdapter:
         message: MessageRecord,
         parts: tuple[MessagePartRecord, ...],
         profile: ModelContextProfile,
-    ) -> ChatMessage | None:
-        content = _message_content(self.artifacts, message, parts, profile)
-        if not content:
-            return None
-        return ChatMessage(_context_role(message.role), content)
-
-
-def _context_role(role: str) -> str:
-    # Text Action Adapter 只能使用 Provider 无关的 system/user/assistant 三种角色；Tool
-    # Observation 仍作为 user 消息回放，和历史主链已有的调用约定保持一致。
-    return "user" if role == "tool" else role
+    ) -> ChatMessage | RichChatMessage | None:
+        return _render_message(self.artifacts, message, parts, profile)
 
 
 def _context_key(message: MessageRecord, parts: tuple[MessagePartRecord, ...]) -> str:
@@ -260,6 +250,11 @@ def _context_key(message: MessageRecord, parts: tuple[MessagePartRecord, ...]) -
 def _tool_call_ids(message: MessageRecord, parts: tuple[MessagePartRecord, ...]) -> set[str]:
     ids = {str(message.metadata["tool_call_id"])} if message.metadata.get("tool_call_id") is not None else set()
     ids.update(str(part.metadata["tool_call_id"]) for part in parts if part.metadata.get("tool_call_id") is not None)
+    ids.update(
+        str(part.content["codepilot_tool_call_id"])
+        for part in parts
+        if isinstance(part.content, dict) and part.content.get("codepilot_tool_call_id") is not None
+    )
     return ids
 
 
@@ -280,6 +275,89 @@ def _summary_content(summary: ContextSummaryRecord) -> str:
     return f"Persisted context summary ({summary.model}):\n{content}" if summary.model else f"Persisted context summary:\n{content}"
 
 
+def _render_message(
+    artifacts: ArtifactStore,
+    message: MessageRecord,
+    parts: tuple[MessagePartRecord, ...],
+    profile: ModelContextProfile,
+) -> ChatMessage | RichChatMessage | None:
+    if message.role == "assistant":
+        rendered_parts: list[ChatMessagePart] = []
+        for part in parts:
+            if not part.replayable:
+                continue
+            if part.type == "text":
+                content = _part_content(artifacts, part)
+                if content:
+                    rendered_parts.append(ChatMessagePart(type="text", content=content))
+                continue
+            if part.type == "reasoning":
+                if not profile.supports_reasoning_replay or part.provider_format not in {None, profile.reasoning_format, profile.provider}:
+                    continue
+                content = _part_content(artifacts, part)
+                if content:
+                    rendered_parts.append(ChatMessagePart(type="text", content=content))
+                continue
+            if part.type == "reasoning_replay":
+                if not isinstance(part.content, dict):
+                    raise ValueError("reasoning_replay content must be a dict")
+                rendered_parts.append(
+                    ChatMessagePart(
+                        type="reasoning_replay",
+                        content=part.content,
+                        provider_format=part.provider_format,
+                        replayable=True,
+                    )
+                )
+                continue
+            if part.type != "tool_call":
+                raise ValueError(f"Unsupported assistant message part: {part.type}")
+            if not isinstance(part.content, dict):
+                raise ValueError("tool_call part content must be a dict")
+            data = part.content
+            if not isinstance(data.get("provider_tool_call_id"), str) or not data["provider_tool_call_id"]:
+                raise SessionProtocolMismatch(
+                    "Session was created before native tool calling migration; start a new session"
+                )
+            rendered_parts.append(
+                ChatMessagePart(
+                    type="tool_call",
+                    content={
+                        "provider_tool_call_id": data["provider_tool_call_id"],
+                        "tool_name": data["tool_name"],
+                        "arguments": data["arguments"],
+                    },
+                )
+            )
+        if rendered_parts:
+            return RichChatMessage(role="assistant", parts=tuple(rendered_parts))
+        content = _message_content(artifacts, message, parts, profile)
+        return ChatMessage(role="assistant", content=content) if content else None
+
+    if message.role == "tool":
+        tool_parts = [part for part in parts if part.replayable and part.type == "tool_result"]
+        if len(tool_parts) != 1:
+            raise SessionProtocolMismatch(
+                "Session was created before native tool calling migration; start a new session"
+            )
+        if not isinstance(tool_parts[0].content, dict):
+            raise ValueError("tool_result content must be a dict")
+        data = tool_parts[0].content
+        if not isinstance(data.get("provider_tool_call_id"), str) or not data["provider_tool_call_id"]:
+            raise SessionProtocolMismatch(
+                "Session was created before native tool calling migration; start a new session"
+            )
+        return RichChatMessage(
+            role="tool",
+            parts=(ChatMessagePart(type="tool_result", content=data),),
+        )
+
+    content = _message_content(artifacts, message, parts, profile)
+    if not content:
+        return None
+    return ChatMessage(role=message.role, content=content)
+
+
 def _message_content(artifacts: ArtifactStore, message: MessageRecord, parts: tuple[MessagePartRecord, ...], profile: ModelContextProfile) -> str:
     if parts:
         values: list[str] = []
@@ -287,7 +365,7 @@ def _message_content(artifacts: ArtifactStore, message: MessageRecord, parts: tu
             if not part.replayable:
                 continue
             if part.type == "tool_call":
-                # Text Action 的原始 JSON 已由 text Part 持久化；结构化 Part 不重复回放。
+                # Native tool calls are replayed as structured assistant parts above.
                 continue
             if part.type == "reasoning" and (
                 not profile.supports_reasoning_replay

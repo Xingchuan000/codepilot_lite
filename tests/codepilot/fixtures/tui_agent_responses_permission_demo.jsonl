@@ -1,0 +1,2 @@
+{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-1","name":"replace_range","arguments":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\n"}}]}
+{"content":"","tool_calls":[{"provider_tool_call_id":"provider-call-2","name":"codepilot_finish","arguments":{"status":"success","summary":"已完成修改。","tests":"not run","changed_files":["src/calc.py"]}}]}

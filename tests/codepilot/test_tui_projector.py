@@ -14,11 +14,10 @@ def test_run_start_maps_to_lifecycle_row() -> None:
     assert row.category == "lifecycle"
 
 
-def test_agent_action_hides_raw_preview() -> None:
-    row = event_to_timeline_row({"event_type": "agent_action", "step": 2, "metadata": {"action_type": "edit", "parse_success": True, "normalization_applied": True, "raw_action_preview": "secret"}})
+def test_agent_action_only_exposes_native_action_type() -> None:
+    row = event_to_timeline_row({"event_type": "agent_action", "step": 2, "metadata": {"action_type": "finish", "secret": "secret"}})
 
-    assert row.metadata["action_type"] == "edit"
-    assert "raw_action_preview" not in row.metadata
+    assert row.metadata == {"action_type": "finish"}
 
 
 def test_policy_decision_rows_set_executed_false_for_deny_and_unapproved_ask() -> None:

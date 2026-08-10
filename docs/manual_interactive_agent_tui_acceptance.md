@@ -6,11 +6,11 @@
 mkdir -p /tmp/codepilot-tui-demo/src /tmp/codepilot-tui-demo/tests
 ```
 
-## 2. fake-actions 验收
+## 2. fake-responses 验收
 
 ```bash
 PYTHONPATH=src python -m codepilot.cli tui /tmp/codepilot-tui-demo \
-  --fake-actions tests/codepilot/fixtures/tui_agent_actions_success.jsonl \
+  --fake-responses tests/codepilot/fixtures/tui_agent_responses_success.jsonl \
   --permission-mode manual
 ```
 

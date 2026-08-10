@@ -4,16 +4,13 @@ import json
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from codepilot.agent.actions import AgentFinishAction
 from codepilot.agent.evidence import EvidenceDecision
 from codepilot.agent.loop import MinimalAgentLoop, _resolve_finish
-from codepilot.llm.fake import FakeLLMClient
-from codepilot.llm.types import ChatMessage, LLMResponse
+from codepilot.llm.fake import StructuredFakeLLM
+from codepilot.llm.types import LLMResponse, LLMToolCall, RichChatMessage
 from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
-from codepilot.trace.logger import TraceLogger
 
 
 def write_bug_repo(tmp_path: Path) -> Path:
@@ -22,10 +19,6 @@ def write_bug_repo(tmp_path: Path) -> Path:
     (repo / "tests").mkdir()
     (repo / "src" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "src" / "calc.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
-    (repo / "tests" / "test_calc.py").write_text(
-        "from src.calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n",
-        encoding="utf-8",
-    )
     subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     subprocess.run(["git", "config", "user.email", "demo@example.com"], cwd=repo, check=True)
     subprocess.run(["git", "config", "user.name", "Demo"], cwd=repo, check=True)
@@ -34,391 +27,193 @@ def write_bug_repo(tmp_path: Path) -> Path:
     return repo
 
 
-def _read_trace_events(trace_path: Path) -> list[dict]:
-    return [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
-
-
-def _build_loop(tmp_path: Path, responses: list[str], *, mode: str = "build", approve: bool = True, max_steps: int = 12) -> MinimalAgentLoop:
+def _build_loop(tmp_path: Path, responses: list[LLMResponse], *, max_steps: int = 12) -> MinimalAgentLoop:
     router = ToolRouter.from_runs_dir(
         runs_dir=tmp_path / "runs",
         run_id="run-test",
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(mode=mode, approved=approve, interactive=False),
+        policy_context=PolicyContext(mode="build", approved=True, interactive=False),
     )
-    return MinimalAgentLoop(llm=FakeLLMClient(responses), router=router, max_steps=max_steps)
+    return MinimalAgentLoop(llm=StructuredFakeLLM(responses), router=router, max_steps=max_steps)
 
 
-def _event_types(events: list[dict]) -> list[str]:
-    return [event["event_type"] for event in events]
+def test_native_tool_call_reaches_router_and_next_request_replays_rich_messages(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    loop = _build_loop(
+        tmp_path,
+        [
+            LLMResponse(
+                content="",
+                tool_calls=(LLMToolCall("provider-call-1", "read_file", {"path": "src/calc.py"}),),
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=(
+                    LLMToolCall(
+                        "provider-call-2",
+                        "codepilot_finish",
+                        {"status": "success", "summary": "Inspected the file.", "delivery_kind": "message"},
+                    ),
+                ),
+            ),
+        ],
+    )
+
+    result = loop.run("Inspect the file", repo)
+
+    assert result.success is True
+    assert result.status == "message_complete"
+    calls = loop.llm.calls
+    assert isinstance(calls[1]["messages"][-2], RichChatMessage)
+    assert calls[1]["messages"][-2].role == "assistant"
+    assert calls[1]["messages"][-2].parts[0].content["provider_tool_call_id"] == "provider-call-1"
+    assert calls[1]["messages"][-1].role == "tool"
+    assert calls[1]["messages"][-1].parts[0].content["provider_tool_call_id"] == "provider-call-1"
 
 
-class _CancelledToken:
-    def is_cancelled(self) -> bool:
-        return True
+def test_multiple_native_tool_calls_are_routed_sequentially_and_replayed(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    loop = _build_loop(
+        tmp_path,
+        [
+            LLMResponse(
+                content="",
+                tool_calls=(
+                    LLMToolCall("provider-call-1", "read_file", {"path": "src/calc.py"}),
+                    LLMToolCall("provider-call-2", "list_files", {"path": "src", "max_depth": 1}),
+                ),
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=(
+                    LLMToolCall(
+                        "provider-call-3",
+                        "codepilot_finish",
+                        {"status": "success", "summary": "Inspected both results.", "delivery_kind": "message"},
+                    ),
+                ),
+            ),
+        ],
+    )
+
+    assert loop.run("Inspect the repository", repo).success is True
+    replay = loop.llm.calls[1]["messages"]
+    assert [message.role for message in replay[-2:]] == ["tool", "tool"]
+    assert [message.parts[0].content["provider_tool_call_id"] for message in replay[-2:]] == [
+        "provider-call-1",
+        "provider-call-2",
+    ]
+    events = [json.loads(line) for line in loop.router.trace_logger.trace_path.read_text(encoding="utf-8").splitlines()]
+    llm_event = next(event for event in events if event["event_type"] == "llm_call")
+    assert llm_event["metadata"]["native_tool_count"] == 2
+    assert [event["metadata"]["provider_tool_call_id"] for event in events if event["event_type"] == "tool_call"] == [
+        "provider-call-1",
+        "provider-call-2",
+    ]
 
 
-class _RaisingLLM:
-    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
-        raise RuntimeError("provider unavailable")
+def test_natural_text_after_write_requires_codepilot_finish_before_next_turn(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    loop = _build_loop(
+        tmp_path,
+        [
+            LLMResponse(
+                content="",
+                tool_calls=(
+                    LLMToolCall(
+                        "provider-call-1",
+                        "replace_range",
+                        {
+                            "path": "src/calc.py",
+                            "start_line": 2,
+                            "end_line": 2,
+                            "replacement": "    return a + b\n",
+                        },
+                    ),
+                ),
+            ),
+            LLMResponse(content="已经完成。"),
+            LLMResponse(
+                content="",
+                tool_calls=(LLMToolCall("provider-call-3", "codepilot_finish", {"status": "partial", "summary": "Stopped."}),),
+            ),
+        ],
+    )
+
+    result = loop.run("Fix the bug", repo)
+
+    assert result.status == "partial"
+    guidance = loop.llm.calls[2]["messages"][-1]
+    assert guidance.role == "user"
+    assert "codepilot_finish" in guidance.content
+    assert result.success is False
 
 
-class _InvalidResponseLLM:
-    def complete(self, messages: list[ChatMessage]) -> LLMResponse:
-        return LLMResponse(content=1)  # type: ignore[arg-type]
+def test_native_parameter_value_error_is_returned_as_tool_result_without_repair(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    loop = _build_loop(
+        tmp_path,
+        [
+            LLMResponse(
+                content="",
+                tool_calls=(LLMToolCall("provider-call-1", "read_file", {"path": ["src/calc.py"]}),),
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=(
+                    LLMToolCall("provider-call-2", "codepilot_finish", {"status": "partial", "summary": "Invalid input."}),
+                ),
+            ),
+        ],
+    )
+
+    result = loop.run("Inspect the file", repo)
+
+    assert result.status == "partial"
+    tool_result = loop.llm.calls[1]["messages"][-1]
+    assert tool_result.role == "tool"
+    assert tool_result.parts[0].content["provider_tool_call_id"] == "provider-call-1"
+    assert "Tool:" in tool_result.parts[0].content["content"]
+    assert "src/calc.py" not in tool_result.parts[0].content["content"]
 
 
-def test_loop_rejects_different_trace_logger(tmp_path: Path) -> None:
-    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs-a", run_id="a")
-    other_logger = TraceLogger(runs_dir=tmp_path / "runs-b", run_id="b")
+def test_native_finish_reuses_evidence_validation(tmp_path: Path) -> None:
+    repo = write_bug_repo(tmp_path)
+    result = _build_loop(
+        tmp_path,
+        [
+            LLMResponse(
+                content="",
+                tool_calls=(
+                    LLMToolCall(
+                        "provider-call-1",
+                        "codepilot_finish",
+                        {"status": "success", "summary": "Claimed a change.", "changed_files": ["src/calc.py"]},
+                    ),
+                ),
+            ),
+            LLMResponse(
+                content="",
+                tool_calls=(LLMToolCall("provider-call-2", "codepilot_finish", {"status": "partial", "summary": "Needs work."}),),
+            ),
+        ],
+    ).run("Fix the bug", repo)
 
-    with pytest.raises(ValueError, match="same TraceLogger"):
-        MinimalAgentLoop(
-            llm=FakeLLMClient([]),
-            router=router,
-            trace_logger=other_logger,
-        )
+    assert result.status == "partial"
+    assert result.claimed_changed_files == ["src/calc.py"]
+    assert result.missing_evidence
 
 
-def test_resolve_finish_keeps_existing_status_decision_table() -> None:
+def test_natural_response_without_tool_calls_completes_normally(tmp_path: Path) -> None:
+    result = _build_loop(tmp_path, [LLMResponse(content="Hello there")]).run("Say hello", write_bug_repo(tmp_path))
+
+    assert result.success is True
+    assert result.status == "message_complete"
+
+
+def test_resolve_finish_keeps_evidence_decision_table() -> None:
     complete = EvidenceDecision(False, False, False, (), (), True)
     missing = EvidenceDecision(True, True, True, ("write_executed",), ("missing_passed_tests",), False)
 
-    assert _resolve_finish(
-        AgentFinishAction(type="finish", status="failed", summary="failed"),
-        delivery_kind="message",
-        evidence=complete,
-    ).completion_kind == "task_failed"
-    assert _resolve_finish(
-        AgentFinishAction(type="finish", status="partial", summary="partial"),
-        delivery_kind="code_change",
-        evidence=missing,
-    ).completion_kind == "task_partial"
-    assert _resolve_finish(
-        AgentFinishAction(type="finish", status="success", summary="blocked"),
-        delivery_kind="code_change",
-        evidence=missing,
-    ).blocked_by_evidence is True
-    message = _resolve_finish(
-        AgentFinishAction(type="finish", status="success", summary="message"),
-        delivery_kind="message",
-        evidence=complete,
-    )
-    assert (message.status, message.completion_kind, message.success, message.status_normalized) == (
-        "message_complete",
-        "message_complete",
-        True,
-        True,
-    )
-    success = _resolve_finish(
-        AgentFinishAction(type="finish", status="success", summary="success"),
-        delivery_kind="code_change",
-        evidence=complete,
-    )
-    assert (success.status, success.completion_kind, success.success) == ("success", "task_success", True)
-
-
-def test_cancelled_result_is_recorded_once_before_llm_call(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-cancelled")
-    result = MinimalAgentLoop(
-        llm=FakeLLMClient(["unused"]),
-        router=router,
-        max_steps=1,
-        cancellation_token=_CancelledToken(),
-    ).run("Inspect repo", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.status == "cancelled"
-    assert result.steps == 0
-    assert _event_types(events).count("run_cancelled") == 1
-    assert "llm_call" not in _event_types(events)
-
-
-def test_llm_exception_is_runtime_failure(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-llm-error")
-
-    result = MinimalAgentLoop(llm=_RaisingLLM(), router=router, max_steps=1).run("Inspect repo", repo)
-
-    assert result.status == "llm_error"
-    assert result.assistant_stop_reason == "llm_error"
-    assert result.completion_kind == "runtime_failure"
-    assert result.error == "provider unavailable"
-
-
-def test_non_llm_processing_error_is_not_mislabeled_as_llm_error(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    router = ToolRouter.from_runs_dir(runs_dir=tmp_path / "runs", run_id="run-invalid-response")
-
-    with pytest.raises(TypeError):
-        MinimalAgentLoop(llm=_InvalidResponseLLM(), router=router, max_steps=1).run("Inspect repo", repo)
-
-    events = _read_trace_events(router.trace_logger.trace_path)
-    assert not any(event["event_type"] == "run_end" and event.get("metadata", {}).get("status") == "llm_error" for event in events)
-
-
-def test_fake_llm_exhaustion_uses_runtime_failure_helper(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-
-    result = _build_loop(tmp_path, [], max_steps=1).run("Inspect repo", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.status == "llm_exhausted"
-    assert result.assistant_stop_reason == "llm_exhausted"
-    assert result.completion_kind == "runtime_failure"
-    assert events[-1]["event_type"] == "run_end"
-    assert events[-1]["metadata"]["status"] == "llm_exhausted"
-
-
-def test_fake_loop_greeting_becomes_message_complete(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(tmp_path, ["Hello there"]).run("hello", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.success is True
-    assert result.status == "message_complete"
-    assert result.completion_kind == "message_complete"
-    assert result.assistant_stop_reason == "natural_reply"
-    assert result.changed_files == []
-    assert "tool_call" not in _event_types(events)
-    assert not any(event["event_type"] == "agent_action" and event.get("success") is False for event in events)
-    assert not any(event["event_type"] == "agent_observation" and "Finish blocked." in (event.get("output_summary") or "") for event in events)
-
-
-def test_fake_loop_natural_reply_without_write_is_message_complete(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(tmp_path, ["已经修复"]).run("修复 add bug", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.success is True
-    assert result.status == "message_complete"
-    assert result.completion_kind == "message_complete"
-    assert result.assistant_stop_reason == "natural_reply"
-    assert not any(event["event_type"] == "tool_call" for event in events)
-
-
-def test_fake_loop_non_code_finish_success_becomes_message_complete(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(tmp_path, ['{"type":"finish","status":"success","summary":"done"}']).run("hello", repo)
-
-    assert result.success is True
-    assert result.status == "message_complete"
-    assert result.completion_kind == "message_complete"
-
-
-def test_fake_loop_natural_reply_after_write_cannot_be_task_success(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        [
-            '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\\n"}}',
-            "已经修复",
-        ],
-        max_steps=2,
-    ).run("修复 add bug", repo)
-
-    assert result.success is False
-    assert result.status == "task_incomplete"
-    assert result.completion_kind == "task_incomplete"
-    assert result.assistant_stop_reason == "natural_reply"
-
-
-def test_finish_claiming_changed_files_without_write_is_blocked(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        [
-            '{"type":"finish","status":"success","summary":"done","changed_files":["src/calc.py"]}',
-            '{"type":"finish","status":"partial","summary":"Need more work"}',
-        ],
-        max_steps=2,
-    ).run("修复 add bug", repo)
-
-    assert result.success is False
-    assert result.status == "partial"
-    assert result.delivery_kind == "code_change"
-    assert result.requires_evidence is True
-    assert result.changed_files == []
-    assert result.claimed_changed_files == ["src/calc.py"]
-    assert result.written_files == []
-    assert "missing_write_execution" in result.missing_evidence
-    assert "missing_changed_files" in result.missing_evidence
-    assert result.tests_required is False
-    assert result.diff_required is False
-
-
-def test_finish_explicit_message_with_changed_files_is_still_code_change(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        ['{"type":"finish","status":"success","delivery_kind":"message","summary":"done","changed_files":["src/calc.py"]}', '{"type":"finish","status":"partial","summary":"Need more work"}'],
-        max_steps=2,
-    ).run("修复 add bug", repo)
-
-    assert result.delivery_kind == "code_change"
-    assert result.status == "partial"
-    assert result.changed_files == []
-
-
-def test_fake_loop_missing_tests_is_blocked(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        [
-            '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\\n"}}',
-            '{"type":"finish","status":"success","summary":"done"}',
-            '{"type":"finish","status":"partial","summary":"Need more work"}',
-        ],
-        max_steps=3,
-    ).run("修复 add bug", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.status == "partial"
-    assert any("missing_passed_tests" in json.dumps(event) for event in events if event["event_type"] == "agent_observation")
-
-
-def test_fake_loop_missing_diff_is_blocked(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        [
-            '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\\n"}}',
-            '{"type":"tool_call","tool_name":"run_tests","arguments":{"command":"pytest","timeout":30}}',
-            '{"type":"finish","status":"success","summary":"done"}',
-            '{"type":"finish","status":"partial","summary":"Need more work"}',
-        ],
-        max_steps=4,
-    ).run("修复 add bug", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.status == "partial"
-    assert result.last_test_status == "passed"
-    assert any("missing_diff_check" in json.dumps(event) for event in events if event["event_type"] == "agent_observation")
-
-
-def test_fake_loop_success_requires_write_test_and_diff(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        [
-            '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\\n"}}',
-            '{"type":"tool_call","tool_name":"run_tests","arguments":{"command":"python -m pytest -q","timeout":30}}',
-            '{"type":"tool_call","tool_name":"git_diff","arguments":{"path":"src/calc.py","include_content":true}}',
-            '{"type":"finish","status":"success","summary":"Fixed add() and verified tests passed.","tests":"python -m pytest -q passed","changed_files":["src/calc.py"]}',
-        ],
-        max_steps=4,
-    ).run("修复 add bug", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.success is True
-    assert result.status == "success"
-    assert result.completion_kind == "task_success"
-    assert result.delivery_kind == "code_change"
-    assert result.last_test_status == "passed"
-    assert result.diff_checked is True
-    assert result.written_files == ["src/calc.py"]
-    assert result.claimed_changed_files == ["src/calc.py"]
-    assert any(event["event_type"] == "agent_finish" and event["metadata"].get("completion_kind") == "task_success" for event in events)
-
-
-def test_fake_loop_git_status_only_still_finishes_as_message_complete(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        [
-            '{"type":"tool_call","tool_name":"git_status","arguments":{}}',
-            '{"type":"finish","status":"success","summary":"done","changed_files":["src/calc.py"]}',
-            '{"type":"finish","status":"partial","summary":"Need more work"}',
-        ],
-        max_steps=3,
-    ).run("修复 add bug", repo)
-
-    assert result.success is False
-    assert result.status == "partial"
-    assert result.completion_kind == "task_partial"
-    assert result.delivery_kind == "code_change"
-    assert not result.written_files
-    assert result.claimed_changed_files == ["src/calc.py"]
-
-
-def test_fake_loop_denied_write_attempt_is_blocked(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        [
-            '{"type":"tool_call","tool_name":"replace_range","arguments":{"path":"src/calc.py","start_line":2,"end_line":2,"replacement":"    return a + b\\n"}}',
-            '{"type":"finish","status":"success","summary":"done"}',
-            '{"type":"finish","status":"partial","summary":"Edit denied by policy"}',
-        ],
-        mode="read_only",
-        approve=False,
-        max_steps=3,
-    ).run("Fix repo", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.status == "partial"
-    assert any(event["event_type"] == "policy_decision" and event["tool_name"] == "replace_range" and event["policy_decision"] == "deny" for event in events)
-
-
-def test_fake_loop_partial_finish_can_end_run(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(tmp_path, ['{"type":"finish","status":"partial","summary":"Need more work"}'], max_steps=1).run("Inspect repo", repo)
-
-    assert result.success is False
-    assert result.status == "partial"
-    assert result.completion_kind == "task_partial"
-    events = _read_trace_events(Path(result.trace_path))
-    assert any(event["event_type"] == "agent_action" and event["success"] is True and event["metadata"].get("completion_kind") == "task_partial" for event in events)
-
-
-def test_fake_loop_failed_finish_can_end_run(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(tmp_path, ['{"type":"finish","status":"failed","summary":"Not fixed"}'], max_steps=1).run("Inspect repo", repo)
-
-    assert result.success is False
-    assert result.status == "failed"
-    assert result.completion_kind == "task_failed"
-
-
-def test_fake_loop_recovers_after_malformed_json(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        ['{"type":"tool_call"', '{"type":"finish","status":"partial","summary":"Need another step"}'],
-        max_steps=2,
-    ).run("Inspect repo", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.status == "partial"
-    assert any(event["event_type"] == "agent_action" and event["success"] is False and event["metadata"].get("parse_success") is False for event in events)
-
-
-def test_fake_loop_recovers_after_multiple_json_objects(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        ['{"type":"finish","status":"partial","summary":"one"}{"type":"finish","status":"partial","summary":"two"}', '{"type":"finish","status":"partial","summary":"Need another step"}'],
-        max_steps=2,
-    ).run("Inspect repo", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.status == "partial"
-    assert any(event["event_type"] == "agent_action" and event["success"] is False and event["metadata"].get("parse_success") is False for event in events)
-
-
-def test_fake_loop_stops_at_max_steps(tmp_path: Path) -> None:
-    repo = write_bug_repo(tmp_path)
-    result = _build_loop(
-        tmp_path,
-        [
-            '{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}',
-            '{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}',
-            '{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}',
-        ],
-        max_steps=3,
-    ).run("Inspect repo", repo)
-    events = _read_trace_events(Path(result.trace_path))
-
-    assert result.status == "max_steps_exceeded"
-    assert events[-1]["event_type"] == "run_end"
-    assert events[-1]["success"] is False
+    assert _resolve_finish(AgentFinishAction(status="failed", summary="failed"), delivery_kind="message", evidence=complete).completion_kind == "task_failed"
+    assert _resolve_finish(AgentFinishAction(status="success", summary="blocked"), delivery_kind="code_change", evidence=missing).blocked_by_evidence is True

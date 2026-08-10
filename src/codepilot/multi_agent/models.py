@@ -8,6 +8,7 @@ AgentType = Literal["general", "explore", "scout"]
 AgentStatus = Literal[
     "queued",
     "running",
+    "waiting_permission",
     "completed",
     "failed",
     "cancelled",

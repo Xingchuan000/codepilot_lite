@@ -138,7 +138,7 @@ def test_run_issue_workflow_from_file_creates_expected_artifacts(tmp_path: Path)
         "# Add function returns wrong result\n\nThe `add(a, b)` function returns subtraction.\n",
         encoding="utf-8",
     )
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = run_issue_workflow(
         issue_file=issue_file,
@@ -146,7 +146,7 @@ def test_run_issue_workflow_from_file_creates_expected_artifacts(tmp_path: Path)
         run_id="issue-test",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=fixture,
+        fake_responses=fixture,
         overwrite=True,
     )
 
@@ -175,15 +175,15 @@ def test_run_issue_workflow_keeps_exporting_artifacts_when_agent_fails(tmp_path:
     repo = _write_bug_repo(tmp_path)
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("# Add bug\n\nPlease investigate.\n", encoding="utf-8")
-    fake_actions = tmp_path / "partial.jsonl"
-    fake_actions.write_text('{"type":"finish","status":"partial","summary":"not fixed"}\n', encoding="utf-8")
+    fake_responses = tmp_path / "partial.jsonl"
+    fake_responses.write_text('{"content":"","tool_calls":[{"provider_tool_call_id":"provider-1","name":"codepilot_finish","arguments":{"status":"partial","summary":"not fixed"}}]}\n', encoding="utf-8")
 
     result = run_issue_workflow(
         issue_file=issue_file,
         repo=repo,
         run_id="issue-partial",
         runs_dir=tmp_path / "runs",
-        fake_actions=fake_actions,
+        fake_responses=fake_responses,
         overwrite=True,
     )
 
@@ -227,7 +227,7 @@ def test_run_issue_workflow_overwrite_true_allows_rerun_same_run_id(tmp_path: Pa
     repo = _write_bug_repo(tmp_path)
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("# Add bug\n\nPlease fix.\n", encoding="utf-8")
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     first = run_issue_workflow(
         issue_file=issue_file,
@@ -235,7 +235,7 @@ def test_run_issue_workflow_overwrite_true_allows_rerun_same_run_id(tmp_path: Pa
         run_id="issue-test",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=fixture,
+        fake_responses=fixture,
         overwrite=True,
     )
     second = run_issue_workflow(
@@ -244,7 +244,7 @@ def test_run_issue_workflow_overwrite_true_allows_rerun_same_run_id(tmp_path: Pa
         run_id="issue-test",
         runs_dir=tmp_path / "runs",
         approve=True,
-        fake_actions=fixture,
+        fake_responses=fixture,
         dirty_policy="warn",
         overwrite=True,
     )
@@ -257,14 +257,14 @@ def test_run_issue_workflow_read_only_still_writes_artifacts(tmp_path: Path) -> 
     repo = _write_bug_repo(tmp_path)
     issue_file = tmp_path / "issue.md"
     issue_file.write_text("# Add bug\n\nPlease fix.\n", encoding="utf-8")
-    fixture = Path("tests/codepilot/fixtures/agent_actions_success.jsonl").resolve()
+    fixture = Path("tests/codepilot/fixtures/agent_responses_success.jsonl").resolve()
 
     result = run_issue_workflow(
         issue_file=issue_file,
         repo=repo,
         run_id="issue-read-only",
         runs_dir=tmp_path / "runs",
-        fake_actions=fixture,
+        fake_responses=fixture,
         policy_mode="read_only",
         overwrite=True,
     )

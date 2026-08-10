@@ -284,8 +284,8 @@ turn = store.create_turn(
 
 - 初始化旧版 v1–v4 数据库时，先按版本完成迁移和外键校验，最后才创建最新索引；未知版本会明确拒绝，不会覆盖版本号。
 - 工具已经进入真实执行阶段但结果未知时，当前 Attempt 会立即停止并进入 `recovery_required`，不会继续调用模型或自动重试。
-- Text Action 上下文只回放 Assistant 的文本/兼容 reasoning；结构化 `tool_call` 仍保留在 SQLite，但不会在文本协议中重复出现。Tool Message 保存模型实际收到的规范 Observation，原始 Tool 输出仍通过 Artifact 关联保存。
-- 解析错误、Evidence Gate 拒绝和工具准备失败等模型可修正 Observation 会作为 synthetic user Message 持久化，因此进程重启后可以恢复同一消息历史。
+- Native 上下文按 Assistant `tool_calls` 与 `role=tool` 原样回放；Provider tool-call ID 保存在结构化 MessagePart 中，内部 ToolCall ID 单独保存在 SQLite 业务记录中。缺少 Provider ID 的旧 Session 会明确拒绝重放。
+- 参数错误、Evidence Gate 拒绝和工具准备失败都作为对应 Native tool result 持久化，进程重启后可以恢复同一消息历史。
 - Compact 使用累计覆盖集合，旧摘要标记为 `superseded`，有效摘要只注入一次；当前 Turn、最近完整 Turn、未解决 ToolCall、关键决策以及最近文件/测试/Diff 事实会被保留。
 - 上下文预算按一次模型调用全局递减，而不是每条消息重新获得完整窗口；默认未知模型按 16K 输入 Token 处理，已知模型按能力表选择窗口，超长内容会带有 `context truncated` 标记。
 - Recovery Worker 异常会统一发布 `error` 和 `run_finished`，恢复状态会重新扫描；无效 slash command 会显示为 TUI 错误，不会逃出事件处理器。
@@ -564,7 +564,7 @@ TUI 的命令入口和权限模式保持不变；Session 事实统一保存在�
 
 ### Phase 4 Agent 结束与异常状态说明
 
-Phase 4 没有改变 Agent 的调用命令、Prompt 或 Action JSON Schema，主要收敛了 Agent Loop 内部的结束和异常分类。继续使用原有命令即可：
+Phase 4 主要收敛了 Agent Loop 内部的结束和异常分类；当前 Agent 使用 Native tool-calling contract。继续使用原有命令即可：
 
 ```bash
 codepilot agent-run "Fix the failing test" --repo . --approve
@@ -743,7 +743,7 @@ codepilot mcp-call mcp.filesystem.write_file '{"path":"demo.txt","content":"hell
 # 在 agent-run 中注入 MCP 暴露工具
 codepilot agent-run "Use MCP to read README and summarize it" \
   --repo . \
-  --fake-actions examples/mcp/fake_actions_mcp_read_file.jsonl \
+  --fake-responses examples/mcp/fake_responses_mcp_read_file.jsonl \
   --mcp-config examples/mcp/fake_filesystem_mcp.json \
   --approve
 ```
@@ -1054,7 +1054,7 @@ issue.md / GitHub issue URL
 codepilot issue \
   --issue-file examples/issues/add_bug.md \
   --repo /path/to/local/repo \
-  --fake-actions tests/codepilot/fixtures/agent_actions_success.jsonl \
+  --fake-responses tests/codepilot/fixtures/agent_responses_success.jsonl \
   --approve \
   --runs-dir runs \
   --run-id issue-demo \
@@ -1084,7 +1084,7 @@ codepilot issue \
 - `--repo`：要修复的本地仓库路径。
 - `--policy-mode`：权限模式，支持 `read_only`、`build`、`danger`。
 - `--approve`：批准 `ask` 类工具执行。
-- `--fake-actions`：传入 JSONL 假响应，便于离线演示或测试。
+- `--fake-responses`：传入结构化 LLMResponse JSONL，便于离线演示或测试。
 - `--max-steps`：覆盖默认 agent 最大步数。
 - `--report / --no-report`：是否生成 `report.md`。
 - `--json-report / --no-json-report`：是否生成 `report.json`。
@@ -1244,103 +1244,29 @@ codepilot route '{"tool_name":"apply_patch","arguments":{"repo":".","patch":"dif
 两者默认权限都是 `ask`，并且会被 `PolicyChecker` 按路径规则检查；像 `.env`、`secrets`、`.ssh` 这类敏感路径会直接拒绝。
 如果你只是想在命令行里调试编辑工具本身，可以使用 `--unsafe-direct`，否则有副作用的工具不会走直调入口。
 
-## CodePilot Lite 第八步 — Minimal LLM Loop 使用说明
+## CodePilot Lite 第八步 — Native Tool Calling Loop 使用说明
 
-第八步在现有结构化工具层之上新增了一个最小的 LLM 闭环。模型每轮只能输出一个 JSON `AgentAction`，然后统一经由 `ToolRouter -> PolicyChecker -> call_tool_traced(...)` 执行工具，不会直接绕过路由器调用 `read_file`、`replace_range`、`run_tests` 等工具函数。
+Agent 每轮通过模型原生 `tool_calls` 返回结构化工具调用。普通工具调用统一进入
+`ToolAction -> ToolRouter -> PolicyChecker`，完成后以原生 `role=tool` 结果继续下一轮。
+`codepilot_finish` 是同一 Native 工具协议中的内部工具，并继续复用 Evidence Gate。
 
-### AgentAction 格式
+模型请求使用 `tools` 参数传递完整 `ToolSpec.input_schema`；系统提示只保留 Native
+Tool Calling 规则，不在 assistant 文本中接受 JSON、XML、Markdown 或其他伪工具调用。
+参数类型和枚举必须严格遵循 schema，Router/Pydantic 返回的参数错误不会被自动改写。
 
-模型每轮只能返回一个 JSON object，类型只允许 `tool_call` 或 `finish`。
-
-```json
-{"type":"tool_call","tool_name":"read_file","arguments":{"path":"src/calc.py","start_line":1,"end_line":20}}
-```
-
-```json
-{"type":"finish","status":"success","summary":"Fixed the bug and verified tests passed."}
-```
-
-约束如下：
-
-- 不允许输出 Markdown fenced JSON
-- 不允许一次返回多个 action
-- `repo` 参数通常不需要模型填写，loop 会自动注入当前仓库
-- 修改前应先 `read_file` 或 `search_code`
-- 修改后应执行 `run_tests`
-- `finish` 前应执行 `git_status` 或 `git_diff`
-
-如果真实模型偶尔输出字段别名，当前第八步会在解析阶段自动归一化这些常见写法：
-
-- `action` -> `type` 或 `tool_name`
-- `tool` / `name` / `function_name` / `function` -> `tool_name`
-- `parameters` / `input` / `args` -> `arguments`
-- `type=final` -> `type=finish`
-
-归一化只负责把常见字段别名整理成标准 `AgentAction`，不会跳过 `ToolRouter -> PolicyChecker -> call_tool_traced(...)` 这条执行链。你可以用下面的 fake actions 文件直接验证这条兼容路径：
+离线测试使用结构化 `LLMResponse` JSONL，每行包含 `content` 和 `tool_calls`，调用示例：
 
 ```bash
 PYTHONPATH=src python -m codepilot.cli agent-run \
   "Fix the failing add test" \
   --repo /tmp/codepilot-agent-demo \
-  --fake-actions tests/codepilot/fixtures/agent_actions_aliases.jsonl \
-  --approve \
-  --policy-mode build \
-  --run-id demo-agent-alias-actions
-```
-
-运行后，`runs/demo-agent-alias-actions/trace.jsonl` 里的 `agent_action` 事件会带上 `normalization_applied`、`normalized_fields`、`raw_action_preview` 和 `normalized_action_preview`，方便排查真实 LLM 的字段漂移。
-
-### 使用 fake actions 运行最小闭环
-
-可以用 JSONL 文件驱动 `FakeLLMClient`，逐步验证 loop 行为：
-
-```bash
-PYTHONPATH=src python -m codepilot.cli agent-run \
-  "Fix the failing add test" \
-  --repo /tmp/codepilot-agent-demo \
-  --fake-actions tests/codepilot/fixtures/agent_actions_success.jsonl \
+  --fake-responses tests/codepilot/fixtures/agent_responses_success.jsonl \
   --approve \
   --policy-mode build \
   --run-id demo-agent-loop
 ```
 
-CLI 输出会包含：
-
-- `Status: <status>`
-- `Success: <true/false>`
-- `Steps: <n>`
-- `Changed files:`
-- `Tests: <passed/failed/unknown>`
-- `Policy violations: <n>`
-- `Trace: runs/<run_id>/trace.jsonl`
-
-在默认 FakeLLM 演示路径下，如果测试命令是 `python -m pytest ...`，`Changed files` 应只保留真实源码改动，例如 `src/calc.py`，不会再因为测试执行额外带出 `src/__pycache__/` 或 `tests/__pycache__/`。
-
-### 使用 mini-SWE-agent 现有模型配置
-
-如果不传 `--fake-actions`，`agent-run` 会复用 mini-SWE-agent 现有模型配置与模型构造逻辑，不新增第二套 provider、api key 或 base url 配置：
-
-```bash
-PYTHONPATH=src python -m codepilot.cli agent-run \
-  "Inspect the repository and propose a fix" \
-  --repo . \
-  --model-config mini \
-  --model anthropic/claude-sonnet-4-5
-```
-
-`agent-run` 支持的参数只有：
-
-- `--repo`
-- `--max-steps`
-- `--policy-mode`
-- `--approve`
-- `--fake-actions`
-- `--model`
-- `--model-config`
-- `--runs-dir`
-- `--run-id`
-
-不会新增计划外参数，例如 `--llm-api-key`、`--llm-base-url`。
+如果不传 `--fake-responses`，`agent-run` 会复用 mini-SWE-agent 现有模型配置与模型构造逻辑。
 
 ## CodePilot Lite 第十七步 - Terminal Dashboard 使用说明
 

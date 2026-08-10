@@ -40,7 +40,7 @@ class TUIRunnerConfig:
     model: str | None
     model_config: tuple[str, ...]
     permission_mode: PermissionMode
-    fake_actions: str | Path | None
+    fake_responses: str | Path | None
     mcp_config: str | Path | None
     max_steps: int
 
@@ -178,7 +178,7 @@ class TUIAgentRunner:
                 return build_agent_control_registry(supervisor, context)
 
         built_llm = build_codepilot_llm(
-            fake_actions=self.config.fake_actions,
+            fake_responses=self.config.fake_responses,
             model=session.current_model,
             model_config=list(self.config.model_config),
         )
@@ -203,7 +203,7 @@ class TUIAgentRunner:
         """返回纯解析得到的模型身份，不构造真实模型客户端。"""
 
         identity = resolve_codepilot_model_identity(
-            fake_actions=self.config.fake_actions,
+            fake_responses=self.config.fake_responses,
             model=self.config.model,
             model_config=list(self.config.model_config),
         )

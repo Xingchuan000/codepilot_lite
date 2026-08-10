@@ -37,7 +37,7 @@ def test_set_permission_mode_switches_broker_and_persists_session(tmp_path: Path
             model=None,
             model_config=(),
             permission_mode="manual",
-            fake_actions=None,
+            fake_responses=None,
             mcp_config=None,
             max_steps=1,
         ),

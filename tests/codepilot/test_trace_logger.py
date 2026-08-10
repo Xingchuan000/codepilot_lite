@@ -201,25 +201,23 @@ def test_trace_logger_record_llm_call(tmp_path) -> None:
     assert event["metadata"]["source"] == "test"
 
 
-def test_trace_logger_record_agent_action_and_parse_failure(tmp_path) -> None:
+def test_trace_logger_record_native_finish_action(tmp_path) -> None:
     logger = TraceLogger(runs_dir=tmp_path, run_id="run-test")
 
     logger.record_agent_action(
-        action_type="tool_call",
-        tool_name="read_file",
-        input={"tool_name": "read_file"},
-        success=False,
-        error="bad json",
-        metadata={"parse_success": False},
+        action_type="finish",
+        input={"status": "success", "summary": "done"},
+        success=True,
+        metadata={"completion_kind": "conversation"},
     )
 
     event = json.loads(logger.trace_path.read_text(encoding="utf-8").splitlines()[0])
     assert event["event_type"] == "agent_action"
-    assert event["tool_name"] == "read_file"
-    assert event["success"] is False
-    assert event["error"] == "bad json"
-    assert event["metadata"]["action_type"] == "tool_call"
-    assert event["metadata"]["parse_success"] is False
+    assert event["tool_name"] is None
+    assert event["success"] is True
+    assert event["error"] is None
+    assert event["metadata"]["action_type"] == "finish"
+    assert event["metadata"]["completion_kind"] == "conversation"
 
 
 def test_trace_logger_record_agent_observation_truncates_output(tmp_path) -> None:
