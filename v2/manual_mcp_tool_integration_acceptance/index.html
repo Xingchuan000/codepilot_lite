@@ -2535,7 +2535,7 @@
 <li><code>codepilot mcp-call mcp.filesystem.write_file '{"path":"demo.txt","content":"hello"}' --mcp-config examples/mcp/fake_filesystem_mcp.json</code></li>
 <li><code>codepilot mcp-call mcp.filesystem.write_file '{"path":"demo.txt","content":"hello"}' --mcp-config examples/mcp/fake_filesystem_mcp.json --approve</code></li>
 <li><code>codepilot mcp-call mcp.filesystem.publish_release '{"version":"1.0.0"}' --mcp-config examples/mcp/fake_filesystem_mcp.json --approve</code></li>
-<li><code>codepilot agent-run "Use MCP to read README and summarize it" --repo . --fake-actions examples/mcp/fake_actions_mcp_read_file.jsonl --mcp-config examples/mcp/fake_filesystem_mcp.json --approve</code></li>
+<li><code>codepilot agent-run "Use MCP to read README and summarize it" --repo . --fake-responses examples/mcp/fake_responses_mcp_read_file.jsonl --mcp-config examples/mcp/fake_filesystem_mcp.json --approve</code></li>
 <li>trace contains <code>mcp=true</code>, <code>server_name</code>, <code>mcp_tool_name</code>, <code>codepilot_tool_name</code>, <code>descriptor_hash</code>.</li>
 <li>trace does not contain cleartext <code>token</code>, <code>secret</code>, <code>password</code>, <code>api_key</code>, or <code>env</code> values.</li>
 </ol>
