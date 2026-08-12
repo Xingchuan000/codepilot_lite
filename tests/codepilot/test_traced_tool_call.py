@@ -35,7 +35,8 @@ def test_call_tool_traced_writes_event(tmp_path: Path) -> None:
     assert data["tool_name"] == "list_files"
     assert data["risk"] == "read_only"
     assert data["side_effect"] == "none"
-    assert data["default_permission"] == "allow"
+    assert data["external_impact"] == "none"
+    assert data["reversibility"] == "not_applicable"
     assert data["metadata"]["output_chars"] == len(result.output)
     assert data["input"]["offset"] == 0
     assert data["metadata"]["has_more"] is False
@@ -102,7 +103,8 @@ def test_call_tool_traced_unknown_tool_still_writes_trace(tmp_path: Path) -> Non
     assert data["tool_name"] == "unknown"
     assert data["risk"] is None
     assert data["side_effect"] is None
-    assert data["default_permission"] is None
+    assert data["external_impact"] is None
+    assert data["reversibility"] is None
 
 
 def test_call_tool_traced_marks_truncated_preview(tmp_path: Path) -> None:
@@ -146,7 +148,8 @@ def test_call_tool_traced_apply_patch_dry_run_records_local_write_metadata(tmp_p
     assert data["tool_name"] == "apply_patch"
     assert data["risk"] == "local_write"
     assert data["side_effect"] == "local_write"
-    assert data["default_permission"] == "ask"
+    assert data["external_impact"] == "none"
+    assert data["reversibility"] == "reversible"
     assert data["metadata"]["touched_paths"] == ["src/a.py"]
 
 

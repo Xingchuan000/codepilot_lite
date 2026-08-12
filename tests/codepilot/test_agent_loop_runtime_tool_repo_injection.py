@@ -9,7 +9,8 @@ from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
 from codepilot.router.runtime_tools import RuntimeToolRegistry
 from codepilot.tools.base import (
-    DefaultPermission,
+    ExternalImpact,
+    Reversibility,
     ToolIdempotency,
     ToolRecoveryStrategy,
     ToolResult,
@@ -25,7 +26,8 @@ def _runtime_spec() -> ToolSpec:
         description="Spawn a delegated agent.",
         risk=ToolRisk.LOCAL_EXECUTION,
         side_effect=ToolSideEffect.LOCAL_EXEC,
-        default_permission=DefaultPermission.ALLOW,
+        external_impact=ExternalImpact.NONE,
+        reversibility=Reversibility.REVERSIBLE,
         idempotency=ToolIdempotency.CONDITIONAL,
         recovery_strategy=ToolRecoveryStrategy.RECONCILE_OR_ASK,
         parameters={"agent_type": "agent type", "task": "task"},
@@ -39,7 +41,8 @@ def test_repo_is_injected_only_when_tool_declares_repo() -> None:
         description="read",
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
-        default_permission=DefaultPermission.ALLOW,
+        external_impact=ExternalImpact.NONE,
+        reversibility=Reversibility.NOT_APPLICABLE,
         parameters={"repo": "repo", "path": "path"},
         inject_repo=True,
     )
@@ -63,7 +66,7 @@ def test_loop_passes_runtime_tool_arguments_without_forced_repo(tmp_path: Path) 
         runs_dir=tmp_path / "runs",
         run_id="repo-injection-test",
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(mode="build", approved=True),
+        policy_context=PolicyContext(mode="build"),
         runtime_tool_registry=registry,
     )
     loop = MinimalAgentLoop(

@@ -16,7 +16,6 @@ def test_policy_context_defaults_and_path_support() -> None:
     context = PolicyContext(repo=Path("."))
 
     assert context.mode == "build"
-    assert context.approved is False
     assert context.interactive is False
     assert context.repo == Path(".")
 

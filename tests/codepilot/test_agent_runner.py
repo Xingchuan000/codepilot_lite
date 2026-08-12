@@ -40,7 +40,6 @@ def test_run_agent_task_with_fake_responses_fixes_demo_repo(tmp_path: Path) -> N
         task="Fix the failing add test",
         repo=repo,
         fake_responses=fixture,
-        approve=True,
         policy_mode="build",
         runs_dir=tmp_path / "runs",
         run_id="run-test",

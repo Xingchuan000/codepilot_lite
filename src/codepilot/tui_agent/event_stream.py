@@ -39,6 +39,8 @@ TRACE_METADATA_KEYS = (
     "action_id",
     "arguments_preview",
     "risk",
+    "external_impact",
+    "reversibility",
     "matched_rule",
     "created_at",
     "responded_at",

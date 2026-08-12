@@ -41,7 +41,7 @@ def test_trace_event_supports_policy_decision_fields() -> None:
         tool_name="run_shell",
         policy_decision="deny",
         policy_reason="blocked",
-        policy_rule="command.deny_substrings.rm -rf",
+        policy_rule="command.hard_deny.rm -rf /",
         policy_mode="build",
     )
 
@@ -50,7 +50,7 @@ def test_trace_event_supports_policy_decision_fields() -> None:
     assert data["event_type"] == "policy_decision"
     assert data["policy_decision"] == "deny"
     assert data["policy_reason"] == "blocked"
-    assert data["policy_rule"] == "command.deny_substrings.rm -rf"
+    assert data["policy_rule"] == "command.hard_deny.rm -rf /"
     assert data["policy_mode"] == "build"
 
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from codepilot.mcp.models import MCPServerConfig, MCPToolInfo
-from codepilot.tools.base import DefaultPermission, ToolSideEffect, ToolSpec
+from codepilot.tools.base import ToolSideEffect, ToolSpec
 
 
 def should_expose_mcp_tool(
@@ -17,10 +17,6 @@ def should_expose_mcp_tool(
         return False, "server_expose_to_agent_false"
     if tool.name in server.tool_denylist:
         return False, "tool_denylisted"
-    if spec.default_permission == DefaultPermission.DENY:
-        return False, "default_permission_deny"
-    if spec.side_effect == ToolSideEffect.EXTERNAL:
-        return False, "external_side_effect_not_exposed"
     if server.trust_level in {"local_untrusted", "remote_untrusted"}:
         if spec.side_effect == ToolSideEffect.NONE:
             if server.tool_allowlist and tool.name not in server.tool_allowlist:

@@ -2,20 +2,20 @@ from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.tools.actions import ToolAction
 
 
-def _decision(tool_name: str, arguments: dict, *, mode: str = "build", approved: bool = False):
+def _decision(tool_name: str, arguments: dict, *, mode: str = "build"):
     return PolicyChecker.default().check(
         ToolAction(tool_name=tool_name, arguments=arguments),
-        context=PolicyContext(mode=mode, approved=approved),
+        context=PolicyContext(mode=mode),
     )
 
 
-def test_replace_range_safe_path_in_build_mode_asks(tmp_path) -> None:
+def test_replace_range_safe_path_in_build_mode_allows(tmp_path) -> None:
     decision = _decision(
         "replace_range",
         {"repo": tmp_path, "path": "src/demo.py", "start_line": 1, "end_line": 1, "replacement": "x\n"},
     )
 
-    assert decision.asks is True
+    assert decision.allowed is True
 
 
 def test_replace_range_env_path_denied(tmp_path) -> None:
@@ -46,7 +46,7 @@ def test_replace_range_read_only_mode_denied(tmp_path) -> None:
     assert decision.denied is True
 
 
-def test_apply_patch_safe_path_in_build_mode_asks(tmp_path) -> None:
+def test_apply_patch_safe_path_in_build_mode_allows(tmp_path) -> None:
     decision = _decision(
         "apply_patch",
         {
@@ -55,7 +55,7 @@ def test_apply_patch_safe_path_in_build_mode_asks(tmp_path) -> None:
         },
     )
 
-    assert decision.asks is True
+    assert decision.allowed is True
 
 
 def test_apply_patch_env_path_denied(tmp_path) -> None:

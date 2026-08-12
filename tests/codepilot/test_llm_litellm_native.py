@@ -8,7 +8,7 @@ import pytest
 from codepilot.llm.litellm_native import LiteLLMNativeClient, LLMProtocolError
 from codepilot.llm.tool_schema import to_litellm_tools
 from codepilot.llm.types import ChatMessage
-from codepilot.tools.base import DefaultPermission, ToolRisk, ToolSideEffect, ToolSpec
+from codepilot.tools.base import ExternalImpact, Reversibility, ToolRisk, ToolSideEffect, ToolSpec
 from codepilot.tools.registry import get_tool_spec
 
 
@@ -184,7 +184,8 @@ def test_native_client_aliases_mcp_tool_name_and_restores_codepilot_name(monkeyp
         description="Fetch research URL",
         risk=ToolRisk.NETWORK,
         side_effect=ToolSideEffect.NETWORK,
-        default_permission=DefaultPermission.ASK,
+        external_impact=ExternalImpact.READ,
+        reversibility=Reversibility.NOT_APPLICABLE,
         input_schema={
             "type": "object",
             "properties": {"url": {"type": "string"}},

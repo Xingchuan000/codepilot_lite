@@ -23,6 +23,8 @@ def test_persisted_grant_is_replayed_without_ui_request(tmp_path: Path) -> None:
         reason="run command",
         risk="shell_execution",
         side_effect="read_only",
+        external_impact="none",
+        reversibility="not_applicable",
         matched_rule="ask",
         created_at="2024-01-01T00:00:00Z",
         session_id=session.session_id,
@@ -41,4 +43,3 @@ def test_persisted_grant_is_replayed_without_ui_request(tmp_path: Path) -> None:
 
     assert second_inner.requests == []
     assert second.wait(replayed.request_id).decision == "approve_session"
-

@@ -43,7 +43,6 @@ def test_clean_repo_writes_manifest_restore_plan_and_summary_sections(tmp_path: 
         repo=_write_bug_repo(tmp_path),
         run_id="issue-clean",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=_success_fixture(),
         overwrite=True,
     )
@@ -67,7 +66,6 @@ def test_manifest_records_pr_summary_and_manifest_as_existing_after_success(tmp_
         repo=_write_bug_repo(tmp_path),
         run_id="issue-manifest-success",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=_success_fixture(),
         overwrite=True,
     )
@@ -141,7 +139,6 @@ def test_dirty_repo_warn_continues_and_records_preexisting_warning(tmp_path: Pat
         repo=repo,
         run_id="issue-dirty-warn",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=_success_fixture(),
         dirty_policy="warn",
         overwrite=True,
@@ -162,7 +159,6 @@ def test_worktree_isolation_keeps_original_repo_clean(tmp_path: Path) -> None:
         repo=repo,
         run_id="issue-worktree",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=_success_fixture(),
         worktree=True,
         worktree_base_dir=tmp_path / "worktrees-1",
@@ -189,7 +185,6 @@ def test_dirty_repo_worktree_does_not_include_original_dirty_file(tmp_path: Path
         repo=repo,
         run_id="issue-dirty-worktree",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=_success_fixture(),
         worktree=True,
         dirty_policy="fail",
@@ -254,7 +249,6 @@ def test_cleanup_worktree_records_cleanup_result(tmp_path: Path) -> None:
         repo=repo,
         run_id="issue-worktree-cleanup",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=_success_fixture(),
         worktree=True,
         cleanup_worktree=True,
@@ -293,7 +287,6 @@ def test_issue_workflow_does_not_modify_github_workflow_path_via_approved_edit(t
         repo=repo,
         run_id="issue-workflow-protect",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=fake_responses,
         overwrite=True,
     )
@@ -342,7 +335,6 @@ def test_issue_workflow_writes_failure_artifacts_when_patch_export_fails(tmp_pat
         repo=repo,
         run_id="issue-patch-fail",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=_success_fixture(),
         overwrite=True,
     )
@@ -384,7 +376,7 @@ def test_issue_workflow_marks_protected_after_path_denied_when_shell_creates_env
         repo=repo,
         run_id="issue-protected-after",
         runs_dir=tmp_path / "runs",
-        approve=True,
+        policy_mode="danger",
         fake_responses=fake_responses,
         overwrite=True,
     )
@@ -424,7 +416,7 @@ def test_issue_workflow_records_untracked_normal_file_in_manifest_and_summary(tm
         repo=repo,
         run_id="issue-untracked",
         runs_dir=tmp_path / "runs",
-        approve=True,
+        policy_mode="danger",
         fake_responses=fake_responses,
         overwrite=True,
     )

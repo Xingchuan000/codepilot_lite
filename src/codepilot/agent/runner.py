@@ -270,7 +270,6 @@ def run_agent_task(
     repo: str | Path,
     max_steps: int = 12,
     policy_mode: Literal["read_only", "build", "danger"] = "build",
-    approve: bool = False,
     fake_responses: str | Path | None = None,
     model: str | None = None,
     model_config: list[str] | None = None,
@@ -282,7 +281,7 @@ def run_agent_task(
 
     repo_path = Path(repo).expanduser().resolve()
     built_llm = build_codepilot_llm(fake_responses=fake_responses, model=model, model_config=model_config)
-    policy_context = PolicyContext(repo=repo_path, mode=policy_mode, approved=approve, interactive=False)
+    policy_context = PolicyContext(repo=repo_path, mode=policy_mode, interactive=False)
     mcp_registry = MCPToolRegistry.from_config(mcp_config) if mcp_config else None
     extra_specs = {spec.name: spec for spec in mcp_registry.list_specs()} if mcp_registry else {}
     # 这里必须通过 ToolRouter.from_runs_dir(...) 统一创建 TraceLogger，

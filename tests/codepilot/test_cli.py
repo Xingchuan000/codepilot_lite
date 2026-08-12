@@ -254,7 +254,7 @@ def test_route_default_policy_requires_approval_without_approve(tmp_path: Path) 
     assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision"]
 
 
-def test_route_default_policy_approve_executes_shell(tmp_path: Path) -> None:
+def test_route_default_policy_ask_does_not_execute_shell(tmp_path: Path) -> None:
     result = runner.invoke(
         app,
         [
@@ -264,18 +264,16 @@ def test_route_default_policy_approve_executes_shell(tmp_path: Path) -> None:
             str(tmp_path / "runs"),
             "--run-id",
             "run-test",
-            "--approve",
         ],
     )
 
     assert result.exit_code == 0
     assert '"policy_decision": "ask"' in result.stdout
-    assert '"approved": true' in result.stdout
     lines = (tmp_path / "runs" / "run-test" / "trace.jsonl").read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision", "tool_call"]
+    assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision"]
 
 
-def test_route_default_policy_read_only_denies_shell(tmp_path: Path) -> None:
+def test_route_read_only_asks_for_unknown_shell(tmp_path: Path) -> None:
     result = runner.invoke(
         app,
         [
@@ -291,7 +289,7 @@ def test_route_default_policy_read_only_denies_shell(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert '"policy_decision": "deny"' in result.stdout
+    assert '"policy_decision": "ask"' in result.stdout
     lines = (tmp_path / "runs" / "run-test" / "trace.jsonl").read_text(encoding="utf-8").splitlines()
     assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision"]
 
@@ -317,7 +315,7 @@ def test_cli_route_run_tests_executes_safe_command(tmp_path: Path) -> None:
     assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision", "tool_call"]
 
 
-def test_cli_route_run_tests_read_only_denied(tmp_path: Path) -> None:
+def test_cli_route_run_tests_read_only_allowed(tmp_path: Path) -> None:
     repo = _write_pytest_repo(tmp_path)
 
     result = runner.invoke(
@@ -335,7 +333,7 @@ def test_cli_route_run_tests_read_only_denied(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0
-    assert '"policy_decision": "deny"' in result.stdout
+    assert '"policy_decision": "allow"' in result.stdout
 
 
 def test_cli_route_git_status_executes(tmp_path: Path) -> None:

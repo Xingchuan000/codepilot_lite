@@ -22,7 +22,7 @@ from codepilot.session.runtime import SessionRuntime
 from codepilot.trace.events import TraceEvent
 from codepilot.tui_agent.event_stream import MemoryEventStream, trace_event_to_tui_event
 from codepilot.tui_agent.models import PermissionMode, ProjectContext, TUIEvent
-from codepilot.tui_agent.permission_broker import AutoApproveLocalWriteBroker, NonInteractiveBroker, PermissionBroker
+from codepilot.tui_agent.permission_broker import NonInteractiveBroker, PermissionBroker
 from codepilot.tui_agent.session_controller import SessionController, now_iso
 
 
@@ -53,28 +53,17 @@ _UNCONFIRMED_BRANCH = object()
 
 def _policy_context_for_mode(mode: PermissionMode, repo: Path) -> PolicyContext:
     if mode == "read_only":
-        return PolicyContext(repo=repo, mode="read_only", approved=False, interactive=True)
+        return PolicyContext(repo=repo, mode="read_only", interactive=True)
     if mode == "unsafe_auto":
-        return PolicyContext(repo=repo, mode="danger", approved=True, interactive=True)
-    return PolicyContext(repo=repo, mode="build", approved=False, interactive=True)
+        return PolicyContext(repo=repo, mode="danger", interactive=True)
+    return PolicyContext(repo=repo, mode="build", interactive=True)
 
 
 def _policy_context_for_agent(mode: PermissionMode, repo: Path, profile) -> PolicyContext:
-    """Derive the execution mode without weakening the profile tool allow-list.
-
-    Explore should stay read-only even when the Primary is in a build mode. Scout
-    must be able to use read-only NETWORK tools, so a read_only Primary cannot be
-    mapped to PolicyChecker.read_only because that mode denies every NETWORK side
-    effect before the Scout allow-list is considered. General keeps the parent
-    ceiling unchanged.
-    """
+    """Apply the parent permission ceiling; Explore is always read-only."""
 
     if profile is not None and profile.name == "explore":
-        return PolicyContext(repo=repo, mode="read_only", approved=False, interactive=True)
-    if profile is not None and profile.name == "scout":
-        if mode == "unsafe_auto":
-            return PolicyContext(repo=repo, mode="danger", approved=True, interactive=True)
-        return PolicyContext(repo=repo, mode="build", approved=False, interactive=True)
+        return PolicyContext(repo=repo, mode="read_only", interactive=True)
     return _policy_context_for_mode(mode, repo)
 
 
@@ -222,7 +211,7 @@ class TUIAgentRunner:
         if session_id == self.active_session_id:
             inner = self.mode_permission_broker
         else:
-            inner = AutoApproveLocalWriteBroker(self.base_permission_broker) if mode == "accept_edits" else self.base_permission_broker
+            inner = self.base_permission_broker
         broker = self._session_permission_brokers.get(session_id)
         if broker is None or broker.inner is not inner:
             broker = SessionPermissionBroker(self.session_controller.database, session_id, inner)
@@ -242,7 +231,7 @@ class TUIAgentRunner:
 
     def set_permission_mode(self, mode: PermissionMode) -> None:
         self.config = replace(self.config, permission_mode=mode)
-        self.mode_permission_broker = AutoApproveLocalWriteBroker(self.base_permission_broker) if mode == "accept_edits" else self.base_permission_broker
+        self.mode_permission_broker = self.base_permission_broker
         if self.active_session_id is not None:
             self._session_permission_brokers.pop(self.active_session_id, None)
             self.session_permission_broker = SessionPermissionBroker(self.session_controller.database, self.active_session_id, self.mode_permission_broker)
@@ -441,4 +430,3 @@ class TUIAgentRunner:
     def is_running(self) -> bool:
         with self._lock:
             return bool(self._thread and self._thread.is_alive())
-

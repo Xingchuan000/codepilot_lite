@@ -32,7 +32,7 @@ def _build_loop(tmp_path: Path, responses: list[LLMResponse], *, max_steps: int 
         runs_dir=tmp_path / "runs",
         run_id="run-test",
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(mode="build", approved=True, interactive=False),
+        policy_context=PolicyContext(mode="build", interactive=False),
     )
     return MinimalAgentLoop(llm=StructuredFakeLLM(responses), router=router, max_steps=max_steps)
 

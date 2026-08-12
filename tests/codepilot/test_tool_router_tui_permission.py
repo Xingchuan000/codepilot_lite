@@ -35,7 +35,7 @@ def test_router_registers_permission_before_trace_publish_and_executes(tmp_path:
     router = ToolRouter.from_runs_dir(
         trace_logger=logger,
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(repo=repo, mode="build", approved=False, interactive=True),
+        policy_context=PolicyContext(repo=repo, mode="build", interactive=True),
         permission_broker=broker,
     )
 
@@ -71,7 +71,7 @@ def test_router_deny_does_not_execute_tool(tmp_path: Path) -> None:
     router = ToolRouter.from_runs_dir(
         trace_logger=logger,
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(repo=repo, mode="build", approved=False, interactive=True),
+        policy_context=PolicyContext(repo=repo, mode="build", interactive=True),
         permission_broker=broker,
     )
 
@@ -116,7 +116,7 @@ def test_router_accepts_structural_permission_broker(tmp_path: Path) -> None:
     router = ToolRouter.from_runs_dir(
         trace_logger=logger,
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(repo=repo, mode="build", approved=False, interactive=True),
+        policy_context=PolicyContext(repo=repo, mode="build", interactive=True),
         permission_broker=broker,
     )
 
@@ -144,7 +144,7 @@ def test_router_raises_when_broker_missing_wait(tmp_path: Path) -> None:
     router = ToolRouter.from_runs_dir(
         trace_logger=logger,
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(repo=repo, mode="build", approved=False, interactive=True),
+        policy_context=PolicyContext(repo=repo, mode="build", interactive=True),
         permission_broker=NoWaitBroker(),
     )
 

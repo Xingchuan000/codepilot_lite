@@ -13,7 +13,7 @@ from codepilot.session.tool_lifecycle import SQLiteToolLifecycleObserver
 from codepilot.session.trace_recorder import SessionTraceRecorder
 
 
-def _router(tmp_path: Path, *, approved: bool = True) -> tuple[ToolRouter, SessionRepositories, str]:
+def _router(tmp_path: Path) -> tuple[ToolRouter, SessionRepositories, str]:
     database = SessionDatabase(tmp_path / "data" / "sessions.sqlite3")
     database.initialize()
     store = SessionRepositories(database)
@@ -32,7 +32,7 @@ def _router(tmp_path: Path, *, approved: bool = True) -> tuple[ToolRouter, Sessi
         ToolRouter(
             trace,
             policy_checker=PolicyChecker.default(),
-            policy_context=PolicyContext(mode="build", approved=approved, interactive=False),
+            policy_context=PolicyContext(mode="build", interactive=False),
             lifecycle_observer=SQLiteToolLifecycleObserver(database, session.session_id, turn.turn_id, attempt.attempt_id),
         ),
         store,
@@ -58,7 +58,7 @@ def test_repeated_same_tool_calls_keep_distinct_stable_ids(tmp_path: Path) -> No
 
 
 def test_policy_and_missing_permission_denials_write_terminal_results(tmp_path: Path) -> None:
-    router, store, turn_id = _router(tmp_path, approved=False)
+    router, store, turn_id = _router(tmp_path)
 
     policy_denied = router.route(ToolAction(tool_name="read_file", arguments={"repo": tmp_path, "path": ".env"}))
     permission_denied = router.route(ToolAction(tool_name="run_shell", arguments={"repo": tmp_path, "command": "echo hi"}))
@@ -142,4 +142,3 @@ def test_recovery_token_failure_closes_call_before_side_effect(tmp_path: Path) -
     assert row["status"] == "failed"
     assert result is not None
     assert result.metadata == {"executed": False, "phase": "recovery_token"}
-

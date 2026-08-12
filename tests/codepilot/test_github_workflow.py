@@ -145,7 +145,6 @@ def test_run_issue_workflow_from_file_creates_expected_artifacts(tmp_path: Path)
         repo=repo,
         run_id="issue-test",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=fixture,
         overwrite=True,
     )
@@ -234,7 +233,6 @@ def test_run_issue_workflow_overwrite_true_allows_rerun_same_run_id(tmp_path: Pa
         repo=repo,
         run_id="issue-test",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=fixture,
         overwrite=True,
     )
@@ -243,7 +241,6 @@ def test_run_issue_workflow_overwrite_true_allows_rerun_same_run_id(tmp_path: Pa
         repo=repo,
         run_id="issue-test",
         runs_dir=tmp_path / "runs",
-        approve=True,
         fake_responses=fixture,
         dirty_policy="warn",
         overwrite=True,

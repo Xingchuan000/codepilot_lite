@@ -49,5 +49,4 @@ class PolicyContext(BaseModel):
     repo: str | Path | None = None
     mode: PolicyMode = "build"
     interactive: bool = False
-    approved: bool = False
     metadata: dict[str, Any] = Field(default_factory=dict)

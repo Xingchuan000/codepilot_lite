@@ -137,30 +137,3 @@ class BlockingTUIBroker:
             with self._lock:
                 self._pending.pop(request_id, None)
                 self._resolved_early.pop(request_id, None)
-
-
-class AutoApproveLocalWriteBroker:
-    def __init__(self, inner: PermissionBroker) -> None:
-        self.inner = inner
-
-    def request(self, request: PermissionRequest) -> PermissionRequest:
-        self.inner.request(request)
-        if request.side_effect == "local_write":
-            self.resolve(
-                PermissionResponse(
-                    request_id=request.request_id,
-                    decision="approve_once",
-                    reason="auto-approved local_write",
-                    responded_at=request.created_at,
-                )
-            )
-        return request
-
-    def resolve(self, response: PermissionResponse) -> None:
-        self.inner.resolve(response)
-
-    def wait(self, request_id: str) -> PermissionResponse | None:
-        return self.inner.wait(request_id)
-
-    def cancel_all(self, reason: str = "cancelled") -> None:
-        self.inner.cancel_all(reason)

@@ -186,7 +186,6 @@ class IssueWorkflowContext:
     safety_config: RepoSafetyConfig
     dirty_policy: DirtyPolicy
     policy_mode: Literal["read_only", "build", "danger"]
-    approve: bool
     fake_responses: str | Path | None
     max_steps: int | None
     generate_report_markdown: bool
@@ -244,7 +243,6 @@ def _build_issue_context(
     run_id: str | None,
     runs_dir: str | Path,
     policy_mode: Literal["read_only", "build", "danger"],
-    approve: bool,
     fake_responses: str | Path | None,
     max_steps: int | None,
     generate_report_markdown: bool,
@@ -305,7 +303,6 @@ def _build_issue_context(
         safety_config=safety_config,
         dirty_policy=dirty_policy,
         policy_mode=policy_mode,
-        approve=approve,
         fake_responses=fake_responses,
         max_steps=max_steps,
         generate_report_markdown=generate_report_markdown,
@@ -360,7 +357,6 @@ def _run_agent_phase(ctx: IssueWorkflowContext, task: str) -> AgentPhaseResult:
             repo=ctx.effective_repo_path,
             max_steps=12 if ctx.max_steps is None else ctx.max_steps,
             policy_mode=ctx.policy_mode,
-            approve=ctx.approve,
             fake_responses=ctx.fake_responses,
             runs_dir=ctx.runs_root,
             run_id=ctx.resolved_run_id,
@@ -638,7 +634,6 @@ def run_issue_workflow(
     run_id: str | None = None,
     runs_dir: str | Path = "runs",
     policy_mode: Literal["read_only", "build", "danger"] = "build",
-    approve: bool = False,
     fake_responses: str | Path | None = None,
     max_steps: int | None = None,
     generate_report_markdown: bool = True,
@@ -663,7 +658,6 @@ def run_issue_workflow(
         run_id=run_id,
         runs_dir=runs_dir,
         policy_mode=policy_mode,
-        approve=approve,
         fake_responses=fake_responses,
         max_steps=max_steps,
         generate_report_markdown=generate_report_markdown,

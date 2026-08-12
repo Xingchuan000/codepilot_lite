@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from codepilot.tools.actions import ToolAction
+from codepilot.policy.effects import classify_shell_command
 from codepilot.session.artifacts import ArtifactStore
 from codepilot.session.database import SessionDatabase
 from codepilot.session.models import to_jsonable
-from codepilot.session.reconcilers import shell_command_is_read_only
 from codepilot.session.repositories import SessionRepositories
 from codepilot.tools.base import ToolResult, ToolSpec
 
@@ -172,11 +172,13 @@ class SQLiteToolLifecycleObserver:
             )
         elif action.tool_name == "run_shell":
             command = str(arguments["command"])
+            effect = classify_shell_command(command)
             token.update(
                 {
                     "repo": str(Path(arguments["repo"]).expanduser().resolve()),
                     "command_sha256": _sha256_bytes(command.encode("utf-8")),
-                    "auto_retry_allowed": shell_command_is_read_only(command),
+                    "auto_retry_allowed": effect.reversibility.value == "not_applicable"
+                    and effect.external_impact.value == "none",
                 }
             )
         return token

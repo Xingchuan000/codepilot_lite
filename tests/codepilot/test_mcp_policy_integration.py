@@ -12,15 +12,15 @@ def test_policy_checker_accepts_mcp_extra_specs() -> None:
     read = checker.check(ToolAction(tool_name="mcp.filesystem.read_file", arguments={"path": "README.md"}), context=PolicyContext(mode="build"))
     write = checker.check(ToolAction(tool_name="mcp.filesystem.write_file", arguments={"path": "demo.txt"}), context=PolicyContext(mode="build"))
     write_read_only = checker.check(ToolAction(tool_name="mcp.filesystem.write_file", arguments={"path": "demo.txt"}), context=PolicyContext(mode="read_only"))
-    deny = checker.check(ToolAction(tool_name="mcp.filesystem.publish_release", arguments={"version": "1.0.0"}), context=PolicyContext(mode="build", approved=True))
+    deny = checker.check(ToolAction(tool_name="mcp.filesystem.publish_release", arguments={"version": "1.0.0"}), context=PolicyContext(mode="build"))
     env_deny = checker.check(ToolAction(tool_name="mcp.filesystem.read_file", arguments={"path": ".env"}), context=PolicyContext(mode="build"))
     cmd_deny = checker.check(ToolAction(tool_name="mcp.filesystem.run_command", arguments={"command": "rm -rf ."}), context=PolicyContext(mode="build"))
 
     assert read.decision == "allow"
     assert write.decision == "ask"
     assert write_read_only.decision == "deny"
-    assert deny.decision == "deny"
+    assert deny.decision == "ask"
     assert env_deny.decision == "deny"
-    assert cmd_deny.decision == "deny"
+    assert cmd_deny.decision == "ask"
     assert read.metadata["server_name"] == "filesystem"
     assert "descriptor_hash" in read.metadata

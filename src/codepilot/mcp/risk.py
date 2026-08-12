@@ -4,7 +4,7 @@ import re
 
 from codepilot.mcp.models import MCPServerConfig, MCPToolInfo, MCPToolSideEffectHint
 from codepilot.mcp.trace import build_codepilot_mcp_tool_name, build_mcp_config_hash, build_mcp_descriptor_hash
-from codepilot.tools.base import DefaultPermission, ToolRisk, ToolSideEffect, ToolSpec
+from codepilot.tools.base import ExternalImpact, Reversibility, ToolRisk, ToolSideEffect, ToolSpec
 
 
 def _text(tool: MCPToolInfo) -> str:
@@ -59,17 +59,17 @@ def infer_side_effect_hint(tool: MCPToolInfo, *, server: MCPServerConfig | None 
     if any(_has_token(text, token) for token in ("read", "list", "get", "search", "find", "query", "inspect")):
         return "read_only", "keyword.read_only"
 
-    return "network", "fallback.network"
+    return "unknown", "fallback.unknown"
 
 
-def _risk_and_permission(hint: MCPToolSideEffectHint) -> tuple[ToolRisk, ToolSideEffect, DefaultPermission]:
+def _effect(hint: MCPToolSideEffectHint) -> tuple[ToolRisk, ToolSideEffect, ExternalImpact, Reversibility]:
     mapping = {
-        "read_only": (ToolRisk.READ_ONLY, ToolSideEffect.NONE, DefaultPermission.ALLOW),
-        "local_write": (ToolRisk.LOCAL_WRITE, ToolSideEffect.LOCAL_WRITE, DefaultPermission.ASK),
-        "local_exec": (ToolRisk.LOCAL_EXECUTION, ToolSideEffect.LOCAL_EXEC, DefaultPermission.ASK),
-        "network": (ToolRisk.NETWORK, ToolSideEffect.NETWORK, DefaultPermission.ASK),
-        "external": (ToolRisk.EXTERNAL_SIDE_EFFECT, ToolSideEffect.EXTERNAL, DefaultPermission.DENY),
-        "unknown": (ToolRisk.NETWORK, ToolSideEffect.NETWORK, DefaultPermission.ASK),
+        "read_only": (ToolRisk.READ_ONLY, ToolSideEffect.NONE, ExternalImpact.NONE, Reversibility.NOT_APPLICABLE),
+        "local_write": (ToolRisk.LOCAL_WRITE, ToolSideEffect.LOCAL_WRITE, ExternalImpact.NONE, Reversibility.UNKNOWN),
+        "local_exec": (ToolRisk.LOCAL_EXECUTION, ToolSideEffect.LOCAL_EXEC, ExternalImpact.NONE, Reversibility.UNKNOWN),
+        "network": (ToolRisk.NETWORK, ToolSideEffect.NETWORK, ExternalImpact.READ, Reversibility.NOT_APPLICABLE),
+        "external": (ToolRisk.EXTERNAL_SIDE_EFFECT, ToolSideEffect.EXTERNAL, ExternalImpact.WRITE, Reversibility.UNKNOWN),
+        "unknown": (ToolRisk.NETWORK, ToolSideEffect.NETWORK, ExternalImpact.UNKNOWN, Reversibility.UNKNOWN),
     }
     return mapping[hint]
 
@@ -78,7 +78,7 @@ def classify_mcp_tool(tool: MCPToolInfo, *, server: MCPServerConfig) -> ToolSpec
     descriptor_hash = tool.descriptor_hash or build_mcp_descriptor_hash(tool)
     config_hash = build_mcp_config_hash(server)
     hint, risk_source = infer_side_effect_hint(tool, server=server)
-    risk, side_effect, default_permission = _risk_and_permission(hint)
+    risk, side_effect, external_impact, reversibility = _effect(hint)
     codepilot_tool_name = build_codepilot_mcp_tool_name(server.name, tool.name)
     description = tool.description[: server.max_description_chars]
     if tool.input_schema.get("type") != "object":
@@ -88,7 +88,8 @@ def classify_mcp_tool(tool: MCPToolInfo, *, server: MCPServerConfig) -> ToolSpec
         description=description,
         risk=risk,
         side_effect=side_effect,
-        default_permission=default_permission,
+        external_impact=external_impact,
+        reversibility=reversibility,
         input_schema=dict(tool.input_schema),
         parameters={},
         metadata={

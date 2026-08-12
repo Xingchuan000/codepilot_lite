@@ -122,6 +122,8 @@ class SessionPermissionBroker:
             reason=record.reason,
             risk=record.metadata.get("risk"),
             side_effect=record.metadata.get("side_effect"),
+            external_impact=record.metadata.get("external_impact"),
+            reversibility=record.metadata.get("reversibility"),
             matched_rule=record.metadata.get("matched_rule"),
             created_at=record.created_at,
             status=record.status,

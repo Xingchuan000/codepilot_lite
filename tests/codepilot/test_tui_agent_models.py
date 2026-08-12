@@ -57,7 +57,9 @@ def test_permission_request_comes_from_codepilot_permissions() -> None:
         reason="need approval",
         risk="shell_execution",
         side_effect="local_exec",
-        matched_rule="tool.default_permission.ask",
+        external_impact="unknown",
+        reversibility="unknown",
+        matched_rule="effect.approval.ask",
         created_at="2024-01-01T00:00:00Z",
     )
 

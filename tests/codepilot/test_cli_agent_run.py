@@ -41,7 +41,6 @@ def test_cli_agent_run_with_fake_responses(tmp_path: Path) -> None:
             str(repo),
             "--fake-responses",
             str(fixture),
-            "--approve",
             "--policy-mode",
             "build",
             "--runs-dir",

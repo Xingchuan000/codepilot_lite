@@ -38,15 +38,18 @@ class ToolSideEffect(str, Enum):
     EXTERNAL = "external"
 
 
-class DefaultPermission(str, Enum):
-    """工具默认权限。
+class ExternalImpact(str, Enum):
+    NONE = "none"
+    READ = "read"
+    WRITE = "write"
+    UNKNOWN = "unknown"
 
-    allow / ask / deny 三档足够支撑第二步的工具层和后续权限策略。
-    """
 
-    ALLOW = "allow"
-    ASK = "ask"
-    DENY = "deny"
+class Reversibility(str, Enum):
+    NOT_APPLICABLE = "not_applicable"
+    REVERSIBLE = "reversible"
+    IRREVERSIBLE = "irreversible"
+    UNKNOWN = "unknown"
 
 
 class ToolIdempotency(str, Enum):
@@ -90,7 +93,8 @@ class ToolSpec(BaseModel):
     description: str
     risk: ToolRisk
     side_effect: ToolSideEffect
-    default_permission: DefaultPermission
+    external_impact: ExternalImpact
+    reversibility: Reversibility
     idempotency: ToolIdempotency = ToolIdempotency.UNKNOWN
     recovery_strategy: ToolRecoveryStrategy = ToolRecoveryStrategy.ASK_USER
     input_schema: dict[str, Any] = Field(

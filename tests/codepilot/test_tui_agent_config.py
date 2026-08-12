@@ -31,13 +31,13 @@ def test_cli_values_override_project_config(tmp_path: Path) -> None:
 
     config = merge_config(
         cli_model=None,
-        cli_permission_mode="accept_edits",
+        cli_permission_mode="unsafe_auto",
         cli_mcp_config=None,
         cli_max_steps=7,
         project=resolve_project(tmp_path),
     )
 
-    assert config.permission_mode == "accept_edits"
+    assert config.permission_mode == "unsafe_auto"
     assert config.max_steps == 7
 
 

@@ -20,19 +20,18 @@ def test_policy_run_tests_npm_test_allowed_in_build_mode(tmp_path: Path) -> None
     assert _check("run_tests", {"repo": tmp_path, "command": "npm test"}, PolicyContext(mode="build")).allowed
 
 
-def test_policy_run_tests_denied_in_read_only_mode(tmp_path: Path) -> None:
+def test_policy_run_tests_allowed_in_read_only_mode(tmp_path: Path) -> None:
     decision = _check("run_tests", {"repo": tmp_path, "command": "pytest -q"}, PolicyContext(mode="read_only"))
 
-    assert decision.denied is True
-    assert decision.matched_rule == "mode.read_only.side_effect.deny"
+    assert decision.allowed is True
 
 
-def test_policy_run_tests_curl_denied(tmp_path: Path) -> None:
-    assert _check("run_tests", {"repo": tmp_path, "command": "curl http://example.com"}).denied is True
+def test_policy_run_tests_curl_asks(tmp_path: Path) -> None:
+    assert _check("run_tests", {"repo": tmp_path, "command": "curl http://example.com"}).asks is True
 
 
-def test_policy_run_tests_git_push_denied(tmp_path: Path) -> None:
-    assert _check("run_tests", {"repo": tmp_path, "command": "pytest && git push"}).denied is True
+def test_policy_run_tests_complex_command_asks(tmp_path: Path) -> None:
+    assert _check("run_tests", {"repo": tmp_path, "command": "pytest && git push"}).asks is True
 
 
 def test_policy_git_status_allowed_in_read_only_mode(tmp_path: Path) -> None:

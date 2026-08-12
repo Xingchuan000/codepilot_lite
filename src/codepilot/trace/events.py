@@ -35,7 +35,8 @@ class TraceEvent(BaseModel):
     tool_name: str | None = None
     risk: str | None = None
     side_effect: str | None = None
-    default_permission: str | None = None
+    external_impact: str | None = None
+    reversibility: str | None = None
     policy_decision: str | None = None
     policy_reason: str | None = None
     policy_rule: str | None = None

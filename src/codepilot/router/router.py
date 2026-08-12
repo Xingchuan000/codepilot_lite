@@ -210,7 +210,6 @@ class ToolRouter:
             "policy_rule": decision.matched_rule,
             "policy_mode": self.policy_context.mode,
             "requires_approval": decision.requires_approval,
-            "approved": self.policy_context.approved,
         }
 
     def _permission_decision(self, response: PermissionResponse | None) -> Literal["approve_once", "approve_session", "deny"]:
@@ -272,7 +271,8 @@ class ToolRouter:
                 tool_name=name,
                 risk=spec.risk.value,
                 side_effect=spec.side_effect.value,
-                default_permission=spec.default_permission.value,
+                external_impact=spec.external_impact.value,
+                reversibility=spec.reversibility.value,
                 input=dict(arguments),
                 success=result.success,
                 output_summary=result.output_summary,
@@ -349,7 +349,7 @@ class ToolRouter:
             if decision.denied:
                 return self._route_policy_denial(parsed, tool_call_id, route_metadata, decision, record_trace=False)
 
-            if decision.asks and not self.policy_context.approved:
+            if decision.asks:
                 if self.permission_broker is not None and self.policy_context.interactive:
                     request_id = make_permission_request_id()
                     workspace_root = Path(self.policy_context.repo).expanduser().resolve() if self.policy_context.repo is not None else Path(".").resolve()
@@ -363,6 +363,8 @@ class ToolRouter:
                         reason=decision.reason,
                         risk=policy_metadata.get("risk") if isinstance(policy_metadata.get("risk"), str) else None,
                         side_effect=policy_metadata.get("side_effect") if isinstance(policy_metadata.get("side_effect"), str) else None,
+                        external_impact=policy_metadata.get("external_impact") if isinstance(policy_metadata.get("external_impact"), str) else None,
+                        reversibility=policy_metadata.get("reversibility") if isinstance(policy_metadata.get("reversibility"), str) else None,
                         matched_rule=decision.matched_rule,
                         created_at=permission_now_iso(),
                         tool_call_id=tool_call_id,
@@ -384,6 +386,8 @@ class ToolRouter:
                             "arguments_preview": parsed.arguments,
                             "risk": policy_metadata.get("risk"),
                             "side_effect": policy_metadata.get("side_effect"),
+                            "external_impact": policy_metadata.get("external_impact"),
+                            "reversibility": policy_metadata.get("reversibility"),
                             "matched_rule": decision.matched_rule,
                         },
                     )

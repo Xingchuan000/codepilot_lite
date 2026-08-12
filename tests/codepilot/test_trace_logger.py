@@ -146,7 +146,7 @@ def test_trace_logger_record_policy_decision(tmp_path) -> None:
         tool_name="run_shell",
         decision="deny",
         reason="blocked",
-        rule="command.deny_substrings.rm -rf",
+        rule="command.hard_deny.rm -rf /",
         mode="build",
         metadata={"checked": True},
     )

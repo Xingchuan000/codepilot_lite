@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import shlex
 from collections.abc import Mapping
 from enum import Enum
 from pathlib import Path
@@ -10,18 +11,18 @@ from typing import Any, cast
 from codepilot.common.patches import extract_paths_from_patch
 from codepilot.policy.config import PolicyConfig
 from codepilot.policy.defaults import default_policy_config
+from codepilot.policy.effects import ActionEffect, ActionEffectClassifier
 from codepilot.policy.models import PolicyContext, PolicyDecision, PolicyDecisionValue
 from codepilot.tools.actions import ToolAction
-from codepilot.tools.base import DefaultPermission, ToolSideEffect, ToolSpec
+from codepilot.tools.base import ExternalImpact, Reversibility, ToolSpec
 from codepilot.tools.registry import find_tool_spec
 
-COMMAND_TOOLS = {"run_shell", "run_tests"}
 STRUCTURED_WRITE_TOOLS = {"apply_patch", "replace_range"}
 PROTECTED_COMMAND_TOKENS = [".env", ".github/workflows", ".codepilot", "secrets/", ".ssh"]
 
 
 class PolicyChecker:
-    """用一组简单、可解释的规则判断工具动作是否可以执行。"""
+    """用硬边界和动作事实判断工具动作是否可以执行。"""
 
     def __init__(
         self,
@@ -30,6 +31,7 @@ class PolicyChecker:
     ) -> None:
         self.config = config or default_policy_config()
         self.extra_tool_specs = dict(extra_tool_specs or {})
+        self.effect_classifier = ActionEffectClassifier()
 
     @classmethod
     def default(cls, extra_tool_specs: Mapping[str, ToolSpec] | None = None) -> PolicyChecker:
@@ -45,34 +47,15 @@ class PolicyChecker:
         *,
         spec: ToolSpec | None = None,
     ) -> PolicyDecision:
-        """判断一次结构化工具动作是否可以放行。"""
-
         context = context or PolicyContext()
         tool_name = action.tool_name
         arguments = dict(action.arguments or {})
-        allowed_tools = context.metadata.get("allowed_tools")
-        if allowed_tools is not None:
-            if not isinstance(allowed_tools, (list, tuple, set)) or not all(isinstance(item, str) for item in allowed_tools):
-                return self._decision(
-                    "deny",
-                    "Invalid allowed_tools policy metadata.",
-                    tool_name=tool_name,
-                    matched_rule="agent.profile.allowed_tools.invalid",
-                    context=context,
-                    metadata={"known_tool": False},
-                )
-            if tool_name not in allowed_tools:
-                return self._decision(
-                    "deny",
-                    f"Tool '{tool_name}' is not allowed for the current agent profile.",
-                    tool_name=tool_name,
-                    matched_rule="agent.profile.tool.deny",
-                    context=context,
-                    metadata={"known_tool": self._find_tool_spec(tool_name) is not None},
-                )
+
+        profile_decision = self._check_agent_boundary(tool_name=tool_name, context=context)
+        if profile_decision is not None:
+            return profile_decision
 
         spec = spec or self._find_tool_spec(tool_name)
-
         if spec is None:
             return self._decision(
                 "allow",
@@ -83,7 +66,7 @@ class PolicyChecker:
                 metadata={"known_tool": False},
             )
 
-        metadata = self._base_metadata(spec=spec, context=context)
+        metadata = self._base_metadata(spec, context)
         repo_root = self._resolve_repo_root(arguments=arguments, context=context, metadata=metadata)
 
         path_decision = self._check_paths(
@@ -96,108 +79,51 @@ class PolicyChecker:
         if path_decision is not None:
             return path_decision
 
-        command_decision = self._check_command(
+        hard_deny = self._check_hard_deny_command(
             tool_name=tool_name,
             arguments=arguments,
-            spec=spec,
             context=context,
             metadata=metadata,
         )
-        if command_decision is not None:
-            return command_decision
+        if hard_deny is not None:
+            return hard_deny
 
-        if context.mode == "read_only" and self._enum_value(spec.side_effect) != self._enum_value(ToolSideEffect.NONE):
-            return self._decision(
-                "deny",
-                f"Policy mode read_only denies tool '{tool_name}' because it has side effect '{self._enum_value(spec.side_effect)}'.",
-                tool_name=tool_name,
-                matched_rule="mode.read_only.side_effect.deny",
-                context=context,
-                metadata=metadata,
-            )
-
-        if tool_name in self.config.tools.deny:
-            return self._decision(
-                "deny",
-                f"Tool '{tool_name}' is denied by policy config.",
-                tool_name=tool_name,
-                matched_rule=f"tool.deny.{tool_name}",
-                context=context,
-                metadata=metadata,
-            )
-
-        if tool_name in COMMAND_TOOLS:
-            allow_decision = self._allow_safe_command_prefix(
-                tool_name=tool_name,
-                arguments=arguments,
-                context=context,
-                metadata=metadata,
-            )
-            if allow_decision is not None:
-                return allow_decision
-
-        default_permission = self._enum_value(spec.default_permission)
-
-        if default_permission == self._enum_value(DefaultPermission.DENY):
-            return self._decision(
-                "deny",
-                f"Tool '{tool_name}' default permission is deny.",
-                tool_name=tool_name,
-                matched_rule="tool.default_permission.deny",
-                context=context,
-                metadata=metadata,
-            )
-
-        if default_permission == self._enum_value(DefaultPermission.ASK):
-            return self._decision(
-                "ask",
-                f"Tool '{tool_name}' requires approval before execution.",
-                tool_name=tool_name,
-                matched_rule="tool.default_permission.ask",
-                requires_approval=True,
-                context=context,
-                metadata=metadata,
-            )
-
-        if tool_name in self.config.tools.ask:
-            return self._decision(
-                "ask",
-                f"Tool '{tool_name}' requires approval by policy config.",
-                tool_name=tool_name,
-                matched_rule=f"tool.ask.{tool_name}",
-                requires_approval=True,
-                context=context,
-                metadata=metadata,
-            )
-
-        if tool_name in self.config.tools.allow:
-            return self._decision(
-                "allow",
-                f"Tool '{tool_name}' is allowed by policy config.",
-                tool_name=tool_name,
-                matched_rule=f"tool.allow.{tool_name}",
-                context=context,
-                metadata=metadata,
-            )
-
-        if default_permission == self._enum_value(DefaultPermission.ALLOW):
-            return self._decision(
-                "allow",
-                f"Tool '{tool_name}' default permission is allow.",
-                tool_name=tool_name,
-                matched_rule="tool.default_permission.allow",
-                context=context,
-                metadata=metadata,
-            )
-
-        return self._decision(
-            "ask",
-            f"Tool '{tool_name}' has no explicit policy match and requires approval by default.",
+        effect = self.effect_classifier.classify(tool_name=tool_name, arguments=arguments, spec=spec)
+        effect_metadata = {
+            **metadata,
+            "external_impact": effect.external_impact.value,
+            "reversibility": effect.reversibility.value,
+            "effect_reason": effect.reason,
+        }
+        return self._decide_effect(
             tool_name=tool_name,
-            matched_rule="tool.fallback.ask",
-            requires_approval=True,
+            effect=effect,
             context=context,
-            metadata=metadata,
+            metadata=effect_metadata,
+        )
+
+    def _check_agent_boundary(self, *, tool_name: str, context: PolicyContext) -> PolicyDecision | None:
+        allowed_tools = context.metadata.get("allowed_tools")
+        if allowed_tools is None:
+            return None
+        if not isinstance(allowed_tools, (list, tuple, set)) or not all(isinstance(item, str) for item in allowed_tools):
+            return self._decision(
+                "deny",
+                "Invalid allowed_tools policy metadata.",
+                tool_name=tool_name,
+                matched_rule="agent.profile.allowed_tools.invalid",
+                context=context,
+                metadata={"known_tool": self._find_tool_spec(tool_name) is not None},
+            )
+        if tool_name in allowed_tools:
+            return None
+        return self._decision(
+            "deny",
+            f"Tool '{tool_name}' is not allowed for the current agent profile.",
+            tool_name=tool_name,
+            matched_rule="agent.profile.tool.deny",
+            context=context,
+            metadata={"known_tool": self._find_tool_spec(tool_name) is not None},
         )
 
     @staticmethod
@@ -208,24 +134,13 @@ class PolicyChecker:
         metadata = {
             "risk": self._enum_value(spec.risk),
             "side_effect": self._enum_value(spec.side_effect),
-            "default_permission": self._enum_value(spec.default_permission),
             "policy_mode": context.mode,
-            "approved": context.approved,
             "interactive": context.interactive,
+            "external_impact": self._enum_value(spec.external_impact),
+            "reversibility": self._enum_value(spec.reversibility),
         }
         metadata.update(spec.metadata or {})
         return metadata
-
-    def _extract_command_values(self, arguments: dict[str, Any]) -> list[tuple[str, str]]:
-        command_values: list[tuple[str, str]] = []
-        for field in ("command", "cmd", "shell"):
-            value = arguments.get(field)
-            if isinstance(value, str) and value.strip():
-                command_values.append((field, value))
-                continue
-            if isinstance(value, list) and all(isinstance(item, str) for item in value):
-                command_values.append((field, " ".join(value)))
-        return command_values
 
     def _decision(
         self,
@@ -240,7 +155,6 @@ class PolicyChecker:
     ) -> PolicyDecision:
         merged_metadata = dict(metadata or {})
         merged_metadata.setdefault("policy_mode", context.mode)
-        merged_metadata.setdefault("approved", context.approved)
         merged_metadata.setdefault("requires_approval", requires_approval)
         return PolicyDecision(
             decision=cast(PolicyDecisionValue, decision),
@@ -270,31 +184,22 @@ class PolicyChecker:
         return repo_path
 
     def _extract_target_paths(self, tool_name: str, arguments: dict[str, Any]) -> list[tuple[str, str]]:
-        path_fields = ("path", "file", "file_path", "target_path")
         paths: list[tuple[str, str]] = []
-        for field in path_fields:
+        for field in ("path", "file", "file_path", "target_path"):
             value = arguments.get(field)
             if isinstance(value, str) and value.strip():
                 paths.append((field, value))
         if tool_name == "apply_patch":
             patch = arguments.get("patch")
             if isinstance(patch, str) and patch.strip():
-                for touched_path in extract_paths_from_patch(patch):
-                    paths.append(("patch", touched_path))
+                paths.extend(("patch", path) for path in extract_paths_from_patch(patch))
         return paths
 
-    def _normalize_target_path(
-        self,
-        *,
-        repo_root: Path | None,
-        raw_path: str,
-    ) -> tuple[str | None, str | None]:
+    def _normalize_target_path(self, *, repo_root: Path | None, raw_path: str) -> tuple[str | None, str | None]:
         cleaned = raw_path.strip().replace("\\", "/")
         if not cleaned:
             return None, "empty target path"
-
         raw_path_obj = Path(cleaned).expanduser()
-
         if raw_path_obj.is_absolute():
             absolute = raw_path_obj.resolve()
             if repo_root is None:
@@ -304,7 +209,6 @@ class PolicyChecker:
             except ValueError:
                 return None, "absolute path outside repo root is denied"
             return relative.as_posix() or ".", None
-
         if repo_root is not None:
             absolute = (repo_root / raw_path_obj).resolve()
             try:
@@ -312,7 +216,6 @@ class PolicyChecker:
             except ValueError:
                 return None, "relative path escaping repo root is denied"
             return relative.as_posix() or ".", None
-
         normalized = raw_path_obj.as_posix()
         while normalized.startswith("./"):
             normalized = normalized[2:]
@@ -350,9 +253,7 @@ class PolicyChecker:
         target_paths = self._extract_target_paths(tool_name, arguments)
         if tool_name == "apply_patch":
             patch = arguments.get("patch")
-            patch_is_non_empty = isinstance(patch, str) and bool(patch.strip())
-            has_patch_paths = any(field == "patch" for field, _ in target_paths)
-            if patch_is_non_empty and not has_patch_paths:
+            if isinstance(patch, str) and patch.strip() and not any(field == "patch" for field, _ in target_paths):
                 patch_metadata = dict(metadata)
                 patch_metadata.update({"patch_paths_extracted": 0, "path_field": "patch"})
                 return self._decision(
@@ -368,7 +269,6 @@ class PolicyChecker:
             normalized, error = self._normalize_target_path(repo_root=repo_root, raw_path=raw_path)
             path_metadata = dict(metadata)
             path_metadata.update({"path_field": field, "raw_path": raw_path, "normalized_path": normalized})
-
             if error is not None:
                 path_metadata["path_error"] = error
                 return self._decision(
@@ -379,7 +279,6 @@ class PolicyChecker:
                     context=context,
                     metadata=path_metadata,
                 )
-
             assert normalized is not None
             matched = self._match_any_glob(normalized, self.config.paths.deny)
             if matched is not None:
@@ -392,7 +291,6 @@ class PolicyChecker:
                     context=context,
                     metadata=path_metadata,
                 )
-
             if tool_name in STRUCTURED_WRITE_TOOLS and "write_scope" in context.metadata:
                 raw_scope = context.metadata["write_scope"]
                 if not isinstance(raw_scope, (list, tuple, set)) or not all(isinstance(item, str) for item in raw_scope):
@@ -418,40 +316,6 @@ class PolicyChecker:
                         metadata=path_metadata,
                     )
                 path_metadata["write_scope_rule"] = scope_match
-        return None
-
-    def _normalize_command(self, command: str) -> str:
-        return re.sub(r"\s+", " ", command.strip())
-
-    def _matches_command_prefix(self, command: str, prefixes: list[str]) -> str | None:
-        for prefix in prefixes:
-            normalized_prefix = self._normalize_command(prefix)
-            if command == normalized_prefix or command.startswith(normalized_prefix + " "):
-                return prefix
-        return None
-
-    def _matches_denied_command(self, command: str, denied_rules: list[str]) -> str | None:
-        padded_command = f" {command} "
-        for denied in denied_rules:
-            normalized_denied = self._normalize_command(denied)
-            if denied.endswith(" "):
-                token = normalized_denied
-                if command == token or command.startswith(token + " ") or f" {token} " in padded_command:
-                    return denied
-                continue
-            if normalized_denied in command:
-                return denied
-        return None
-
-    def _check_command(
-        self,
-        *,
-        tool_name: str,
-        arguments: dict[str, Any],
-        spec: ToolSpec,
-        context: PolicyContext,
-        metadata: dict[str, Any],
-    ) -> PolicyDecision | None:
         if tool_name == "git_diff" and arguments.get("include_content") is True and not arguments.get("path"):
             return self._decision(
                 "deny",
@@ -461,14 +325,72 @@ class PolicyChecker:
                 context=context,
                 metadata=dict(metadata),
             )
-        command_values = self._extract_command_values(arguments)
-        if tool_name not in COMMAND_TOOLS and self._enum_value(spec.side_effect) != self._enum_value(ToolSideEffect.LOCAL_EXEC) and not command_values:
-            return None
-        for field, raw_command in command_values:
+        return None
+
+    @staticmethod
+    def _normalize_command(command: str) -> str:
+        return re.sub(r"\s+", " ", command.strip())
+
+    def _extract_command_values(self, arguments: dict[str, Any]) -> list[tuple[str, str]]:
+        command_values: list[tuple[str, str]] = []
+        for field in ("command", "cmd", "shell"):
+            value = arguments.get(field)
+            if isinstance(value, str) and value.strip():
+                command_values.append((field, value))
+            elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+                command_values.append((field, " ".join(value)))
+        return command_values
+
+    @staticmethod
+    def _shell_segments(command: str) -> list[list[str]]:
+        try:
+            lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            return []
+
+        segments: list[list[str]] = []
+        current: list[str] = []
+        for token in tokens:
+            if token and all(char in ";&|" for char in token):
+                if current:
+                    segments.append(current)
+                    current = []
+                continue
+            current.append(token)
+        if current:
+            segments.append(current)
+        return segments
+
+    def _matches_hard_deny(self, command: str) -> str | None:
+        segments = self._shell_segments(command)
+        for pattern in self.config.commands.hard_deny_patterns:
+            try:
+                pattern_tokens = shlex.split(self._normalize_command(pattern))
+            except ValueError:
+                continue
+            if not pattern_tokens:
+                continue
+            for segment in segments:
+                candidate = segment[1:] if segment and segment[0] == "sudo" else segment
+                if candidate[: len(pattern_tokens)] == pattern_tokens:
+                    return pattern
+        return None
+
+    def _check_hard_deny_command(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        context: PolicyContext,
+        metadata: dict[str, Any],
+    ) -> PolicyDecision | None:
+        for field, raw_command in self._extract_command_values(arguments):
             normalized_command = self._normalize_command(raw_command)
             command_metadata = dict(metadata)
             command_metadata.update({"command_field": field, "raw_command": raw_command, "normalized_command": normalized_command})
-            if tool_name == "run_shell":
+            if tool_name in {"run_shell", "run_tests"}:
                 for token in PROTECTED_COMMAND_TOKENS:
                     if token in normalized_command:
                         command_metadata["command_rule"] = token
@@ -480,50 +402,79 @@ class PolicyChecker:
                             context=context,
                             metadata=command_metadata,
                         )
-
-            denied = self._matches_denied_command(normalized_command, self.config.commands.deny_substrings)
-            if denied is not None:
-                command_metadata["command_rule"] = denied
+            hard_deny = self._matches_hard_deny(normalized_command)
+            if hard_deny is not None:
+                command_metadata["command_rule"] = hard_deny
                 return self._decision(
                     "deny",
-                    f"Command is denied by policy rule '{denied}'.",
+                    f"Command is denied by hard safety rule '{hard_deny}'.",
                     tool_name=tool_name,
-                    matched_rule=f"command.deny_substrings.{denied}",
+                    matched_rule=f"command.hard_deny.{hard_deny}",
                     context=context,
                     metadata=command_metadata,
                 )
         return None
 
-    def _allow_safe_command_prefix(
+    def _decide_effect(
         self,
         *,
         tool_name: str,
-        arguments: dict[str, Any],
+        effect: ActionEffect,
         context: PolicyContext,
         metadata: dict[str, Any],
-    ) -> PolicyDecision | None:
-        if context.mode not in {"build", "danger"}:
-            return None
-        raw_command = arguments.get("command")
-        if not isinstance(raw_command, str):
-            return None
-        normalized_command = self._normalize_command(raw_command)
-        matched = self._matches_command_prefix(normalized_command, self.config.commands.allow_prefixes)
-        if matched is None:
-            return None
-        command_metadata = dict(metadata)
-        command_metadata.update(
-            {
-                "raw_command": raw_command,
-                "normalized_command": normalized_command,
-                "command_rule": matched,
-            }
-        )
+    ) -> PolicyDecision:
+        if context.mode == "read_only":
+            if effect.external_impact == ExternalImpact.WRITE:
+                return self._decision(
+                    "deny",
+                    f"read_only mode forbids state-changing external action '{tool_name}'.",
+                    tool_name=tool_name,
+                    matched_rule="mode.read_only.external_write.deny",
+                    context=context,
+                    metadata=metadata,
+                )
+            if effect.reversibility in {Reversibility.REVERSIBLE, Reversibility.IRREVERSIBLE} or (
+                effect.reversibility == Reversibility.UNKNOWN
+                and metadata.get("side_effect") == "local_write"
+            ):
+                return self._decision(
+                    "deny",
+                    f"read_only mode forbids state-changing action '{tool_name}'.",
+                    tool_name=tool_name,
+                    matched_rule="mode.read_only.mutation.deny",
+                    context=context,
+                    metadata=metadata,
+                )
+
+        if context.mode == "danger":
+            return self._decision(
+                "allow",
+                f"unsafe_auto allows '{tool_name}' after hard-boundary checks.",
+                tool_name=tool_name,
+                matched_rule="mode.danger.allow",
+                context=context,
+                metadata=metadata,
+            )
+
+        if effect.external_impact == ExternalImpact.NONE and effect.reversibility in {
+            Reversibility.NOT_APPLICABLE,
+            Reversibility.REVERSIBLE,
+        }:
+            return self._decision(
+                "allow",
+                f"'{tool_name}' stays local and is non-mutating or reversible.",
+                tool_name=tool_name,
+                matched_rule="effect.local_safe.allow",
+                context=context,
+                metadata=metadata,
+            )
+
         return self._decision(
-            "allow",
-            f"Command is allowed in {context.mode} mode by safe prefix '{matched}'.",
+            "ask",
+            f"'{tool_name}' may affect external state or cannot be safely reversed.",
             tool_name=tool_name,
-            matched_rule=f"command.allow_prefixes.{matched}",
+            matched_rule="effect.approval.ask",
+            requires_approval=True,
             context=context,
-            metadata=command_metadata,
+            metadata=metadata,
         )

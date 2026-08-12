@@ -224,7 +224,6 @@ def test_cli_issue_overwrite_removes_old_pr_assist_artifacts(tmp_path: Path) -> 
             str(repo),
             "--fake-responses",
             str(fixture),
-            "--approve",
             "--runs-dir",
             str(tmp_path / "runs"),
             "--run-id",

@@ -45,14 +45,14 @@ def test_router_run_tests_safe_command_executes_and_traces(tmp_path: Path) -> No
     assert events[1]["side_effect"] == "local_exec"
 
 
-def test_router_run_tests_read_only_denied_without_tool_call(tmp_path: Path) -> None:
+def test_router_run_tests_read_only_executes_without_tool_call_approval(tmp_path: Path) -> None:
     router = _router(_write_pytest_repo(tmp_path), PolicyContext(mode="read_only"))
 
     routed = router.route({"tool_name": "run_tests", "arguments": {"repo": tmp_path, "command": "pytest -q"}})
 
-    assert routed.success is False
+    assert routed.success is True
     lines = (tmp_path / "runs" / "run-test" / "trace.jsonl").read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision"]
+    assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision", "tool_call"]
 
 
 def test_router_run_tests_dangerous_command_denied_without_tool_call(tmp_path: Path) -> None:
@@ -114,5 +114,5 @@ def test_router_metadata_contains_policy_fields(tmp_path: Path) -> None:
 
     routed = router.route({"tool_name": "run_tests", "arguments": {"repo": tmp_path, "command": "python -m pytest -q"}})
 
-    for key in ("policy_decision", "policy_mode", "approved", "executed"):
+    for key in ("policy_decision", "policy_mode", "external_impact", "reversibility", "executed"):
         assert key in routed.metadata

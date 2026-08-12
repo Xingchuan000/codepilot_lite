@@ -39,7 +39,7 @@ def merge_config(
 ) -> TUIAgentConfig:
     project_config, warnings = load_project_config(project)
     permission_mode = cli_permission_mode or project_config.get("permission_mode") or "manual"
-    if permission_mode not in {"manual", "read_only", "accept_edits", "unsafe_auto"}:
+    if permission_mode not in {"manual", "read_only", "unsafe_auto"}:
         raise ValueError("invalid permission_mode")
     mcp_config = cli_mcp_config or project_config.get("mcp_config") or project.mcp_config_path
     if mcp_config is not None:

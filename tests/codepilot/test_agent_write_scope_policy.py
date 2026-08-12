@@ -8,7 +8,7 @@ from codepilot.tools.actions import ToolAction
 
 def test_structured_write_scope_allows_inside_and_denies_outside(tmp_path: Path) -> None:
     checker = PolicyChecker.default()
-    context = PolicyContext(repo=tmp_path, mode="build", approved=True, metadata={"write_scope": ["src/**"]})
+    context = PolicyContext(repo=tmp_path, mode="build", metadata={"write_scope": ["src/**"]})
 
     allowed = checker.check(
         ToolAction(tool_name="replace_range", arguments={"path": "src/app.py", "start_line": 1, "end_line": 1, "replacement": "pass"}),
@@ -26,7 +26,7 @@ def test_structured_write_scope_allows_inside_and_denies_outside(tmp_path: Path)
 
 def test_apply_patch_scope_is_all_or_nothing(tmp_path: Path) -> None:
     checker = PolicyChecker.default()
-    context = PolicyContext(repo=tmp_path, mode="build", approved=True, metadata={"write_scope": ["src/**"]})
+    context = PolicyContext(repo=tmp_path, mode="build", metadata={"write_scope": ["src/**"]})
     patch = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
 +++ b/src/app.py
@@ -49,7 +49,7 @@ diff --git a/README.md b/README.md
 
 def test_write_scope_does_not_make_shell_available() -> None:
     checker = PolicyChecker.default()
-    context = PolicyContext(mode="build", approved=True, metadata={"allowed_tools": ["replace_range"], "write_scope": ["src/**"]})
+    context = PolicyContext(mode="build", metadata={"allowed_tools": ["replace_range"], "write_scope": ["src/**"]})
 
     decision = checker.check(ToolAction(tool_name="run_shell", arguments={"command": "touch src/app.py"}), context=context)
 

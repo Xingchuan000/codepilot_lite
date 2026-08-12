@@ -57,7 +57,7 @@ class PermissionRepository:
             if connection.execute("SELECT 1 FROM permission_requests WHERE request_id = ?", (request.request_id,)).fetchone() is None:
                 connection.execute(
                     "INSERT INTO permission_requests(request_id, session_id, turn_id, attempt_id, tool_call_id, scope_key, tool_name, arguments_json, reason, status, created_at, metadata_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (request.request_id, request.session_id, request.turn_id, request.attempt_id, request.tool_call_id, request.scope_key, request.tool_name, json_dumps(request.arguments_preview), request.reason, request.status, request.created_at, json_dumps({"run_id": request.run_id, "action_id": request.action_id, "risk": request.risk, "side_effect": request.side_effect, "matched_rule": request.matched_rule, "scope_json": request.scope_json})),
+                    (request.request_id, request.session_id, request.turn_id, request.attempt_id, request.tool_call_id, request.scope_key, request.tool_name, json_dumps(request.arguments_preview), request.reason, request.status, request.created_at, json_dumps({"run_id": request.run_id, "action_id": request.action_id, "risk": request.risk, "side_effect": request.side_effect, "external_impact": request.external_impact, "reversibility": request.reversibility, "matched_rule": request.matched_rule, "scope_json": request.scope_json})),
                 )
             if request.tool_call_id is not None:
                 connection.execute("UPDATE tool_calls SET status = 'approval_pending', updated_at = ? WHERE tool_call_id = ?", (request.created_at, request.tool_call_id))

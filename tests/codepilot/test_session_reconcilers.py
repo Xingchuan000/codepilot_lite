@@ -9,8 +9,9 @@ from codepilot.session.reconcilers import (
     reconcile_apply_patch,
     reconcile_replace_range,
     reconcile_run_shell,
-    shell_command_is_read_only,
 )
+from codepilot.policy.effects import ActionEffect, classify_shell_command
+from codepilot.tools.base import ExternalImpact, Reversibility
 
 
 def _hash(value: bytes) -> str:
@@ -44,15 +45,13 @@ def test_apply_patch_reconciles_forward_reverse_and_unknown(tmp_path: Path) -> N
     assert reconcile_apply_patch({"patch": patch + "x"}, token).decision == RecoveryDecision.UNKNOWN
 
 
-def test_shell_recovery_uses_strict_allowlist_and_token(tmp_path: Path) -> None:
-    assert shell_command_is_read_only("git status") is True
-    assert shell_command_is_read_only("git diff --stat") is True
-    assert shell_command_is_read_only("git commit -m x") is False
-    assert shell_command_is_read_only("git checkout main") is False
-    assert shell_command_is_read_only("git reset --hard") is False
-    assert shell_command_is_read_only("git clean -fd") is False
-    assert shell_command_is_read_only("find . -delete") is False
-    assert shell_command_is_read_only("cat a | sh") is False
+def test_shell_recovery_uses_classified_effects(tmp_path: Path) -> None:
+    assert classify_shell_command("git status") == ActionEffect(ExternalImpact.NONE, Reversibility.NOT_APPLICABLE, "shell.git_read")
+    assert classify_shell_command("git diff --stat").external_impact == ExternalImpact.NONE
+    assert classify_shell_command("git commit -m x").reversibility == Reversibility.UNKNOWN
+    assert classify_shell_command("git reset --hard").reversibility == Reversibility.IRREVERSIBLE
+    assert classify_shell_command("find . -delete").external_impact == ExternalImpact.UNKNOWN
+    assert classify_shell_command("cat a | sh").external_impact == ExternalImpact.UNKNOWN
 
     command = "git status"
     token = {"command_sha256": _hash(command.encode("utf-8")), "auto_retry_allowed": True}

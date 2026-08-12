@@ -7,7 +7,8 @@ from codepilot.policy import PolicyChecker, PolicyContext
 from codepilot.router import ToolRouter
 from codepilot.router.runtime_tools import RuntimeToolRegistry
 from codepilot.tools.base import (
-    DefaultPermission,
+    ExternalImpact,
+    Reversibility,
     ToolIdempotency,
     ToolRecoveryStrategy,
     ToolResult,
@@ -23,7 +24,8 @@ def _spec(name: str = "runtime_echo") -> ToolSpec:
         description="Echo a runtime argument.",
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
-        default_permission=DefaultPermission.ALLOW,
+        external_impact=ExternalImpact.NONE,
+        reversibility=Reversibility.NOT_APPLICABLE,
         idempotency=ToolIdempotency.SAFE,
         recovery_strategy=ToolRecoveryStrategy.AUTO_RETRY,
         parameters={"value": "text"},
@@ -84,7 +86,7 @@ def test_router_resolves_runtime_spec_for_policy_lifecycle_and_trace(tmp_path: P
         runs_dir=tmp_path / "runs",
         run_id="runtime-test",
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(mode="build", approved=True),
+        policy_context=PolicyContext(mode="build"),
         runtime_tool_registry=registry,
         lifecycle_observer=lifecycle,
     )
@@ -116,7 +118,7 @@ def test_router_rejects_a_hidden_tool_even_when_the_model_guesses_its_name(tmp_p
         runs_dir=tmp_path / "runs",
         run_id="profile-boundary",
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(mode="build", approved=True),
+        policy_context=PolicyContext(mode="build"),
         allowed_tool_names={"read_file"},
     )
 

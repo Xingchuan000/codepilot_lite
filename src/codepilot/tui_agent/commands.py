@@ -101,13 +101,13 @@ def handle_command(
                 output="\n".join(
                     [
                         f"Permission mode: {permission_mode}",
-                        "manual 表示写操作和有风险的 shell/MCP 动作仍然需要确认。",
-                        "只读读取工具可以自动执行，不需要每次都弹确认。",
+                        "manual 会自动执行本地无外部影响且可撤销的动作。",
+                        "外部影响、不可撤销或无法确定副作用的动作才需要确认。",
                     ]
                 ),
             )
         mode = args[0]
-        if mode in {"manual", "read_only", "accept_edits", "unsafe_auto"}:
+        if mode in {"manual", "read_only", "unsafe_auto"}:
             return CommandResult(handled=True, output=f"Permission mode set to {mode}", permission_mode=mode)
         return CommandResult(handled=True, output=f"Unknown permission mode: {mode}")
     if command == "diff":

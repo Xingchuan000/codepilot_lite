@@ -9,7 +9,6 @@ def test_agent_run_with_fake_mcp_config() -> None:
         repo=".",
         fake_responses="examples/mcp/fake_responses_mcp_read_file.jsonl",
         mcp_config="examples/mcp/fake_filesystem_mcp.json",
-        approve=True,
         runs_dir="runs",
         run_id="mcp-agent-loop-test",
     )

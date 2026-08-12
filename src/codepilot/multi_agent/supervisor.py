@@ -569,7 +569,6 @@ class AgentSupervisor:
             context=PolicyContext(
                 repo=parent_repo,
                 mode="build",
-                approved=True,
                 metadata={"write_scope": list(scope)},
             ),
         )

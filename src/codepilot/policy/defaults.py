@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from codepilot.policy.config import CommandPolicyConfig, PathPolicyConfig, PolicyConfig, ToolPolicyConfig
+from codepilot.policy.config import CommandPolicyConfig, PathPolicyConfig, PolicyConfig
 from codepilot.repo.protected_paths import DEFAULT_REPO_PROTECTED_PATHS
 
 
@@ -8,41 +8,13 @@ def default_policy_config() -> PolicyConfig:
     """返回第五步使用的默认策略配置。"""
 
     return PolicyConfig(
-        tools=ToolPolicyConfig(
-            allow=["list_files", "read_file", "search_code", "git_status", "git_diff"],
-            ask=["run_shell", "apply_patch", "replace_range", "run_tests"],
-            deny=[],
-        ),
         paths=PathPolicyConfig(
-            allow=["**"],
             deny=[*DEFAULT_REPO_PROTECTED_PATHS],
         ),
         commands=CommandPolicyConfig(
-            allow_prefixes=[
-                "pytest",
-                "python -m pytest",
-                "ruff",
-                "mypy",
-                "npm test",
-                "npm run test",
-                "npm run lint",
-                "pnpm test",
-                "pnpm run test",
-                "yarn test",
-            ],
-            deny_substrings=[
-                "rm -rf",
-                "git push",
-                "git reset --hard",
-                "npm publish",
-                "curl ",
-                "wget ",
-                "ssh ",
-                "scp ",
-                "sudo ",
-                "sh -c",
-                "bash -c",
-                "chmod 777",
+            hard_deny_patterns=[
+                "rm -rf /",
+                "rm -rf ~",
             ],
         ),
     )

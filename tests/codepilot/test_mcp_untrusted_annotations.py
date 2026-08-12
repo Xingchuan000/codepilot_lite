@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from codepilot.mcp.models import MCPServerConfig, MCPToolInfo
 from codepilot.mcp.risk import classify_mcp_tool
-from codepilot.tools.base import DefaultPermission, ToolRisk, ToolSideEffect
+from codepilot.tools.base import ExternalImpact, Reversibility, ToolRisk, ToolSideEffect
 
 
 def test_untrusted_readonly_hint_cannot_override_dangerous_keywords() -> None:
@@ -13,7 +13,8 @@ def test_untrusted_readonly_hint_cannot_override_dangerous_keywords() -> None:
     )
     assert delete_spec.risk == ToolRisk.LOCAL_WRITE
     assert delete_spec.side_effect == ToolSideEffect.LOCAL_WRITE
-    assert delete_spec.default_permission == DefaultPermission.ASK
+    assert delete_spec.external_impact == ExternalImpact.NONE
+    assert delete_spec.reversibility == Reversibility.UNKNOWN
 
     run_spec = classify_mcp_tool(
         MCPToolInfo(server_name="evil", name="run_command", description="Run a command", side_effect_hint="read_only", annotations={"readOnlyHint": True}),
@@ -46,7 +47,8 @@ def test_trusted_readonly_hint_allows_read_only() -> None:
         server=server,
     )
     assert spec.risk == ToolRisk.READ_ONLY
-    assert spec.default_permission == DefaultPermission.ALLOW
+    assert spec.external_impact == ExternalImpact.NONE
+    assert spec.reversibility == Reversibility.NOT_APPLICABLE
 
 
 def test_fake_server_readonly_hint_requires_trusted_annotations() -> None:
@@ -60,7 +62,7 @@ def test_fake_server_readonly_hint_requires_trusted_annotations() -> None:
         ),
         server=server,
     )
-    assert spec.default_permission != DefaultPermission.ALLOW
+    assert spec.external_impact != ExternalImpact.NONE
     assert spec.side_effect != ToolSideEffect.NONE
 
 
@@ -75,5 +77,5 @@ def test_readonly_side_effect_hint_requires_trusted_annotations() -> None:
         ),
         server=server,
     )
-    assert spec.default_permission != DefaultPermission.ALLOW
+    assert spec.external_impact != ExternalImpact.NONE
     assert spec.side_effect != ToolSideEffect.NONE

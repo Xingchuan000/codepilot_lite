@@ -139,7 +139,7 @@ def tui(
     project: str | None = typer.Argument(None, help="Project directory. Defaults to cwd."),
     model: str | None = typer.Option(None, "--model"),
     model_config: list[str] = typer.Option([], "--model-config"),
-    permission_mode: Literal["manual", "read_only", "accept_edits", "unsafe_auto"] | None = typer.Option(None, "--permission-mode"),
+    permission_mode: Literal["manual", "read_only", "unsafe_auto"] | None = typer.Option(None, "--permission-mode"),
     mcp_config: str | None = typer.Option(None, "--mcp-config"),
     fake_responses: str | None = typer.Option(None, "--fake-responses"),
     max_steps: int | None = typer.Option(None, "--max-steps"),
@@ -187,7 +187,7 @@ def tool(
     if spec is not None and spec.side_effect != ToolSideEffect.NONE and not unsafe_direct:
         typer.echo(
             "Direct tool execution is disabled for tools with side effects. "
-            "Use `codepilot route ... --approve` or pass --unsafe-direct for debugging.",
+            "Use `codepilot route ...` or pass --unsafe-direct for debugging.",
             err=True,
         )
         raise typer.Exit(1)
@@ -219,7 +219,6 @@ def route(
         "--policy-mode",
         help="Policy mode.",
     ),
-    approve: bool = typer.Option(False, "--approve", help="Approve actions that require approval."),
 ) -> None:
     """通过 ToolRouter 路由一个结构化工具 action。"""
 
@@ -235,7 +234,7 @@ def route(
             run_id=run_id,
             output_preview_chars=output_preview_chars,
             policy_checker=PolicyChecker.default() if policy else None,
-            policy_context=PolicyContext(mode=policy_mode, approved=approve, interactive=False),
+            policy_context=PolicyContext(mode=policy_mode, interactive=False),
         ).route(action_data)
     except ValidationError as exc:
         typer.echo(f"ToolAction 校验失败: {exc}", err=True)
@@ -250,7 +249,7 @@ def tools() -> None:
     """列出当前注册的工具。"""
 
     for spec in list_tool_specs():
-        typer.echo(f"{spec.name}\t{spec.risk.value}\t{spec.default_permission.value}")
+        typer.echo(f"{spec.name}\t{spec.risk.value}\t{spec.side_effect.value}\t{spec.external_impact.value}\t{spec.reversibility.value}")
 
 
 @app.command("mcp-tools")
@@ -274,7 +273,8 @@ def mcp_tools(
                 "original_tool": binding.mcp_tool_name,
                 "risk": spec.risk.value if spec else None,
                 "side_effect": spec.side_effect.value if spec else None,
-                "default_permission": spec.default_permission.value if spec else None,
+                "external_impact": spec.external_impact.value if spec else None,
+                "reversibility": spec.reversibility.value if spec else None,
                 "status": binding.status,
                 "exposed_to_agent": binding.exposed_to_agent,
                 "reason": binding.reason,
@@ -290,7 +290,7 @@ def mcp_tools(
 
     for row in rows:
         typer.echo(
-            f"{row['name']}\t{row['risk']}\t{row['side_effect']}\t{row['default_permission']}\t{row['status']}\t"
+            f"{row['name']}\t{row['risk']}\t{row['side_effect']}\t{row['external_impact']}\t{row['reversibility']}\t{row['status']}\t"
             f"exposed={'true' if row['exposed_to_agent'] else 'false'}\treason={row['reason'] or ''}"
         )
 
@@ -305,7 +305,6 @@ def mcp_call(
     policy: bool = typer.Option(True, "--policy/--no-policy"),
     unsafe_no_policy: bool = typer.Option(False, "--unsafe-no-policy"),
     policy_mode: Literal["read_only", "build", "danger"] = typer.Option("build", "--policy-mode"),
-    approve: bool = typer.Option(False, "--approve"),
     output_preview_chars: int = typer.Option(1000, "--output-preview-chars"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
@@ -368,7 +367,7 @@ def mcp_call(
         run_id=run_id,
         output_preview_chars=output_preview_chars,
         policy_checker=PolicyChecker.default(extra_tool_specs={item.name: item for item in registry.list_specs()}),
-        policy_context=PolicyContext(mode=policy_mode, approved=approve, interactive=False),
+        policy_context=PolicyContext(mode=policy_mode, interactive=False),
         external_tool_registry=registry,
     )
     routed = router.route(ToolAction(tool_name=tool_name, arguments=args))
@@ -525,7 +524,6 @@ def agent_run(
     repo: str = typer.Option(".", "--repo", help="Repository path."),
     max_steps: int = typer.Option(12, "--max-steps", help="Maximum LLM loop steps."),
     policy_mode: Literal["read_only", "build", "danger"] = typer.Option("build", "--policy-mode"),
-    approve: bool = typer.Option(False, "--approve", help="Approve ask tools."),
     fake_responses: str | None = typer.Option(None, "--fake-responses", help="JSONL structured LLM responses."),
     model: str | None = typer.Option(
         None,
@@ -548,7 +546,6 @@ def agent_run(
         repo=repo,
         max_steps=max_steps,
         policy_mode=policy_mode,
-        approve=approve,
         fake_responses=fake_responses,
         model=model,
         model_config=model_config,
@@ -579,7 +576,6 @@ def issue_command(
     run_id: str | None = typer.Option(None, "--run-id", help="Run id under --runs-dir."),
     runs_dir: str = typer.Option("runs", "--runs-dir", help="Directory for run artifacts."),
     policy_mode: Literal["read_only", "build", "danger"] = typer.Option("build", "--policy-mode"),
-    approve: bool = typer.Option(False, "--approve", help="Approve ask tools."),
     fake_responses: str | None = typer.Option(None, "--fake-responses", help="JSONL structured LLM responses."),
     max_steps: int | None = typer.Option(None, "--max-steps", help="Maximum LLM loop steps."),
     report: bool = typer.Option(True, "--report/--no-report", help="Generate report.md."),
@@ -631,7 +627,6 @@ def issue_command(
             run_id=run_id,
             runs_dir=runs_dir,
             policy_mode=policy_mode,
-            approve=approve,
             fake_responses=fake_responses,
             max_steps=max_steps,
             generate_report_markdown=report,

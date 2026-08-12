@@ -43,9 +43,9 @@ def test_set_permission_mode_switches_broker_and_persists_session(tmp_path: Path
         ),
     )
 
-    runner.set_permission_mode("accept_edits")
-    assert runner.config.permission_mode == "accept_edits"
-    assert runner.permission_broker.inner.__class__.__name__ == "AutoApproveLocalWriteBroker"
+    runner.set_permission_mode("unsafe_auto")
+    assert runner.config.permission_mode == "unsafe_auto"
+    assert runner.permission_broker.inner.__class__.__name__ == "BlockingTUIBroker"
     runner.set_permission_mode("read_only")
     assert runner.config.permission_mode == "read_only"
     assert runner.permission_broker.inner.__class__.__name__ == "BlockingTUIBroker"

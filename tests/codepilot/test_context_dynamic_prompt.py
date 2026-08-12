@@ -11,7 +11,7 @@ from codepilot.session.context import ContextAssembler
 from codepilot.session.database import SessionDatabase
 from codepilot.session.model_context import ModelContextProfile
 from codepilot.session.repositories import SessionRepositories
-from codepilot.tools.base import DefaultPermission, ToolRisk, ToolSideEffect, ToolSpec
+from codepilot.tools.base import ExternalImpact, Reversibility, ToolRisk, ToolSideEffect, ToolSpec
 
 
 def _runtime_spec() -> ToolSpec:
@@ -20,7 +20,8 @@ def _runtime_spec() -> ToolSpec:
         description="Spawn a child agent.",
         risk=ToolRisk.LOCAL_EXECUTION,
         side_effect=ToolSideEffect.LOCAL_EXEC,
-        default_permission=DefaultPermission.ALLOW,
+        external_impact=ExternalImpact.NONE,
+        reversibility=Reversibility.REVERSIBLE,
         parameters={"task": "delegated task"},
     )
 
@@ -112,9 +113,9 @@ def test_child_prompt_without_spawn_agent_omits_primary_agent_control_guidance()
         description="Read a file.",
         risk=ToolRisk.READ_ONLY,
         side_effect=ToolSideEffect.NONE,
-        default_permission=DefaultPermission.ALLOW,
+        external_impact=ExternalImpact.NONE,
+        reversibility=Reversibility.NOT_APPLICABLE,
         parameters={"path": "relative file path"},
     )
     prompt = build_system_prompt(tool_specs=(read_only,), agent_instructions="delegated role")
     assert prompt == build_system_prompt(agent_instructions="delegated role")
-

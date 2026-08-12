@@ -8,7 +8,7 @@ from codepilot.common.serialization import to_jsonable
 from codepilot.permissions import PermissionRequest
 
 
-PermissionMode = Literal["manual", "read_only", "accept_edits", "unsafe_auto"]
+PermissionMode = Literal["manual", "read_only", "unsafe_auto"]
 RunStatus = Literal[
     "idle",
     "running",

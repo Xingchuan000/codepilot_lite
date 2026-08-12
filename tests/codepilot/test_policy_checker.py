@@ -45,7 +45,7 @@ def test_policy_checker_denies_paths_outside_repo(tmp_path: Path) -> None:
     assert _decision("read_file", {"repo": tmp_path, "path": str(outside_path)}).denied is True
 
 
-def test_policy_checker_allows_safe_shell_prefixes_in_build_mode(tmp_path: Path) -> None:
+def test_policy_checker_allows_safe_shell_actions_in_build_mode(tmp_path: Path) -> None:
     context = PolicyContext(mode="build")
 
     assert _decision("run_shell", {"repo": tmp_path, "command": "pytest tests/codepilot -q"}, context=context).allowed
@@ -53,18 +53,23 @@ def test_policy_checker_allows_safe_shell_prefixes_in_build_mode(tmp_path: Path)
     assert _decision("run_tests", {"repo": tmp_path, "command": "pytest -q"}, context=context).allowed
 
 
-def test_policy_checker_denies_dangerous_shell_commands(tmp_path: Path) -> None:
-    assert _decision("run_shell", {"repo": tmp_path, "command": "rm -rf ."}).denied is True
-    assert _decision("run_shell", {"repo": tmp_path, "command": "  git   push origin main"}).denied is True
+def test_policy_checker_hard_denies_only_boundary_commands(tmp_path: Path) -> None:
+    assert _decision("run_shell", {"repo": tmp_path, "command": "rm -rf /"}).denied is True
+    assert _decision("run_shell", {"repo": tmp_path, "command": "rm -rf /; echo done"}).denied is True
+    assert _decision("run_shell", {"repo": tmp_path, "command": "rm -rf /tmp/codepilot-cache"}).asks is True
+    assert _decision("run_shell", {"repo": tmp_path, "command": 'echo "rm -rf /"'}).asks is True
+    assert _decision("run_shell", {"repo": tmp_path, "command": "rm -rf ."}).asks is True
+    assert _decision("run_shell", {"repo": tmp_path, "command": "  git   push origin main"}).asks is True
     assert _decision("run_shell", {"repo": tmp_path, "command": "printf SECRET=1 > .env"}).denied is True
     assert _decision("run_shell", {"repo": tmp_path, "command": "cat .github/workflows/ci.yml"}).denied is True
     assert _decision(
         "run_shell",
         {"repo": tmp_path, "command": "printf SECRET=1 > .env"},
-        context=PolicyContext(mode="build", approved=True),
+        context=PolicyContext(mode="build"),
     ).denied is True
-    assert _decision("run_tests", {"repo": tmp_path, "command": "rm -rf ."}).denied is True
-    assert _decision("run_tests", {"repo": tmp_path, "command": "curl http://example.com"}).denied is True
+    assert _decision("run_tests", {"repo": tmp_path, "command": "rm -rf /"}).denied is True
+    assert _decision("run_tests", {"repo": tmp_path, "command": "curl http://example.com"}).asks is True
+    assert _decision("run_tests", {"repo": tmp_path, "command": "cat .env"}).denied is True
 
 
 def test_policy_checker_asks_for_unspecified_shell_commands(tmp_path: Path) -> None:
@@ -74,18 +79,22 @@ def test_policy_checker_asks_for_unspecified_shell_commands(tmp_path: Path) -> N
     assert _decision("run_tests", {"repo": tmp_path, "command": "echo hi"}).asks is True
 
 
-def test_policy_checker_denies_shell_in_read_only_mode(tmp_path: Path) -> None:
+def test_policy_checker_allows_local_verification_in_read_only_mode(tmp_path: Path) -> None:
     decision = _decision("run_shell", {"repo": tmp_path, "command": "pytest tests/codepilot -q"}, context=PolicyContext(mode="read_only"))
 
-    assert decision.denied is True
-    assert decision.matched_rule == "mode.read_only.side_effect.deny"
+    assert decision.allowed is True
 
 
-def test_policy_checker_denies_run_tests_in_read_only_mode(tmp_path: Path) -> None:
+def test_policy_checker_allows_run_tests_in_read_only_mode(tmp_path: Path) -> None:
     decision = _decision("run_tests", {"repo": tmp_path, "command": "pytest -q"}, context=PolicyContext(mode="read_only"))
 
-    assert decision.denied is True
-    assert decision.matched_rule == "mode.read_only.side_effect.deny"
+    assert decision.allowed is True
+
+
+def test_policy_checker_asks_for_unknown_shell_in_read_only_mode(tmp_path: Path) -> None:
+    decision = _decision("run_shell", {"repo": tmp_path, "command": "echo hi"}, context=PolicyContext(mode="read_only"))
+
+    assert decision.asks is True
 
 
 def test_policy_checker_denies_git_diff_sensitive_or_unscoped_content(tmp_path: Path) -> None:
@@ -107,7 +116,6 @@ def test_policy_checker_enforces_general_write_scope_at_edit_boundary(tmp_path: 
     context = PolicyContext(
         repo=tmp_path,
         mode="build",
-        approved=True,
         metadata={"write_scope": ["src/**"]},
     )
 
@@ -132,7 +140,7 @@ def test_policy_checker_denies_structured_writes_without_a_scope(tmp_path: Path)
             "repo": tmp_path,
             "patch": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@ -1 +1 @@\n-old\n+new\n",
         },
-        context=PolicyContext(repo=tmp_path, mode="build", approved=True, metadata={"write_scope": []}),
+        context=PolicyContext(repo=tmp_path, mode="build", metadata={"write_scope": []}),
     )
 
     assert decision.denied

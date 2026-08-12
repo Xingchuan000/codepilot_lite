@@ -72,7 +72,6 @@ def test_cli_warn_can_continue_and_prints_manifest_and_restore_plan(tmp_path: Pa
             "warn",
             "--fake-responses",
             str(fixture),
-            "--approve",
             "--overwrite",
         ],
     )
@@ -104,7 +103,6 @@ def test_cli_worktree_outputs_enabled_and_preserves_original_repo(tmp_path: Path
             str(tmp_path / "worktrees"),
             "--fake-responses",
             str(fixture),
-            "--approve",
             "--overwrite",
         ],
     )
@@ -188,7 +186,6 @@ def test_cli_artifacts_do_not_contain_secret_token(tmp_path: Path, monkeypatch) 
             "issue-secret",
             "--fake-responses",
             str(fixture),
-            "--approve",
             "--overwrite",
         ],
     )
@@ -217,7 +214,6 @@ def test_cli_redact_absolute_paths_hides_paths_in_summary_and_restore_plan(tmp_p
             "issue-redacted",
             "--fake-responses",
             str(fixture),
-            "--approve",
             "--redact-absolute-paths",
             "--overwrite",
         ],
@@ -264,7 +260,8 @@ def test_cli_protected_after_path_denied_exits_non_zero(tmp_path: Path) -> None:
             "issue-protected-after",
             "--fake-responses",
             str(fake_responses),
-            "--approve",
+            "--policy-mode",
+            "danger",
             "--overwrite",
         ],
     )

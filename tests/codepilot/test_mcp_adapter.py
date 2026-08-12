@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from codepilot.mcp.adapter import mcp_result_to_tool_result
 from codepilot.mcp.models import MCPCallResult, MCPServerConfig, MCPToolInfo
-from codepilot.tools.base import DefaultPermission, ToolResult, ToolRisk, ToolSideEffect, ToolSpec
+from codepilot.tools.base import ExternalImpact, Reversibility, ToolResult, ToolRisk, ToolSideEffect, ToolSpec
 from codepilot.tools.registry import call_external_tool_traced
 from codepilot.trace.logger import TraceLogger
 
@@ -14,7 +14,8 @@ class _FakeRegistry:
             description="Read fake files.",
             risk=ToolRisk.READ_ONLY,
             side_effect=ToolSideEffect.NONE,
-            default_permission=DefaultPermission.ALLOW,
+            external_impact=ExternalImpact.NONE,
+            reversibility=Reversibility.NOT_APPLICABLE,
             metadata={"descriptor_hash": "abc", "source": "mcp"},
         )
 

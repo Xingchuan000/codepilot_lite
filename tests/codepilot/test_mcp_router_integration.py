@@ -16,7 +16,7 @@ def test_router_executes_mcp_tools_and_respects_policy(tmp_path) -> None:
         runs_dir=tmp_path / "runs",
         run_id="mcp-router",
         policy_checker=PolicyChecker.default(extra_tool_specs={spec.name: spec for spec in registry.list_specs()}),
-        policy_context=PolicyContext(mode="build", approved=False),
+        policy_context=PolicyContext(mode="build"),
         external_tool_registry=registry,
     )
 
@@ -27,7 +27,7 @@ def test_router_executes_mcp_tools_and_respects_policy(tmp_path) -> None:
         runs_dir=tmp_path / "runs2",
         run_id="mcp-router-approved",
         policy_checker=PolicyChecker.default(extra_tool_specs={spec.name: spec for spec in registry.list_specs()}),
-        policy_context=PolicyContext(mode="build", approved=True),
+        policy_context=PolicyContext(mode="danger"),
         external_tool_registry=registry,
     ).route(ToolAction(tool_name="mcp.filesystem.write_file", arguments={"path": "demo.txt", "content": "hello"}))
 

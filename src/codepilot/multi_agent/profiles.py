@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from codepilot.multi_agent.models import AgentProfile, AgentType
-from codepilot.tools.base import DefaultPermission, ToolSideEffect, ToolSpec
+from codepilot.tools.base import ExternalImpact, Reversibility, ToolSpec
 
 GENERAL_PROFILE = AgentProfile(
     name="general",
@@ -74,6 +74,6 @@ def filter_scout_mcp_specs(specs: Sequence[ToolSpec]) -> tuple[ToolSpec, ...]:
     return tuple(
         spec
         for spec in specs
-        if spec.side_effect in {ToolSideEffect.NONE, ToolSideEffect.NETWORK}
-        and spec.default_permission != DefaultPermission.DENY
+        if spec.external_impact in {ExternalImpact.NONE, ExternalImpact.READ}
+        and spec.reversibility == Reversibility.NOT_APPLICABLE
     )

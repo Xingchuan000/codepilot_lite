@@ -27,7 +27,9 @@ def test_permission_request_trace_event_is_normalized() -> None:
             "arguments_preview": {"path": "demo.py"},
             "risk": "local_write",
             "side_effect": "local_write",
-            "matched_rule": "tool.default_permission.ask",
+            "external_impact": "none",
+            "reversibility": "unknown",
+            "matched_rule": "effect.approval.ask",
         },
     )
 
@@ -185,4 +187,3 @@ def test_long_natural_reply_survives_trace_preview_pipeline(tmp_path: Path) -> N
     assert view.transcript[0].body == text
     assert "... truncated" not in view.transcript[0].body
     assert len(view.transcript[0].body) == len(text)
-

@@ -136,7 +136,6 @@ def test_scout_keeps_network_capable_policy_when_parent_is_read_only(tmp_path: P
     explore = _policy_context_for_agent("manual", tmp_path, EXPLORE_PROFILE)
 
     assert scout.mode == "build"
-    assert scout.approved is False
     assert explore.mode == "read_only"
 
 
@@ -178,4 +177,3 @@ def test_abort_child_permission_routes_by_request_session_id(tmp_path: Path) -> 
     assert request.status == "denied"
     assert response is not None
     assert response.decision == "deny"
-

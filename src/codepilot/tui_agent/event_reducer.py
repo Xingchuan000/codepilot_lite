@@ -211,6 +211,8 @@ def _reduce_permission_requested(view: AgentRunView, event: TUIEvent) -> AgentRu
         reason=str(event.payload.get("reason") or ""),
         risk=event.payload.get("risk") if isinstance(event.payload.get("risk"), str) else None,
         side_effect=event.payload.get("side_effect") if isinstance(event.payload.get("side_effect"), str) else None,
+        external_impact=event.payload.get("external_impact") if isinstance(event.payload.get("external_impact"), str) else None,
+        reversibility=event.payload.get("reversibility") if isinstance(event.payload.get("reversibility"), str) else None,
         matched_rule=event.payload.get("matched_rule") if isinstance(event.payload.get("matched_rule"), str) else None,
         created_at=str(event.payload.get("created_at") or event.timestamp),
         status="pending",

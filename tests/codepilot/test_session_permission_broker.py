@@ -35,7 +35,9 @@ def test_session_permission_broker_persists_request_response_grant_and_event(tmp
         reason="need approval",
         risk="local_write",
         side_effect="local_write",
-        matched_rule="tool.default_permission.ask",
+        external_impact="none",
+        reversibility="reversible",
+        matched_rule="effect.approval.ask",
         created_at="2024-01-01T00:00:00Z",
         session_id=session.session_id,
         turn_id=turn.turn_id,
@@ -65,4 +67,3 @@ def test_session_permission_broker_persists_request_response_grant_and_event(tmp
         event_rows = connection.execute("SELECT event_type, payload_json FROM session_events WHERE session_id = ? ORDER BY sequence", (session.session_id,)).fetchall()
         assert [row["event_type"] for row in event_rows] == ["permission_pending", "permission_resolved"]
         assert json.loads(event_rows[-1]["payload_json"])["decision"] == "approve_session"
-

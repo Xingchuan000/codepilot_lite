@@ -20,6 +20,8 @@ class PermissionRequest:
     reason: str
     risk: str | None
     side_effect: str | None
+    external_impact: str | None
+    reversibility: str | None
     matched_rule: str | None
     created_at: str
     status: PermissionRequestStatus = "pending"

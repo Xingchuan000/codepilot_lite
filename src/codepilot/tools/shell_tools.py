@@ -1,6 +1,6 @@
 """Shell 执行工具。
 
-这是第二步里唯一的高风险工具，所以明确标成 ask 权限，不做任何额外兜底。
+Shell 动作的权限由 PolicyChecker 根据具体命令的外部影响和可撤销性决定。
 """
 
 from dataclasses import dataclass

@@ -51,7 +51,7 @@ def test_session_runtime_binds_explore_profile_to_prompt_and_router(tmp_path: Pa
         return ToolRouter(
             trace,
             policy_checker=PolicyChecker.default(),
-            policy_context=PolicyContext(repo=repo, mode="build", approved=True),
+            policy_context=PolicyContext(repo=repo, mode="build"),
         )
 
     runtime = SessionRuntime(database, llm, router_factory, boundary_resolver=MultiAgentBoundaryResolver(EXPLORE_PROFILE))
@@ -78,7 +78,7 @@ def test_session_runtime_general_writer_carries_write_scope_to_policy(tmp_path: 
         return ToolRouter(
             trace,
             policy_checker=PolicyChecker.default(),
-            policy_context=PolicyContext(repo=repo, mode="build", approved=True),
+            policy_context=PolicyContext(repo=repo, mode="build"),
         )
 
     runtime = SessionRuntime(
@@ -132,7 +132,7 @@ def test_session_runtime_injects_primary_agent_controls_as_runtime_tools(tmp_pat
         return ToolRouter(
             trace,
             policy_checker=PolicyChecker.default(),
-            policy_context=PolicyContext(repo=repo, mode="build", approved=True),
+            policy_context=PolicyContext(repo=repo, mode="build"),
         )
 
     def control_registry(context: RuntimeToolContext):
@@ -146,4 +146,3 @@ def test_session_runtime_injects_primary_agent_controls_as_runtime_tools(tmp_pat
     assert execution.result.status == "message_complete"
     assert "list_agents" in {spec.name for spec in llm.calls[0]["tools"]}
     assert '"agents": []' in (service.store.tool_executions.list_tool_results(session_id)[0].content or "")
-

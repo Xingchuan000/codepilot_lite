@@ -43,7 +43,7 @@ def test_tool_router_policy_denies_sensitive_paths_without_tool_call(tmp_path: P
 def test_tool_router_policy_denies_dangerous_commands_without_tool_call(tmp_path: Path) -> None:
     router = _router(tmp_path)
 
-    routed = router.route(ToolAction(tool_name="run_shell", arguments={"repo": tmp_path, "command": "rm -rf ."}))
+    routed = router.route(ToolAction(tool_name="run_shell", arguments={"repo": tmp_path, "command": "rm -rf /"}))
 
     assert routed.success is False
     lines = (tmp_path / "runs" / "run-test" / "trace.jsonl").read_text(encoding="utf-8").splitlines()
@@ -63,7 +63,23 @@ def test_tool_router_policy_requires_approval_when_not_approved(tmp_path: Path) 
 
 
 def test_tool_router_policy_executes_approved_ask_actions(tmp_path: Path) -> None:
-    router = _router(tmp_path, context=PolicyContext(mode="build", approved=True))
+    from codepilot.permissions import PermissionResponse
+    from codepilot.tui_agent.permission_broker import BlockingTUIBroker
+    from codepilot.trace.logger import TraceLogger
+
+    broker = BlockingTUIBroker()
+
+    def resolve(event) -> None:
+        if event.event_type == "permission_request":
+            broker.resolve(PermissionResponse(event.permission_request_id, "approve_once", "approved", event.timestamp))
+
+    logger = TraceLogger(runs_dir=tmp_path / "runs", run_id="run-test", record_hook=resolve)
+    router = ToolRouter(
+        trace_logger=logger,
+        policy_checker=PolicyChecker.default(),
+        policy_context=PolicyContext(mode="build", interactive=True),
+        permission_broker=broker,
+    )
 
     routed = router.route(ToolAction(tool_name="run_shell", arguments={"repo": tmp_path, "command": "echo hi"}))
 
@@ -71,7 +87,12 @@ def test_tool_router_policy_executes_approved_ask_actions(tmp_path: Path) -> Non
     assert routed.metadata["policy_decision"] == "ask"
     assert routed.metadata["approved"] is True
     lines = (tmp_path / "runs" / "run-test" / "trace.jsonl").read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line)["event_type"] for line in lines] == ["policy_decision", "tool_call"]
+    assert [json.loads(line)["event_type"] for line in lines] == [
+        "policy_decision",
+        "permission_request",
+        "permission_response",
+        "tool_call",
+    ]
 
 
 def test_tool_router_policy_route_many_keeps_step_order(tmp_path: Path) -> None:

@@ -6,12 +6,12 @@ from codepilot.router import ToolRouter
 from codepilot.tools.actions import ToolAction
 
 
-def _router(tmp_path: Path, *, approved: bool = False, mode: str = "build") -> ToolRouter:
+def _router(tmp_path: Path, *, mode: str = "build") -> ToolRouter:
     return ToolRouter.from_runs_dir(
         runs_dir=tmp_path / "runs",
         run_id="run-test",
         policy_checker=PolicyChecker.default(),
-        policy_context=PolicyContext(mode=mode, approved=approved),
+        policy_context=PolicyContext(mode=mode),
     )
 
 
@@ -20,7 +20,7 @@ def _event_types(tmp_path: Path) -> list[str]:
     return [json.loads(line)["event_type"] for line in lines]
 
 
-def test_replace_range_without_approval_does_not_write_file(tmp_path: Path) -> None:
+def test_replace_range_without_permission_request_writes_file(tmp_path: Path) -> None:
     (tmp_path / "demo.py").write_text("a\nb\n", encoding="utf-8")
     router = _router(tmp_path)
 
@@ -31,16 +31,16 @@ def test_replace_range_without_approval_does_not_write_file(tmp_path: Path) -> N
         )
     )
 
-    assert routed.success is False
-    assert routed.metadata["policy_decision"] == "ask"
-    assert routed.metadata["executed"] is False
-    assert (tmp_path / "demo.py").read_text(encoding="utf-8") == "a\nb\n"
-    assert _event_types(tmp_path) == ["policy_decision"]
+    assert routed.success is True
+    assert routed.metadata["policy_decision"] == "allow"
+    assert routed.metadata["executed"] is True
+    assert (tmp_path / "demo.py").read_text(encoding="utf-8") == "a\nx\n"
+    assert _event_types(tmp_path) == ["policy_decision", "tool_call"]
 
 
 def test_replace_range_with_approval_writes_file(tmp_path: Path) -> None:
     (tmp_path / "demo.py").write_text("a\nb\n", encoding="utf-8")
-    router = _router(tmp_path, approved=True)
+    router = _router(tmp_path)
 
     routed = router.route(
         ToolAction(
@@ -50,8 +50,7 @@ def test_replace_range_with_approval_writes_file(tmp_path: Path) -> None:
     )
 
     assert routed.success is True
-    assert routed.metadata["policy_decision"] == "ask"
-    assert routed.metadata["approved"] is True
+    assert routed.metadata["policy_decision"] == "allow"
     assert routed.metadata["executed"] is True
     assert (tmp_path / "demo.py").read_text(encoding="utf-8") == "a\nx\n"
     assert _event_types(tmp_path) == ["policy_decision", "tool_call"]
@@ -87,7 +86,7 @@ def test_replace_range_read_only_denied_without_tool_call(tmp_path: Path) -> Non
     assert _event_types(tmp_path) == ["policy_decision"]
 
 
-def test_apply_patch_without_approval_does_not_write_file(tmp_path: Path) -> None:
+def test_apply_patch_without_permission_request_applies_patch(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "demo.py").write_text("old\n", encoding="utf-8")
     router = _router(tmp_path)
@@ -102,16 +101,16 @@ def test_apply_patch_without_approval_does_not_write_file(tmp_path: Path) -> Non
         )
     )
 
-    assert routed.success is False
-    assert routed.metadata["policy_decision"] == "ask"
-    assert (tmp_path / "src" / "demo.py").read_text(encoding="utf-8") == "old\n"
-    assert _event_types(tmp_path) == ["policy_decision"]
+    assert routed.success is True
+    assert routed.metadata["policy_decision"] == "allow"
+    assert (tmp_path / "src" / "demo.py").read_text(encoding="utf-8") == "new\n"
+    assert _event_types(tmp_path) == ["policy_decision", "tool_call"]
 
 
 def test_apply_patch_with_approval_applies_patch(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "demo.py").write_text("old\n", encoding="utf-8")
-    router = _router(tmp_path, approved=True)
+    router = _router(tmp_path)
 
     routed = router.route(
         ToolAction(
@@ -131,7 +130,8 @@ def test_apply_patch_with_approval_applies_patch(tmp_path: Path) -> None:
     assert json.loads(lines[1])["tool_name"] == "apply_patch"
     assert json.loads(lines[1])["risk"] == "local_write"
     assert json.loads(lines[1])["side_effect"] == "local_write"
-    assert json.loads(lines[1])["default_permission"] == "ask"
+    assert json.loads(lines[1])["external_impact"] == "none"
+    assert json.loads(lines[1])["reversibility"] == "reversible"
     assert json.loads(lines[1])["metadata"]["touched_paths"] == ["src/demo.py"]
 
 
@@ -184,7 +184,7 @@ def test_apply_patch_read_only_denied_without_tool_call(tmp_path: Path) -> None:
 def test_policy_denies_replace_range_for_github_workflows_even_when_approved(tmp_path: Path) -> None:
     (tmp_path / ".github" / "workflows").mkdir(parents=True)
     (tmp_path / ".github" / "workflows" / "ci.yml").write_text("name: ci\n", encoding="utf-8")
-    router = _router(tmp_path, approved=True)
+    router = _router(tmp_path)
 
     routed = router.route(
         ToolAction(
@@ -207,7 +207,7 @@ def test_policy_denies_replace_range_for_github_workflows_even_when_approved(tmp
 
 def test_policy_denies_apply_patch_for_runs_directory(tmp_path: Path) -> None:
     (tmp_path / "runs").mkdir()
-    router = _router(tmp_path, approved=True)
+    router = _router(tmp_path)
 
     routed = router.route(
         ToolAction(

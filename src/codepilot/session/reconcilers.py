@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import shlex
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from codepilot.policy.effects import classify_shell_command
 
 
 class RecoveryDecision(str, Enum):
@@ -79,25 +79,12 @@ def reconcile_run_shell(arguments: dict[str, Any], recovery_token: dict[str, Any
     command = str(arguments["command"])
     if _sha256_bytes(command.encode("utf-8")) != recovery_token.get("command_sha256"):
         return ReconciliationResult(RecoveryDecision.UNKNOWN, "shell command does not match durable recovery token", {})
-    if recovery_token.get("auto_retry_allowed") is True:
+    effect = classify_shell_command(command)
+    if effect.external_impact.value == "none" and effect.reversibility.value == "not_applicable":
         return ReconciliationResult(RecoveryDecision.NOT_EXECUTED, "read-only shell command may be retried", {"command": command})
     return ReconciliationResult(RecoveryDecision.UNKNOWN, "shell command may have side effects", {"command": command})
 
 
-def shell_command_is_read_only(command: str) -> bool:
-    """严格识别可自动重试的只读 Shell；复合 shell 语法一律不自动重试。"""
-
-    if any(token in command for token in (">", "<", "|", ";", "&&", "||", "`", "$(", "\n", "\r")):
-        return False
-    try:
-        tokens = shlex.split(command)
-    except ValueError:
-        return False
-    if not tokens:
-        return False
-    if tokens[0] in {"pwd", "ls", "cat", "grep", "rg"}:
-        return True
-    return len(tokens) >= 2 and tokens[0] == "git" and tokens[1] in {"status", "diff", "log", "show"}
 
 
 def _sha256_bytes(value: bytes) -> str:

@@ -313,6 +313,8 @@ def _trace_fields(data: dict[str, Any]) -> dict[str, Any]:
         "policy_reason",
         "policy_rule",
         "policy_mode",
+        "external_impact",
+        "reversibility",
         "permission_request_id",
         "permission_decision",
         "metadata",

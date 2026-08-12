@@ -26,7 +26,8 @@ def test_control_registry_exposes_only_runtime_control_tools(tmp_path: Path) -> 
         "apply_agent_patch",
     }
     assert registry.find_spec("spawn_agent").parameters["agent_type"]
-    assert registry.find_spec("apply_agent_patch").default_permission.value == "ask"
+    assert registry.find_spec("apply_agent_patch").external_impact.value == "none"
+    assert registry.find_spec("apply_agent_patch").reversibility.value == "reversible"
 
 
 def test_control_registry_validates_arguments_as_structured_tool_result(tmp_path: Path) -> None:

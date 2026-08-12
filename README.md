@@ -539,8 +539,8 @@ codepilot route '{"tool_name":"list_files","arguments":{"repo":".","path":".","m
 codepilot tool list_files '{"repo":".","path":".","max_depth":2,"max_entries":200,"offset":0}'
 ```
 
-在 TUI 里，`/permissions` 仍然可以切换 `manual`、`read_only`、`accept_edits` 和 `unsafe_auto` 四种模式。
-其中 `accept_edits` 仍然会自动批准本地写入，但不会影响其他需要确认的动作。
+在 TUI 里，`/permissions` 可以切换 `manual`、`read_only` 和 `unsafe_auto` 三种模式。
+`manual` 会直接放行本地无外部影响且可撤销的动作；外部影响、不可撤销或无法确定副作用的动作才进入审批。
 
 ### Phase 3 运行结果快照使用说明
 

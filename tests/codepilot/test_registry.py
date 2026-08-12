@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from codepilot.tools.base import DefaultPermission, ToolRisk, ToolSideEffect
+from codepilot.tools.base import ExternalImpact, Reversibility, ToolRisk, ToolSideEffect
 from codepilot.tools.registry import TOOL_FUNCTIONS, TOOL_SPECS, call_tool, get_tool_spec, list_tool_specs
 
 
@@ -30,44 +30,49 @@ def test_registry_contains_expected_tools() -> None:
     assert len(list_tool_specs()) == 9
 
 
-def test_readonly_specs_are_allow() -> None:
+def test_readonly_specs_are_local_non_mutating() -> None:
     for name in ("list_files", "read_file", "search_code"):
         spec = get_tool_spec(name)
         assert spec.risk == ToolRisk.READ_ONLY
         assert spec.side_effect == ToolSideEffect.NONE
-        assert spec.default_permission == DefaultPermission.ALLOW
+        assert spec.external_impact == ExternalImpact.NONE
+        assert spec.reversibility == Reversibility.NOT_APPLICABLE
 
 
-def test_run_shell_spec_is_ask() -> None:
+def test_run_shell_spec_is_unknown() -> None:
     spec = get_tool_spec("run_shell")
 
     assert spec.risk == ToolRisk.SHELL_EXECUTION
     assert spec.side_effect == ToolSideEffect.LOCAL_EXEC
-    assert spec.default_permission == DefaultPermission.ASK
+    assert spec.external_impact == ExternalImpact.UNKNOWN
+    assert spec.reversibility == Reversibility.UNKNOWN
 
 
-def test_run_tests_spec_is_local_execution_ask() -> None:
+def test_run_tests_spec_is_local_non_mutating() -> None:
     spec = get_tool_spec("run_tests")
 
     assert spec.risk == ToolRisk.LOCAL_EXECUTION
     assert spec.side_effect == ToolSideEffect.LOCAL_EXEC
-    assert spec.default_permission == DefaultPermission.ASK
+    assert spec.external_impact == ExternalImpact.NONE
+    assert spec.reversibility == Reversibility.NOT_APPLICABLE
 
 
-def test_edit_tool_specs_are_local_write_ask() -> None:
+def test_edit_tool_specs_are_local_reversible() -> None:
     for name in ("apply_patch", "replace_range"):
         spec = get_tool_spec(name)
         assert spec.risk == ToolRisk.LOCAL_WRITE
         assert spec.side_effect == ToolSideEffect.LOCAL_WRITE
-        assert spec.default_permission == DefaultPermission.ASK
+        assert spec.external_impact == ExternalImpact.NONE
+        assert spec.reversibility == Reversibility.REVERSIBLE
 
 
-def test_git_tool_specs_are_read_only_allow() -> None:
+def test_git_tool_specs_are_local_non_mutating() -> None:
     for name in ("git_status", "git_diff"):
         spec = get_tool_spec(name)
         assert spec.risk == ToolRisk.READ_ONLY
         assert spec.side_effect == ToolSideEffect.NONE
-        assert spec.default_permission == DefaultPermission.ALLOW
+        assert spec.external_impact == ExternalImpact.NONE
+        assert spec.reversibility == Reversibility.NOT_APPLICABLE
 
 
 def test_tool_specs_include_parameters() -> None:
